@@ -1129,3 +1129,17 @@ async def test_legacy_duplicate_original_roles_keep_earliest_acquisition(history
         path = f'/api/activities/{first["activities"][0]["id"]}'
         original, = [s for s in (await client.get(path)).json()["sources"] if s["kind"].startswith("original")]
         assert original["kind"] == "original" and original["acquired_at"] == first_time
+
+def test_rejected_archive_directory_closes_its_descriptor(tmp_path, monkeypatch):
+    import errno
+    import os
+    import storage
+
+    fd = os.open(tmp_path, os.O_RDONLY)
+    monkeypatch.setattr(storage.os, "open", lambda *args: fd)
+    with pytest.raises(OSError):
+        with storage.private_file(tmp_path):
+            pytest.fail("A directory was accepted as an archive file")
+    with pytest.raises(OSError) as closed:
+        os.fstat(fd)
+    assert closed.value.errno == errno.EBADF

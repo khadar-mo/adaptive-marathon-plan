@@ -58,13 +58,16 @@ def local_id(value):
 @contextmanager
 def private_file(path):
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as stream:
+    try:
         mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
             raise OSError("Private storage needs a regular file")
         if mode & 0o077:
             os.fchmod(fd, mode & 0o600)
-        yield stream
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            yield stream
+    finally:
+        os.close(fd)
 
 
 class ArchivePermissionsError(OSError):
