@@ -71,6 +71,18 @@ def fit_owners(db, column, value):
                WHERE s.kind='original' AND m.{original_column}=?""", (value, value))}
 
 
+def recordings(db, payload):
+    """Return the inner byte identity of every original covered by this decision."""
+    fit = payload["fit"]
+    result = {fit["sha256"]: fit["identity"]} if fit else {}
+    for kind, outer, _ in payload["sources"]:
+        if kind == "original":
+            row = db.execute("SELECT fit_sha, identity FROM original_members WHERE original_sha=?", (outer,)).fetchone()
+            if row and row["fit_sha"]:
+                result[row["fit_sha"]] = row["identity"]
+    return result
+
+
 def garmin_owner(db, gid):
     return db.execute("""SELECT id FROM activities WHERE garmin_id=?
                          UNION SELECT activity_id FROM garmin_aliases WHERE garmin_id=?""", (gid, gid)).fetchone()
@@ -80,8 +92,9 @@ def identify(db, payload):
     fields, fit = payload["fields"], payload["fit"]
     gid = fields["garmin_id"]
     known = garmin_owner(db, gid)
-    hashes = fit_owners(db, "sha256", fit["sha256"]) if fit else set()
-    exact = hashes or (fit_owners(db, "identity", fit["identity"]) if fit else set())
+    files = recordings(db, payload)
+    hashes = {owner for sha in files for owner in fit_owners(db, "sha256", sha)}
+    exact = hashes or {owner for identity in files.values() for owner in fit_owners(db, "identity", identity)}
     candidates = exact | ({known["id"]} if known else set())
     if candidates:
         if len(candidates) == 1:
@@ -98,6 +111,16 @@ def identify(db, payload):
                      AND (? IS NULL OR garmin_id IS NULL)""",
                      ((start - tolerance).isoformat(), (start + tolerance).isoformat(), gid))}
     return None, candidates, hashes
+
+
+def review_choices(db, review):
+    choices = set(json.loads(review["candidates"]))
+    if review["kind"] == "match" and not review["resolution"]:
+        target, current, _ = identify(db, json.loads(review["payload"]))
+        choices.update(current)
+        if target is not None:
+            choices.add(target)
+    return sorted(choices)
 
 
 def merge_fields(fields, fallback):
@@ -163,14 +186,12 @@ def save(db, import_id, payload, target, acquired_at):
         if added.rowcount and kind != "list":
             changed = True
     if fit:
-        db.execute("""INSERT INTO fit_sources(sha256, identity, activity_id) VALUES (?, ?, ?)
-                      ON CONFLICT(sha256) DO NOTHING""", (fit["sha256"], fit["identity"], target))
+        for sha, identity in recordings(db, payload).items():
+            db.execute("""INSERT INTO fit_sources(sha256, identity, activity_id) VALUES (?, ?, ?)
+                          ON CONFLICT(sha256) DO NOTHING""", (sha, identity, target))
         authoritative = fields["garmin_id"] is not None and payload["fields"]["garmin_id"] == fields["garmin_id"]
         if fit["laps"] and (authoritative or not db.execute("SELECT 1 FROM laps WHERE activity_id=?", (target,)).fetchone()):
             store_laps(db, target, fit["laps"])
-        for kind, digest, _ in payload["sources"]:
-            if kind == "original":
-                db.execute("INSERT OR REPLACE INTO original_members VALUES (?, ?, ?)", (digest, fit["sha256"], fit["identity"]))
         db.execute("UPDATE fit_uploads SET activity_id=? WHERE import_id=? AND sha256=?", (target, import_id, fit["sha256"]))
     outcome = ("updated" if changed else "unchanged") if previous else "inserted"
     record_activity(db, import_id, target, outcome)
@@ -200,6 +221,11 @@ def apply_review(db, key, action, target, confirmed_date=None):
 
 def ingest(db, import_id, payload, acquired_at):
     fit, gid = payload["fit"], payload["fields"]["garmin_id"]
+    if fit:
+        # At this point the payload contains only this acquisition. Index its exact
+        # member before combining any older versions from a pending review.
+        db.executemany("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
+                       ((outer, fit["sha256"], fit["identity"]) for kind, outer, _ in payload["sources"] if kind == "original"))
     if payload["warning"]:
         db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
                       VALUES (?, 'warning', ?, 'Original download', ?)""", (import_id, payload["item"], payload["warning"]))
@@ -216,24 +242,31 @@ def ingest(db, import_id, payload, acquired_at):
         elif review and review["resolution"] and garmin_owner(db, gid):
             # The current alias can reflect a later, explicitly resolved original.
             review = None
-    if review and review["resolution"] and hashes and review["activity_id"] not in hashes:
-        # The provider changed a previously resolved ID to bytes owned by a different run.
-        key += ":" + fit["sha256"]
-        review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
+    if review and fit:
+        previous = json.loads(review["payload"])
+        previous_files = recordings(db, previous)
+        previous_owners = {owner for sha in previous_files for owner in fit_owners(db, "sha256", sha)}
+        if (review["resolution"] and hashes and review["activity_id"] not in hashes) or (
+                not review["resolution"] and previous_files and fit["sha256"] not in previous_files
+                and previous_owners != hashes):
+            # Two versions that implicate different byte owners need separate decisions.
+            key += ":" + fit["sha256"]
+            review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
     if review and review["resolution"]:
         target, candidates = review["activity_id"], set()
     elif review:
         previous = json.loads(review["payload"])
         # Keep the latest valid Garmin headlines and all their source versions.
         # A missing original leaves the earlier FIT and its pending choice intact.
-        prior_sources = [s for s in previous["sources"] if s[0] != "original" or not fit]
-        sources = list(dict.fromkeys(tuple(s) for s in [*prior_sources, *payload["sources"]]))
+        sources = list(dict.fromkeys(tuple(s) for s in [*previous["sources"], *payload["sources"]]))
         payload = {**payload, "sources": sources}
         if not fit:
-            candidates = set(json.loads(review["candidates"]))
             payload["fit"] = previous["fit"]
             if payload["fit"]:
                 payload["warning"] = None
+        target, candidates, _ = identify(db, payload)
+        if target is None or not fit:
+            candidates.update(json.loads(review["candidates"]))
     if candidates:
         remember_issue(db, import_id, key, "match", payload["item"], payload, candidates)
         return None
@@ -286,7 +319,7 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
                 and (local_date is None or local_date == row["local_date"])):
             return row["activity_id"]
         raise ResolutionError("This issue already has a resolution. Refresh the report.")
-    choices = json.loads(row["candidates"])
+    choices = review_choices(db, row)
     if row["kind"] == "date":
         if action != "set_local_date":
             raise ResolutionError("Confirm a local date for this activity.")

@@ -296,7 +296,7 @@ class Store:
 
     @staticmethod
     def review_rows(db, import_id=None):
-        rows = db.execute("""SELECT i.id, i.import_id, i.item, f.kind, f.candidates, f.resolution, f.activity_id, f.local_date
+        rows = db.execute("""SELECT i.id, i.import_id, i.item, f.kind, f.payload, f.candidates, f.resolution, f.activity_id, f.local_date
                              FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
                              JOIN fit_reviews f ON f.key=r.review_key
                              WHERE i.import_id=? OR (? IS NULL AND f.resolution IS NULL AND i.id=(
@@ -304,9 +304,12 @@ class Store:
                              ORDER BY i.id DESC""", (import_id, import_id))
         reviews = []
         for row in rows:
+            choices = fit_store.review_choices(db, row)
             candidates = [dict(c) for c in db.execute("""SELECT id, name, garmin_id, local_date, start_utc, distance_m
-                          FROM activities WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id""", (row["candidates"],))]
-            reviews.append({**dict(row), "candidates": candidates})
+                          FROM activities WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id""", (json.dumps(choices),))]
+            public = dict(row)
+            del public["payload"]
+            reviews.append({**public, "candidates": candidates})
         return reviews
 
     def pending(self):

@@ -377,3 +377,50 @@ async def test_weak_retry_preserves_newer_conflicting_original_and_owner(history
         assert (await client.get("/api/activities/1")).json()["garmin_id"] == "42"
         assert (await client.get("/api/activities/2")).json()["garmin_id"] == "52"
         assert (await client.get("/api/activities/3")).status_code == 404
+
+
+async def test_reencoded_pending_originals_share_the_resolved_activity(history):
+    first = make_fit(start=START + 20, serial=None, file_number=1)
+    second = make_fit(start=START + 20, serial=None, file_number=2)
+    async with server() as client:
+        await upload(client, ("early.fit", make_fit()))
+        history.original = zipped(first)
+        first_outer = digest(history.original)
+        old = await submit(client)
+        history.original = zipped(second)
+        second_outer = digest(history.original)
+        latest = await submit(client)
+        assert not old["activities"] and not latest["activities"]
+        choice = await resolve(client, latest, {"action": "keep_separate"})
+        assert choice.status_code == 200 and choice.json()["activity_id"] == 2
+        assert (await client.get(old["report_url"])).json()["issues"][0]["activity_id"] == 2
+        for name, data in (("first renamed.fit", first), ("second renamed.fit", second)):
+            replay = await upload(client, (name, data))
+            assert not replay["issues"] and replay["activities"][0]["id"] == 2
+        row = (await client.get("/api/activities/2")).json()
+        assert set(row["fit_sha256"]) == {digest(first), digest(second)}
+        assert {s["sha256"] for s in row["sources"] if s["kind"] == "original"} == {first_outer, second_outer}
+        assert (await client.get("/api/activities/3")).status_code == 404
+
+
+async def test_unresolved_versions_with_different_known_owners_need_independent_choices(history):
+    x, y = make_fit(), make_fit(serial=678, start=START + 800)
+    async with server() as client:
+        for gid, data in ((42, x), (52, y)):
+            history.listed = [{**LISTED, "activityId": gid}]
+            history.extra_details[str(gid)] = {**DETAIL, "activityId": gid}
+            history.original = zipped(data)
+            await submit(client)
+        history.listed = [{**LISTED, "activityId": 51}]
+        history.extra_details["51"] = {**DETAIL, "activityId": 51}
+        history.original = zipped(x)
+        first = await submit(client)
+        history.original = zipped(y)
+        second = await submit(client)
+        assert (await resolve(client, second, {"action": "link", "activity_id": 2})).status_code == 200
+        still_pending = (await client.get(first["report_url"])).json()
+        assert still_pending["state"] == "partial" and still_pending["issues"][0]["resolution"] is None
+        assert (await resolve(client, still_pending, {"action": "link", "activity_id": 1})).status_code == 200
+        for target, data in ((1, x), (2, y)):
+            assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == target
+        assert (await client.get("/api/activities/3")).status_code == 404
