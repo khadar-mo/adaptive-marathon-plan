@@ -69,6 +69,16 @@ class ArchivePermissionsError(OSError):
     pass
 
 
+def protect_sqlite_file(path):
+    # POSIX locks on this inode may belong to another SQLite connection in this
+    # process. Opening and closing an independent fd can release those locks.
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode):
+        raise OSError("SQLite needs a regular file")
+    if mode & 0o077:
+        os.chmod(path, mode & 0o600, follow_symlinks=False)
+
+
 class Archive:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -137,12 +147,10 @@ class Store:
         if write:
             # Earlier versions documented creating an empty DB with the shell's umask.
             resolved = self.path.resolve(strict=True)
-            with private_file(resolved):
-                pass
+            protect_sqlite_file(resolved)
             for suffix in ("-wal", "-shm", "-journal"):
                 try:
-                    with private_file(str(resolved) + suffix):
-                        pass
+                    protect_sqlite_file(Path(str(resolved) + suffix))
                 except FileNotFoundError:
                     pass
         uri = self.path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro")

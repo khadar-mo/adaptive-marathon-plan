@@ -5,6 +5,8 @@ from io import BytesIO
 import json
 import re
 import sqlite3
+import subprocess
+import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
 from zipfile import ZipFile
@@ -364,7 +366,8 @@ async def test_first_import_protects_existing_database_and_live_sidecars(history
             assert db.execute("SELECT name FROM activities").fetchone() == ("Track <fixture>",)
 
 
-@pytest.mark.parametrize("invalid", ["empty zip", "empty member", "damaged member", "truncated fit"])
+@pytest.mark.parametrize("invalid", ["empty zip", "empty member", "damaged member", "truncated fit",
+                                      "wrapped truncated fit", "invalid member name"])
 async def test_unusable_original_is_archived_warned_and_retried(history, tmp_path, invalid):
     good = history.original
     if invalid in ("empty zip", "empty member"):
@@ -375,6 +378,13 @@ async def test_unusable_original_is_archived_warned_and_retried(history, tmp_pat
             history.original = stream.getvalue()
     elif invalid == "damaged member":
         history.original = good.replace(FIT, b"x" * len(FIT))
+    elif invalid in ("wrapped truncated fit", "invalid member name"):
+        with BytesIO() as stream:
+            with ZipFile(stream, "w") as zipped:
+                zipped.writestr("é.fit", FIT[:-4] if invalid == "wrapped truncated fit" else FIT)
+            history.original = stream.getvalue()
+        if invalid == "invalid member name":
+            history.original = history.original.replace("é.fit".encode(), b"\xff\xff.fit")
     else:
         history.original = FIT[:-4]
     async with server() as client:
@@ -487,3 +497,41 @@ async def test_retry_recovers_worker_that_could_not_persist_final_state(history,
         retry = await submit(client)
         assert retry["state"] == "complete" and retry["activities"][0]["outcome"] == "unchanged"
         assert (await client.get(accepted["report_url"])).json()["state"] == "interrupted"
+
+
+async def test_securing_existing_database_preserves_cross_process_write_lock(history, tmp_path, monkeypatch):
+    path = tmp_path / "runs.sqlite3"
+    connect = sqlite3.connect
+    independent_writer = """
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1], timeout=0.02)
+try:
+    db.execute('BEGIN IMMEDIATE')
+except sqlite3.OperationalError as exc:
+    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+        raise
+    print('locked')
+else:
+    db.rollback()
+    print('acquired')
+finally:
+    db.close()
+"""
+
+    def lock_status():
+        return subprocess.check_output([sys.executable, "-c", independent_writer, str(path)], text=True).strip()
+
+    async with server() as client:
+        await submit(client)
+        with closing(connect(path)) as holder:
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("UPDATE activities SET name='local edit' WHERE id=1")
+            assert lock_status() == "locked"
+            path.chmod(0o644)
+            monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
+            assert (await client.post(SUBMIT, json=DAY)).status_code == 503
+            assert path.stat().st_mode & 0o077 == 0
+            assert lock_status() == "locked"
+            holder.commit()
+        assert lock_status() == "acquired"
+        assert (await client.get("/api/activities/1")).json()["name"] == "local edit"

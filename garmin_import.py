@@ -6,8 +6,7 @@ import math
 import os
 import re
 import sqlite3
-from zipfile import BadZipFile, ZipFile
-import zlib
+from zipfile import ZipFile
 
 import runs
 from storage import ArchivePermissionsError
@@ -103,19 +102,32 @@ def activity_fields(garmin_id, listed, detail):
     return fields
 
 
+def fit_envelope(header, length):
+    size = int.from_bytes(header[4:8], "little")
+    return (len(header) >= 12 and header[0] >= 12 and header[8:12] == b".FIT"
+            and size > 0 and length >= header[0] + size + 2)
+
+
 def original_format(data):
-    # Validate the envelope before caching it. FIT session decoding belongs to the FIT importer.
-    if len(data) >= 12 and data[8:12] == b".FIT":
-        size = int.from_bytes(data[4:8], "little")
-        if data[0] >= 12 and size > 0 and len(data) >= data[0] + size + 2:
-            return "fit"
+    # Check the container without decoding the FIT session or extracting files to disk.
+    if fit_envelope(data[:12], len(data)):
+        return "fit"
     try:
         with ZipFile(BytesIO(data)) as zipped:
-            if any(member.file_size > 0 and not member.is_dir() for member in zipped.infolist()):
-                if zipped.testzip() is None:
-                    return "zip"
-    except (BadZipFile, OSError, EOFError, RuntimeError, zlib.error):
-        pass
+            members = [member for member in zipped.infolist() if not member.is_dir()]
+            if not any(member.file_size for member in members):
+                return None
+            for member in members:
+                if member.filename.lower().endswith(".fit"):
+                    with zipped.open(member) as file:
+                        if not fit_envelope(file.read(12), member.file_size):
+                            return None
+            if zipped.testzip() is None:
+                return "zip"
+    except Exception:
+        # ZIP metadata and the different compression codecs have no common
+        # decode exception. Keep any unreadable original as a warning.
+        return None
     return None
 
 
