@@ -138,13 +138,15 @@ def duration(seconds):
 
 def activity(row):
     measurements = [
-        ("Recorded local start", row["start_local"]),
+        ("Recorded local start", row["start_local"] or "Not available"),
         ("Distance", f'{row["distance_m"] / 1000:.2f} km' if row["distance_m"] is not None else "Not available"),
         ("Watch timer", duration(row["timer_seconds"])), ("Elapsed time", duration(row["elapsed_seconds"])),
         ("Moving time", duration(row["moving_seconds"])),
     ]
     values = "".join(f"<dt>{label}</dt><dd>{escape(value)}</dd>" for label, value in measurements)
     warnings = "".join(f"<p>{escape(warning)}</p>" for warning in row["warnings"])
+    garmin_link = (f'<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">'
+                   f'Garmin Connect activity {escape(row["garmin_id"])}</a></p>' if row["garmin_url"] else "")
     return page(row["name"] or "Activity detail", f"""
-<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">Garmin Connect activity {escape(row["garmin_id"])}</a></p>
+{garmin_link}
 <dl>{values}</dl>{warnings}<p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")

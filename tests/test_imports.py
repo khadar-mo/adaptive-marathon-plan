@@ -959,13 +959,20 @@ async def test_fit_only_reports_never_seed_garmin_coverage_or_retries(history, t
     monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 11, 1))
     with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
         db.executescript(storage.SCHEMA.replace("requested_from TEXT NOT NULL, requested_to TEXT NOT NULL",
-                                                "requested_from TEXT, requested_to TEXT"))
+                                                "requested_from TEXT, requested_to TEXT")
+                         .replace("start_local TEXT NOT NULL, local_date TEXT NOT NULL", "start_local TEXT, local_date TEXT"))
         db.execute("ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'garmin'")
         db.executemany("""INSERT INTO imports(requested_from, requested_to, started_at, state, source)
                           VALUES (?, ?, '2026-10-30T12:00:00+00:00', 'partial', 'fit')""",
                        [(None, None), ("2026-05-01", "2026-05-01")])
+        db.execute("INSERT INTO activities(id, sport, metric_sources) VALUES (301, 'running', '{}')")
+        db.execute("INSERT INTO import_activities VALUES (1, 301, 'inserted')")
     async with server() as client:
         assert "FIT import" in (await client.get("/imports")).text
+        assert '/activities/301' in (await client.get('/imports/1')).text
+        assert (await client.get("/api/activities/301")).json()["garmin_url"] is None
+        detail = await client.get("/activities/301")
+        assert detail.status_code == 200 and "Garmin Connect activity" not in detail.text
         for url in ("/api/imports/1", "/api/imports/2"):
             row = (await client.get(url)).json()
             assert row["scans"] == []
@@ -1080,3 +1087,45 @@ async def test_unreadable_original_and_restoration_preserve_acquisition_time(his
         assert restored["scans"][0]["originals_requested"] == 0 and restored["scans"][0]["originals_available"] == 1
         recovered, = [s for s in (await client.get(path)).json()["sources"] if s["kind"] == "original"]
         assert recovered == {**held, "kind": "original"}
+
+@pytest.mark.parametrize("invalid_cache", ["directory", "dangling_link"])
+async def test_nonregular_optional_original_never_blocks_metadata(history, tmp_path, invalid_cache):
+    async with server() as client:
+        first = await submit(client)
+        ident = first["activities"][0]["id"]
+        target = tmp_path / "archive" / digest(history.original)
+        target.unlink()
+        if invalid_cache == "directory":
+            target.mkdir()
+        else:
+            target.symlink_to(tmp_path / "must-not-be-created")
+        history.detail["summaryDTO"]["distance"] = 7012
+        history.original = FIT
+        repeat = await submit(client)
+        assert repeat["state"] == "complete" and repeat["scans"][0]["originals_requested"] == 1
+        activity = (await client.get(f"/api/activities/{ident}")).json()
+        assert activity["distance_m"] == 7012 and not activity["warnings"]
+        assert {s["sha256"] for s in activity["sources"] if s["kind"] == "original"} == {digest(FIT)}
+        assert target.is_dir() if invalid_cache == "directory" else target.is_symlink()
+        assert not (tmp_path / "must-not-be-created").exists()
+
+
+async def test_legacy_duplicate_original_roles_keep_earliest_acquisition(history, tmp_path, monkeypatch):
+    import storage
+
+    first_time = "2026-11-01T12:00:00+00:00"
+    monkeypatch.setattr(storage, "now", lambda: "2026-11-08T12:00:00+00:00")
+    async with server() as client:
+        first = await submit(client)
+    with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+        db.execute("DROP TABLE garmin_scan_items")
+        db.execute("DROP TABLE garmin_scans")
+        db.execute("""INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
+                      SELECT activity_id, 'original_error', sha256, format, ? FROM activity_sources
+                      WHERE kind='original'""", (first_time,))
+    async with server() as client:
+        repeated = await submit(client)
+        assert repeated["counts"]["unchanged"] == 1 and repeated["scans"][0]["originals_requested"] == 0
+        path = f'/api/activities/{first["activities"][0]["id"]}'
+        original, = [s for s in (await client.get(path)).json()["sources"] if s["kind"].startswith("original")]
+        assert original["kind"] == "original" and original["acquired_at"] == first_time

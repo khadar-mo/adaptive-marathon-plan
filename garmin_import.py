@@ -142,7 +142,11 @@ def cached_source(archive, digest):
 def original_sources(client, store, archive, garmin_id, scan_id):
     sources = []
     for digest, file_format in store.originals(garmin_id):
-        cached = cached_source(archive, digest)
+        try:
+            cached = archive.read(digest)
+        except OSError:
+            # A damaged or inaccessible optional object must not block valid metadata.
+            cached = None
         if cached is None:
             sources.append(("original_unavailable", digest, file_format))
         else:

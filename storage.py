@@ -333,6 +333,8 @@ class Store:
                         acquired = first_acquisition
                         db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND sha256=? AND kind!=?
                             AND kind IN ('original', 'original_error', 'original_unavailable')""", (activity_id, digest, kind))
+                        db.execute("""UPDATE activity_sources SET acquired_at=? WHERE activity_id=? AND sha256=?
+                                      AND kind=? AND acquired_at>?""", (acquired, activity_id, digest, kind, acquired))
                 added = db.execute("""
                     INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
                     VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
@@ -391,6 +393,7 @@ class Store:
             warning = activity.pop("original_warning")
             sources = db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
                                     WHERE activity_id=? ORDER BY rowid""", (activity_id,))
-            return {**activity, "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"],
+            garmin_url = "https://connect.garmin.com/modern/activity/" + row["garmin_id"] if row["garmin_id"] else None
+            return {**activity, "garmin_url": garmin_url,
                     "metric_sources": json.loads(row["metric_sources"]), "sources": [dict(s) for s in sources],
                     "warnings": [warning] if warning else []}
