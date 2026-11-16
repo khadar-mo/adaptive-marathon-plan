@@ -11,6 +11,10 @@ CREATE INDEX IF NOT EXISTS fit_identity ON fit_sources(identity);
 CREATE TABLE IF NOT EXISTS original_members (
     original_sha TEXT PRIMARY KEY, fit_sha TEXT, identity TEXT
 );
+CREATE TABLE IF NOT EXISTS garmin_original_versions (
+    garmin_id TEXT NOT NULL, original_sha TEXT NOT NULL REFERENCES original_members(original_sha),
+    last_import_id INTEGER NOT NULL REFERENCES imports(id), PRIMARY KEY (garmin_id, original_sha)
+);
 CREATE TABLE IF NOT EXISTS garmin_aliases (
     garmin_id TEXT PRIMARY KEY, activity_id INTEGER NOT NULL REFERENCES activities(id)
 );
@@ -221,15 +225,18 @@ def apply_review(db, key, action, target, confirmed_date=None):
                    (import_id,))
 
 
-def settle_other_versions(db, key, payload, target, acquired_at):
+def settle_other_versions(db, key, payload, target, acquired_at, import_id):
     """Attach a compatible earlier original without changing a separately owned recording."""
     gid, latest = payload["fields"]["garmin_id"], payload["fit"]
     if not gid:
         return
     prefix = f"garmin:{gid}"
-    others = db.execute("""SELECT f.*, MIN(i.import_id) AS import_id FROM fit_reviews f
+    last_seen = db.execute("""SELECT MAX(i.import_id) FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
+                              WHERE r.review_key=?""", (key,)).fetchone()[0]
+    newest = max(last_seen or 0, import_id)
+    others = db.execute("""SELECT f.*, MAX(i.import_id) AS import_id FROM fit_reviews f
                 JOIN fit_review_issues r ON r.review_key=f.key JOIN import_issues i ON i.id=r.issue_id
-                WHERE (f.key=? OR f.key GLOB ?) AND f.key!=? AND f.resolution IS NULL GROUP BY f.key""",
+                WHERE (f.key=? OR f.key GLOB ?) AND f.key!=? AND f.resolution IS NULL GROUP BY f.key ORDER BY MAX(i.import_id)""",
                         (prefix, prefix + ":*", key)).fetchall()
     for other in others:
         earlier = json.loads(other["payload"])
@@ -242,10 +249,13 @@ def settle_other_versions(db, key, payload, target, acquired_at):
                                latest["fields"]["start_utc"] != recording["fields"]["start_utc"] or
                                (latest["identity"] and recording["identity"] and latest["identity"] != recording["identity"])):
                 continue
-        # This version supplies additional evidence for the accepted run. Keep
-        # its more recently accepted Garmin headlines and recorded laps.
-        earlier["fields"]["garmin_id"] = None
-        earlier["warning"] = None
+        # Opening an older report must produce the same activity as opening the
+        # newer one. Earlier versions supply evidence and fill missing values.
+        if other["import_id"] <= newest:
+            earlier["fields"]["garmin_id"] = None
+            earlier["warning"] = None
+        else:
+            newest = other["import_id"]
         save(db, other["import_id"], earlier, target, acquired_at)
         apply_review(db, other["key"], "same_garmin_id", target)
 
@@ -253,8 +263,11 @@ def settle_other_versions(db, key, payload, target, acquired_at):
 def ingest(db, import_id, payload, acquired_at):
     fit, gid = payload["fit"], payload["fields"]["garmin_id"]
     if fit:
-        db.executemany("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
-                       ((outer, fit["sha256"], fit["identity"]) for kind, outer, _ in payload["sources"] if kind == "original"))
+        for kind, outer, _ in payload["sources"]:
+            if kind == "original":
+                db.execute("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)", (outer, fit["sha256"], fit["identity"]))
+                db.execute("""INSERT INTO garmin_original_versions VALUES (?, ?, ?) ON CONFLICT(garmin_id, original_sha)
+                              DO UPDATE SET last_import_id=excluded.last_import_id""", (gid, outer, import_id))
     if payload["warning"]:
         db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
                       VALUES (?, 'warning', ?, 'Original download', ?)""", (import_id, payload["item"], payload["warning"]))
@@ -288,7 +301,7 @@ def ingest(db, import_id, payload, acquired_at):
     if review and not review["resolution"]:
         apply_review(db, key, "exact_match", target)
     if fit and gid:
-        settle_other_versions(db, key, payload, target, acquired_at)
+        settle_other_versions(db, key, payload, target, acquired_at, import_id)
     return target
 
 
@@ -392,5 +405,5 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
             db.execute("INSERT OR REPLACE INTO garmin_aliases VALUES (?, ?)", (gid, target))
     apply_review(db, row["key"], action, target, local_date)
     if row["kind"] == "match":
-        settle_other_versions(db, row["key"], payload, target, acquired_at)
+        settle_other_versions(db, row["key"], payload, target, acquired_at, import_id)
     return target

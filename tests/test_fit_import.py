@@ -468,3 +468,27 @@ async def test_resolving_changed_originals_honours_choices_made_while_they_were_
             assert (await client.get(f"/api/activities/{target}")).json()["id"] == target
             assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == target
         assert (await client.get("/api/activities/4")).status_code == 404
+
+
+@pytest.mark.parametrize("chosen", [0, 1])
+async def test_latest_compatible_garmin_metrics_and_laps_survive_either_resolution_order(history, chosen):
+    files = [make_fit(start=START + 20, serial=None, file_number=n, laps=[(100 + n, 10 + n, 20 + n)]) for n in (1, 2)]
+    async with server() as client:
+        await upload(client, ("seed.fit", make_fit()))
+        reports = []
+        for distance, data in zip((4000, 8000), files):
+            history.detail["summaryDTO"]["distance"] = distance
+            history.original = zipped(data)
+            reports.append(await submit(client))
+        assert (await resolve(client, reports[chosen], {"action": "keep_separate"})).json()["activity_id"] == 2
+        for report in reports:
+            assert (await client.get(report["report_url"])).json()["state"] == "complete"
+        for data in files:
+            assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == 2
+        row = (await client.get("/api/activities/2")).json()
+        assert row["distance_m"] == 8000 and row["laps"][0]["distance_m"] == 102
+        downloads = history.calls.count("/download-service/files/activity/42")
+        await submit(client)
+        assert history.calls.count("/download-service/files/activity/42") == downloads
+        after = (await client.get("/api/activities/2")).json()
+        assert after["distance_m"] == 8000 and after["laps"][0]["distance_m"] == 102

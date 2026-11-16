@@ -284,7 +284,9 @@ class Store:
                 return []
             rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s
                                  JOIN activities a ON a.id=s.activity_id
-                                 WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
+                                 LEFT JOIN garmin_original_versions v ON v.garmin_id=a.garmin_id AND v.original_sha=s.sha256
+                                 WHERE a.garmin_id=? AND s.kind='original'
+                                 ORDER BY COALESCE(v.last_import_id, 0) DESC, s.rowid DESC""", (garmin_id,))
             return [tuple(row) for row in rows]
 
     def save(self, import_id, fields, sources, warning, fit=None, item=None):
