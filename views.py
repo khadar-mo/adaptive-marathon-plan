@@ -29,6 +29,10 @@ form.addEventListener('submit', async event => {
     message.textContent = 'Starting import…';
     try {
         const dates = Object.fromEntries(new FormData(form));
+        if (!dates.from && !dates.to) {
+            delete dates.from;
+            delete dates.to;
+        }
         const response = await fetch('/api/imports/garmin', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dates)
         });
@@ -53,23 +57,52 @@ form.addEventListener('submit', async event => {
 </script>"""
 
 
+def period(row):
+    if row.get("source") == "fit":
+        return "FIT import"
+    return f'{escape(row["requested_from"])} to {escape(row["requested_to"])}'
+
+
 def imports(rows, first, last):
-    attempts = "".join(f'<li><a href="{row["html_url"]}">Import {row["id"]}</a> · {escape(row["requested_from"])}'
-                       f' to {escape(row["requested_to"])} · {escape(row["state"])} · {escape(row["started_at"])}</li>'
+    attempts = "".join(f'<li><a href="{row["html_url"]}">Import {row["id"]}</a> · {period(row)}'
+                       f' · {escape(row["state"])} · {escape(row["started_at"])}</li>'
                        for row in rows)
     history = f"<ul>{attempts}</ul>" if attempts else "<p>No saved imports.</p>"
     return page("Imports", f"""
 <form method="post" action="/api/imports/garmin"><fieldset><legend>Garmin date range</legend>
-<label>From <input type="date" name="from" required value="{escape(first)}"></label>
-<label>To <input type="date" name="to" required value="{escape(last)}"></label>
+<p>Leave both dates empty for normal sync, or enter both to recheck a range.</p>
+<label>From <input type="date" name="from" value="{escape(first)}"></label>
+<label>To <input type="date" name="to" value="{escape(last)}"></label>
 <button type="submit">Sync Garmin</button></fieldset></form>
 <p id="message" role="status"></p><h2>Saved reports</h2>{history}{SUBMIT}""")
+
+
+def scan_summary(scan):
+    if scan["mode"] == "legacy":
+        return "<p>Coverage unchecked. This earlier importer did not record pagination or original request counts.</p>"
+    labels = {"checked": "Fully checked", "checked_empty": "Fully checked · No runs returned",
+              "unchecked": "Coverage incomplete · Unchecked", "missing_activity": "Coverage incomplete · Missing activity"}
+    checked = ", ".join(f'{r["from"]} to {r["to"]}' for r in scan["checked_ranges"]) or "None"
+    saved_dates = (f'<p>Saved runs span {escape(scan["earliest_saved"])} to {escape(scan["latest_saved"])}.</p>'
+                   if scan["earliest_saved"] else "")
+    retry = ""
+    if scan["mode"] == "retry":
+        query = escape(urlencode({"from": scan["from"], "to": scan["to"]}))
+        retry = f'<p><a href="/imports?{query}">Recheck {escape(scan["from"])} to {escape(scan["to"])}</a></p>'
+    return f"""<h3>{labels[scan["coverage"]]} · {escape(scan["from"])} to {escape(scan["to"])}</h3>
+<p>Search bounds {escape(scan["search_from"])} to {escape(scan["search_to"])} · {scan["pages_read"]} pages read.
+Fully checked dates: {checked}.</p>
+<p>{scan["unique_ids_found"]} unique run IDs found · {scan["excluded"]} excluded ·
+{len(scan["missing_activity_ids"])} missing activities · {scan["unidentified_records"]} unidentified records.</p>
+<p>Original files: {scan["originals_available"]} available · {scan["originals_requested"]} requested ·
+{len(scan["missing_original_ids"])} missing.</p>{saved_dates}{retry}"""
 
 
 def report(row):
     state = row["state"]
     first, last = row["requested_from"], row["requested_to"]
-    activities = "".join(f'<li><a href="/activities/{a["id"]}">Garmin activity {escape(a["garmin_id"])}</a>'
+    activities = "".join(f'<li><a href="/activities/{a["id"]}">'
+                         f'{("Garmin activity " + escape(a["garmin_id"])) if a["garmin_id"] else ("Activity " + str(a["id"]))}</a>'
                          f' · {escape(a["outcome"])}</li>' for a in row["activities"])
     issues = "".join(f'<li><strong>{escape(i["step"])}</strong> · {escape(i["item"])} · {escape(i["message"])}</li>'
                      for i in row["issues"])
@@ -79,13 +112,20 @@ def report(row):
     elif state == "interrupted":
         progress = "<p>The app stopped before this import finished.</p>"
     saved = f"<ul>{activities}</ul>" if activities else "<p>No activities saved in this attempt.</p>"
-    retry = escape(urlencode({"from": first, "to": last}))
+    retry = scans = ""
+    if row.get("source") != "fit":
+        query = escape(urlencode({"from": first, "to": last}))
+        retry = f'<p><a href="/imports?{query}">Recheck these dates</a></p>'
+        scans = "<h2>Coverage</h2>" + "".join(scan_summary(s) for s in row["scans"])
+    counts = row["counts"]
     return page(f'Import {row["id"]}', f"""
-<p><strong>{escape(state.capitalize())}</strong> · {escape(first)} to {escape(last)}</p>
-<p>Started {escape(row["started_at"])}</p>{progress}<h2>Saved activities</h2>{saved}
+<p><strong>{escape(state.capitalize())}</strong> · {period(row)}</p>
+<p>Started {escape(row["started_at"])}</p>{progress}{scans}
+<h2>Saved activities</h2><p>{counts["inserted"]} inserted · {counts["updated"]} updated ·
+{counts["unchanged"]} unchanged.</p>{saved}
 {('<h2>Import issues</h2><ul>' + issues + '</ul>') if issues else ''}
 <p><a href="{row["report_url"]}">Report JSON</a></p>
-<p><a href="/imports?{retry}">Recheck these dates</a></p>""")
+{retry}""")
 
 
 def duration(seconds):
@@ -98,13 +138,15 @@ def duration(seconds):
 
 def activity(row):
     measurements = [
-        ("Recorded local start", row["start_local"]),
+        ("Recorded local start", row["start_local"] or "Not available"),
         ("Distance", f'{row["distance_m"] / 1000:.2f} km' if row["distance_m"] is not None else "Not available"),
         ("Watch timer", duration(row["timer_seconds"])), ("Elapsed time", duration(row["elapsed_seconds"])),
         ("Moving time", duration(row["moving_seconds"])),
     ]
     values = "".join(f"<dt>{label}</dt><dd>{escape(value)}</dd>" for label, value in measurements)
     warnings = "".join(f"<p>{escape(warning)}</p>" for warning in row["warnings"])
+    garmin_link = (f'<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">'
+                   f'Garmin Connect activity {escape(row["garmin_id"])}</a></p>' if row["garmin_url"] else "")
     return page(row["name"] or "Activity detail", f"""
-<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">Garmin Connect activity {escape(row["garmin_id"])}</a></p>
+{garmin_link}
 <dl>{values}</dl>{warnings}<p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
