@@ -72,18 +72,24 @@ def imports(rows, first, last):
 
 
 def scan_summary(scan):
+    if scan["mode"] == "legacy":
+        return "<p>Coverage unchecked. This earlier importer did not record pagination or original request counts.</p>"
     labels = {"checked": "Fully checked", "checked_empty": "Fully checked · No runs returned",
               "unchecked": "Coverage incomplete · Unchecked", "missing_activity": "Coverage incomplete · Missing activity"}
     checked = ", ".join(f'{r["from"]} to {r["to"]}' for r in scan["checked_ranges"]) or "None"
     saved_dates = (f'<p>Saved runs span {escape(scan["earliest_saved"])} to {escape(scan["latest_saved"])}.</p>'
                    if scan["earliest_saved"] else "")
+    retry = ""
+    if scan["mode"] == "retry":
+        query = escape(urlencode({"from": scan["from"], "to": scan["to"]}))
+        retry = f'<p><a href="/imports?{query}">Recheck {escape(scan["from"])} to {escape(scan["to"])}</a></p>'
     return f"""<h3>{labels[scan["coverage"]]} · {escape(scan["from"])} to {escape(scan["to"])}</h3>
 <p>Search bounds {escape(scan["search_from"])} to {escape(scan["search_to"])} · {scan["pages_read"]} pages read.
 Fully checked dates: {checked}.</p>
 <p>{scan["unique_ids_found"]} unique run IDs found · {scan["excluded"]} excluded ·
 {len(scan["missing_activity_ids"])} missing activities · {scan["unidentified_records"]} unidentified records.</p>
 <p>Original files: {scan["originals_available"]} available · {scan["originals_requested"]} requested ·
-{len(scan["missing_original_ids"])} missing.</p>{saved_dates}"""
+{len(scan["missing_original_ids"])} missing.</p>{saved_dates}{retry}"""
 
 
 def report(row):

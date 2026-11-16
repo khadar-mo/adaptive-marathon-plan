@@ -97,7 +97,9 @@ def migrate(db):
 def checked_ranges(db, scan):
     if not scan["enumerated"] or scan["unidentified"]:
         return []
-    window = bounds(scan["first"], scan["last"])
+    window = observed_window(scan)
+    if not window:
+        return []
     missing = []
     for row in db.execute("""SELECT DISTINCT local_date FROM garmin_scan_items
                              WHERE scan_id=? AND status='missing_activity'""", (scan["id"],)):
@@ -105,7 +107,14 @@ def checked_ranges(db, scan):
         if day is None or not scan["first"] <= day <= scan["last"]:
             return []
         missing.append(bounds(day, day))
-    return difference([window], sorted(missing))
+    return difference(window, sorted(missing))
+
+
+def observed_window(scan):
+    # A successful search today cannot certify future dates from an explicit request.
+    observed = datetime.fromisoformat(scan["started_at"]).astimezone(ZoneInfo("Europe/London")).date().isoformat()
+    end = min(scan["last"], observed)
+    return [bounds(scan["first"], end)] if scan["first"] <= end else []
 
 
 def outstanding_items(db):
@@ -115,13 +124,13 @@ def outstanding_items(db):
             WHERE status != 'outside_range' GROUP BY garmin_id)
         SELECT i.*, s.first, s.last FROM latest l JOIN garmin_scan_items i USING(garmin_id, scan_id)
         JOIN garmin_scans s ON s.id=i.scan_id
-        WHERE i.status='missing_activity' OR (i.status='saved' AND i.original_available=0)
+        WHERE i.status IN ('missing_activity', 'retry_elsewhere') OR (i.status='saved' AND i.original_available=0)
         ORDER BY i.scan_id, i.garmin_id""").fetchall()
 
 
 def item_range(item):
     day = item["local_date"]
-    if day and item["first"] <= day <= item["last"]:
+    if day and (item["status"] == "retry_elsewhere" or item["first"] <= day <= item["last"]):
         return bounds(day, day)
     return bounds(item["first"], item["last"])
 
@@ -130,10 +139,10 @@ def plan(db, first, last):
     if first is not None:
         return [("range", first, last)]
     verified, pending = [], []
-    scans = db.execute("""SELECT s.*, i.state FROM garmin_scans s JOIN imports i ON s.import_id=i.id
+    scans = db.execute("""SELECT s.*, i.state, i.started_at FROM garmin_scans s JOIN imports i ON s.import_id=i.id
                           ORDER BY s.id""")
     for scan in scans:
-        window = [bounds(scan["first"], scan["last"])]
+        window = observed_window(scan)
         if scan["mode"] == "legacy" and scan["state"] == "complete":
             continue
         checked = checked_ranges(db, scan)
@@ -152,16 +161,28 @@ def plan(db, first, last):
     return [("normal", iso(start), iso(end)), *(("retry", iso(a), iso(b)) for a, b in retries)]
 
 
+def legacy_report(first, last):
+    return {"mode": "legacy", "from": first, "to": last, "coverage": "unchecked",
+            "search_from": first, "search_to": last, "pages_read": None, "enumerated": False,
+            "scanned_from": None, "scanned_to": None, "checked_ranges": [], "unique_ids_found": None,
+            "excluded": None, "missing_metadata": None, "originals_requested": None, "originals_available": None}
+
+
 def scan_report(db, scan):
+    if scan["mode"] == "legacy":
+        return legacy_report(scan["first"], scan["last"])
     items = db.execute("SELECT * FROM garmin_scan_items WHERE scan_id=?", (scan["id"],)).fetchall()
     saved = [i for i in items if i["status"] == "saved"]
     dates = [i["local_date"] for i in saved if i["local_date"]]
     missing = [i["garmin_id"] for i in items if i["status"] == "missing_activity"]
     counted = [i for i in items if i["status"] in ("saved", "missing_activity")]
-    if not scan["enumerated"]:
+    checked = checked_ranges(db, scan)
+    if not scan["enumerated"] or not observed_window(scan):
         status = "unchecked"
     elif missing or scan["unidentified"]:
         status = "missing_activity"
+    elif checked != [bounds(scan["first"], scan["last"])]:
+        status = "unchecked"
     else:
         status = "checked" if saved else "checked_empty"
     search_from, search_to = search_bounds(scan["first"], scan["last"])
@@ -170,9 +191,10 @@ def scan_report(db, scan):
         "search_from": search_from, "search_to": search_to, "pages_read": scan["pages"],
         "scanned_from": scan["first"] if scan["enumerated"] else None,
         "scanned_to": scan["last"] if scan["enumerated"] else None, "enumerated": bool(scan["enumerated"]),
-        "checked_ranges": [{"from": iso(a), "to": iso(b)} for a, b in checked_ranges(db, scan)],
+        "checked_ranges": [{"from": iso(a), "to": iso(b)} for a, b in checked],
         "unique_ids_found": sum(i["from_search"] for i in counted),
-        "excluded": sum(i["status"] in ("outside_range", "excluded_sport") for i in items),
+        "excluded": sum(i["status"] in ("outside_range", "resolved_outside", "retry_elsewhere", "excluded_sport")
+                        for i in items),
         "missing_activity_ids": missing, "unidentified_records": scan["unidentified"],
         "missing_metadata": len(missing) + scan["unidentified"],
         "originals_requested": sum(i["original_requested"] for i in items),

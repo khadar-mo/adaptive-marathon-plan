@@ -731,6 +731,8 @@ async def test_original_warning_keeps_coverage_and_is_retried_outside_normal_win
         assert current["coverage"] == "checked_empty" and older["mode"] == "retry"
         assert older["from"] == older["to"] == "2026-06-01" and older["missing_original_ids"] == []
         assert older["originals_available"] == older["originals_requested"] == 1
+        report_html = (await client.get(retry["html_url"])).text
+        assert '/imports?from=2026-06-01&amp;to=2026-06-01' in report_html
         assert retry["activities"] == [{**first["activities"][0], "outcome": "updated"}]
         assert len((await submit(client, {}))["scans"]) == 1
 
@@ -748,7 +750,11 @@ async def test_upgrade_keeps_pr9_sources_and_retries_its_unavailable_original(hi
         db.execute("DROP TABLE garmin_scans")
     history.original_error = None
     async with server() as client:
-        assert (await client.get(old["report_url"])).json()["activities"] == old["activities"]
+        legacy = (await client.get(old["report_url"])).json()
+        assert legacy["activities"] == old["activities"]
+        scan, = legacy["scans"]
+        assert scan["mode"] == "legacy" and (scan["search_from"], scan["search_to"]) == tuple(DAY.values())
+        assert scan["pages_read"] is None and scan["originals_requested"] is None and scan["checked_ranges"] == []
         assert (await client.get(f"/api/activities/{original_id}")).json() == detail
         upgraded = await submit(client, {})
         assert upgraded["requested_from"] == "2026-06-01" and upgraded["state"] == "complete"
@@ -756,3 +762,146 @@ async def test_upgrade_keeps_pr9_sources_and_retries_its_unavailable_original(hi
         assert upgraded["activities"] == [{**old["activities"][0], "outcome": "updated"}]
         saved = (await client.get(f"/api/activities/{original_id}")).json()
         assert not saved["warnings"] and all(s in saved["sources"] for s in detail["sources"])
+        assert (await client.get(old["report_url"])).json() == legacy
+
+async def test_detail_reserialization_archived_unchanged_semantic_edits_updated(history, tmp_path):
+    history.detail["extra"] = {"cadence": [1, 2], "enabled": True}
+    async with server() as client:
+        first = await submit(client)
+        activity_id = first["activities"][0]["id"]
+        original_bytes = history.wire(history.detail)
+        history.wire = lambda record: json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        different_bytes = history.wire(history.detail)
+        assert different_bytes != original_bytes and json.loads(different_bytes) == json.loads(original_bytes)
+        repeat = await submit(client)
+        assert repeat["activities"] == [{**first["activities"][0], "outcome": "unchanged"}]
+        assert repeat["counts"] == {"inserted": 0, "updated": 0, "unchanged": 1}
+        detail = (await client.get(f"/api/activities/{activity_id}")).json()
+        assert {s["sha256"] for s in detail["sources"] if s["kind"] == "detail"} == {
+            digest(original_bytes), digest(different_bytes)}
+        assert all((tmp_path / "archive" / digest(data)).read_bytes() == data for data in (original_bytes, different_bytes))
+        history.detail["extra"]["enabled"] = 1
+        assert (await submit(client))["counts"]["updated"] == 1
+        history.detail["extra"]["enabled"] = True
+        assert (await submit(client))["counts"]["updated"] == 1  # revert to an already archived version
+        history.detail["summaryDTO"]["distance"] = 7123
+        assert (await submit(client))["counts"]["updated"] == 1
+        assert (await client.get(f"/api/activities/{activity_id}")).json()["distance_m"] == 7123
+        assert history.calls.count("/download-service/files/activity/42") == 1
+
+
+async def test_future_request_does_not_credit_unelapsed_dates(history, monkeypatch):
+    import storage
+
+    history.listed = []
+    def at(day):
+        monkeypatch.setattr(garmin_coverage, "today", lambda: date.fromisoformat(day))
+        monkeypatch.setattr(storage, "now", lambda: day + "T12:00:00+00:00")
+    async with server() as client:
+        at("2026-11-02")
+        await submit(client, {})
+        future = await submit(client, {"from": "2026-11-01", "to": "2026-11-30"})
+        assert future["scans"][0]["checked_ranges"] == [{"from": "2026-11-01", "to": "2026-11-02"}]
+        assert future["state"] == "partial"
+        add_run(history, 111, "2026-11-10")
+        at("2026-12-05")
+        later = await submit(client, {})
+        assert later["requested_from"] == "2026-10-20" and later["state"] == "complete"
+        assert [a["garmin_id"] for a in later["activities"]] == ["111"]
+
+
+async def test_corrected_date_and_original_request_survive_activity_rollback(history, tmp_path, monkeypatch):
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 7, 1))
+    history.listed = []
+    async with server() as client:
+        await submit(client, DAY)
+        add_run(history, 28, "2026-06-25")
+        history.extra_details["28"]["summaryDTO"]["startTimeLocal"] = "2026-06-02 08:00:00"
+        with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+            db.execute("CREATE TRIGGER stop_save BEFORE INSERT ON activities BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        partial = await submit(client, {"from": "2026-06-01", "to": "2026-06-30"})
+        scan, = partial["scans"]
+        assert scan["originals_requested"] == 1 and scan["missing_activity_ids"] == ["28"]
+        assert scan["checked_ranges"] == [{"from": "2026-06-01", "to": "2026-06-01"},
+                                          {"from": "2026-06-03", "to": "2026-06-30"}]
+        with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+            db.execute("DROP TRIGGER stop_save")
+        history.listed = []
+        recovered = await submit(client, {})
+        assert recovered["requested_from"] == "2026-06-01" and recovered["counts"]["inserted"] == 1
+        activity = (await client.get(f'/api/activities/{recovered["activities"][0]["id"]}')).json()
+        assert activity["local_date"] == "2026-06-02"
+
+
+async def test_resolved_widened_boundary_stops_retrying(history, monkeypatch):
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 11, 2))
+    history.listed = []
+    add_run(history, 803, "2026-05-31")
+    history.detail_error = runs.ConnectionProblem("Detail timeout. Retry.")
+    async with server() as client:
+        partial = await submit(client, {})
+        assert partial["scans"][0]["missing_activity_ids"] == ["803"] and partial["scans"][0]["checked_ranges"] == []
+        history.detail_error = None
+        recovered = await submit(client, {})
+        assert recovered["scans"][0]["coverage"] == "checked_empty" and not recovered["activities"]
+        for _ in range(2):
+            later = await submit(client, {})
+            assert len(later["scans"]) == 1 and later["requested_from"] == "2026-10-20"
+
+
+async def test_sport_date_and_exclusions_follow_explicit_detail(history):
+    history.listed = []
+    listed = add_run(history, 49, "2026-10-31", sport="cycling")
+    history.extra_details["49"]["activityTypeDTO"] = {"typeKey": "trail_running"}
+    async with server() as client:
+        good = await submit(client, OCTOBER)
+        path = f'/api/activities/{good["activities"][0]["id"]}'
+        assert (await client.get(path)).json()["sport"] == "trail_running"
+        history.extra_details["49"]["summaryDTO"]["startTimeLocal"] = "2026-11-01 00:12:00"
+        moved = await submit(client, OCTOBER)
+        assert moved["activities"] == [] and moved["scans"][0]["excluded"] == 1
+        assert (await client.get(path)).json()["local_date"] == "2026-11-01"
+        history.extra_details["49"]["activityTypeDTO"]["typeKey"] = "cycling"
+        assert (await submit(client, OCTOBER))["activities"] == []
+        assert (await client.get(path)).json()["sport"] == "cycling"
+        listed["activityType"] = {"typeKey": " "}
+        history.extra_details["49"]["activityTypeDTO"]["typeKey"] = ""
+        missing = await submit(client, OCTOBER)
+        assert missing["scans"][0]["coverage"] == "missing_activity" and missing["scans"][0]["missing_metadata"] == 1
+
+
+async def test_unidentified_row_is_not_checked_empty(history):
+    history.listed = [{"startTimeLocal": "2026-10-01 00:00:00", "activityType": {"typeKey": "running"}}]
+    async with server() as client:
+        report = await submit(client, OCTOBER)
+        scan, = report["scans"]
+        assert report["state"] == "partial" and scan["unidentified_records"] == scan["missing_metadata"] == 1
+        assert scan["checked_ranges"] == [] and scan["coverage"] == "missing_activity"
+
+
+async def test_corrupt_original_can_be_unavailable_then_restored(history, tmp_path):
+    async with server() as client:
+        first = await submit(client)
+        ident = first["activities"][0]["id"]
+        target = tmp_path / "archive" / digest(history.original)
+        target.write_bytes(b"damaged disk contents")
+        history.original_error = runs.ConnectionProblem("Original unavailable. Retry.")
+        history.detail["summaryDTO"]["distance"] = 7345
+        incomplete = await submit(client)
+        assert incomplete["state"] == "complete" and incomplete["scans"][0]["missing_original_ids"] == ["42"]
+        assert (await client.get(f"/api/activities/{ident}")).json()["distance_m"] == 7345
+        history.original_error = None
+        repaired = await submit(client)
+        assert repaired["scans"][0]["originals_requested"] == 1 and not repaired["issues"]
+        assert target.read_bytes() == history.original
+
+
+async def test_initial_scan_read_failure_does_not_stick_running(history, monkeypatch):
+    async with server() as client:
+        with monkeypatch.context() as patch:
+            def unavailable(*args):
+                raise sqlite3.OperationalError("fixture lock")
+            patch.setattr(Store, "scans", unavailable)
+            failed = await submit(client)
+        assert failed["state"] == "failed" and failed["issues"][0]["step"] == "Import storage"
+        assert (await submit(client))["state"] == "complete"

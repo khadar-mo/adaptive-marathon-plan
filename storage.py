@@ -71,6 +71,10 @@ class ArchivePermissionsError(OSError):
     pass
 
 
+class ArchiveChecksumError(OSError):
+    pass
+
+
 def protect_sqlite_file(path):
     # POSIX locks on this inode may belong to another SQLite connection in this
     # process. Opening and closing an independent fd can release those locks.
@@ -92,7 +96,7 @@ class Archive:
             with private_file(self.directory / digest) as saved:
                 data = saved.read()
             if hashlib.sha256(data).hexdigest() != digest:
-                raise OSError("Archived source checksum mismatch")
+                raise ArchiveChecksumError("Archived source checksum mismatch")
             return data
         except FileNotFoundError:
             return None
@@ -103,15 +107,23 @@ class Archive:
         if self.directory.stat().st_mode & 0o077:
             raise ArchivePermissionsError("Use a private archive directory with mode 0700, then retry these dates.")
         target = self.directory / digest
-        if self.read(digest) is not None:
-            return digest
+        repair = False
+        try:
+            if self.read(digest) is not None:
+                return digest
+        except ArchiveChecksumError:
+            repair = True
         with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as pending:
             try:
                 pending.write(data)
                 pending.flush()
                 os.fsync(pending.fileno())
                 try:
-                    os.link(pending.name, target)  # Publish without replacing an immutable source.
+                    if repair:
+                        # The old bytes failed the checksum. Restore the exact original atomically.
+                        os.replace(pending.name, target)
+                    else:
+                        os.link(pending.name, target)
                 except FileExistsError:
                     if self.read(digest) is None:
                         raise OSError("Archived source disappeared during publication") from None
@@ -226,9 +238,17 @@ class Store:
                 WHERE garmin_id=? AND status!='outside_range' ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
             db.execute("""INSERT INTO garmin_scan_items(scan_id, garmin_id, local_date, list_sha, record_sha, from_search)
                 VALUES (?, ?, ?, ?, ?, ?)""", (scan_id, garmin_id, local_date, page_sha, record_sha, from_search))
-            if previous and previous["status"] == "saved" and previous["record_sha"] == record_sha:
-                return previous["detail_sha"]
-        return None
+            saved = db.execute("""SELECT detail_sha FROM garmin_scan_items WHERE garmin_id=?
+                                  AND detail_sha IS NOT NULL
+                                  ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
+            if not saved:
+                # A PR #9 database keeps its detail in activity_sources.
+                saved = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
+                                      WHERE a.garmin_id=? AND s.kind='detail' ORDER BY s.rowid DESC LIMIT 1""",
+                                   (garmin_id,)).fetchone()
+            reusable = bool(previous and saved and previous["status"] == "saved"
+                            and previous["record_sha"] == record_sha and previous["detail_sha"] == saved[0])
+            return (saved[0] if saved else None), reusable
 
     def write_report(self, statement, parameters):
         # The background worker still owns the running row while another SQLite
@@ -264,18 +284,26 @@ class Store:
                                  WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
             return [tuple(row) for row in rows]
 
-    def save(self, import_id, fields, sources, warning, *, scan_id, detail_sha, original_requested):
+    def save(self, import_id, fields, sources, warning, *, scan_id, detail_sha, detail_changed, status):
         # Every key is supplied by the normalizer; no upstream field name enters SQL.
         columns = tuple(fields)
         bindings = ", ".join(":" + key for key in columns)
         updates = ", ".join(f"{key}=excluded.{key}" for key in columns if key != "garmin_id")
         with self.connect(write=True) as db:
             previous = db.execute("SELECT * FROM activities WHERE garmin_id=?", (fields["garmin_id"],)).fetchone()
+            if status != "saved":
+                # An observed date/sport edit still applies to the stored activity.
+                # Excluded IDs do not contribute to the range's saved IDs or counts.
+                db.execute("""UPDATE garmin_scan_items SET status=?, detail_sha=? WHERE scan_id=? AND garmin_id=?""",
+                           (status, detail_sha if previous else None, scan_id, fields["garmin_id"]))
+                if previous is None:
+                    return
+                warning = previous["original_warning"]
             activity_id = db.execute(f"""
                 INSERT INTO activities({', '.join(columns)}, original_warning) VALUES ({bindings}, :original_warning)
                 ON CONFLICT(garmin_id) DO UPDATE SET {updates}, original_warning=excluded.original_warning
                 RETURNING id""", {**fields, "original_warning": warning}).fetchone()["id"]
-            new_activity_source = False
+            changed_source = detail_changed
             for kind, digest, file_format in sources:
                 if kind == "original_error":
                     db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?""",
@@ -284,19 +312,20 @@ class Store:
                     INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
                     VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
                     (activity_id, kind, digest, file_format, now())).rowcount
-                # A list page can change because a different run moved or was edited.
-                if added and kind != "list":
-                    new_activity_source = True
+                if added and kind not in ("list", "detail"):
+                    changed_source = True
+            if status != "saved":
+                return
             outcome = "inserted"
             if previous:
-                changed = (new_activity_source or previous["original_warning"] != warning
+                changed = (changed_source or previous["original_warning"] != warning
                            or any(previous[k] != fields[k] for k in columns))
                 outcome = "updated" if changed else "unchanged"
             db.execute("INSERT INTO import_activities(import_id, activity_id, outcome) VALUES (?, ?, ?)",
                        (import_id, activity_id, outcome))
-            db.execute("""UPDATE garmin_scan_items SET status='saved', local_date=?, detail_sha=?,
-                          original_requested=?, original_available=? WHERE scan_id=? AND garmin_id=?""",
-                       (fields["local_date"], detail_sha, original_requested, warning is None, scan_id, fields["garmin_id"]))
+            db.execute("""UPDATE garmin_scan_items SET status='saved', detail_sha=?, original_available=?
+                          WHERE scan_id=? AND garmin_id=?""",
+                       (detail_sha, warning is None, scan_id, fields["garmin_id"]))
             if warning:
                 db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
                               VALUES (?, 'warning', ?, 'Original download', ?)""",
@@ -317,10 +346,11 @@ class Store:
             issues = db.execute("SELECT severity, item, step, message FROM import_issues WHERE import_id=? ORDER BY id",
                                 (import_id,))
             activities = [dict(a) for a in activities]
-            scans = []
+            scans = [garmin_coverage.legacy_report(row["requested_from"], row["requested_to"])]
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='garmin_scans'").fetchone():
                 scans = [garmin_coverage.scan_report(db, scan) for scan in db.execute(
-                    "SELECT * FROM garmin_scans WHERE import_id=? ORDER BY id", (import_id,))]
+                    """SELECT s.*, i.started_at FROM garmin_scans s JOIN imports i ON i.id=s.import_id
+                       WHERE s.import_id=? ORDER BY s.id""", (import_id,))]
             return {**dict(row), "activities": activities, "issues": [dict(i) for i in issues],
                     "counts": {outcome: sum(a["outcome"] == outcome for a in activities)
                                for outcome in ("inserted", "updated", "unchanged")}, "scans": scans}
