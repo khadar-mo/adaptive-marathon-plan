@@ -6,9 +6,11 @@ import math
 import os
 import re
 import sqlite3
-from zipfile import is_zipfile
+from zipfile import BadZipFile, ZipFile
+import zlib
 
 import runs
+from storage import ArchivePermissionsError
 
 
 PAGE_SIZE = 20
@@ -45,6 +47,12 @@ def timestamp(value):
         return None
 
 
+def local_timestamp(value):
+    if timestamp(value) is not None:
+        return value[:10] + " " + value[11:]
+    return None
+
+
 def number(value):
     if type(value) in (int, float) and value >= 0:
         try:
@@ -75,7 +83,7 @@ def activity_fields(garmin_id, listed, detail):
                 return value
         return None
 
-    local = choose("start_local", "startTimeLocal", timestamp)
+    local = choose("start_local", "startTimeLocal", local_timestamp)
     if local is None:
         raise runs.ConnectionProblem("Recorded local start is missing or invalid. Check the activity in Garmin and retry.")
     utc = choose("start_utc", "startTimeGMT", timestamp)
@@ -85,7 +93,7 @@ def activity_fields(garmin_id, listed, detail):
     fields = {
         "garmin_id": garmin_id, "name": name if isinstance(name, str) else None,
         "sport": sport(detail, "activityTypeDTO") or sport(listed, "activityType") or "running",
-        "start_local": local.isoformat(sep=" "), "local_date": local.date().isoformat(),
+        "start_local": local, "local_date": local[:10],
         "start_utc": utc.astimezone(timezone.utc).isoformat() if utc else None,
     }
     for field, key in (("distance_m", "distance"), ("timer_seconds", "duration"),
@@ -95,22 +103,41 @@ def activity_fields(garmin_id, listed, detail):
     return fields
 
 
-def original_source(client, store, archive, garmin_id):
+def original_format(data):
+    # Validate the envelope before caching it. FIT session decoding belongs to the FIT importer.
+    if len(data) >= 12 and data[8:12] == b".FIT":
+        size = int.from_bytes(data[4:8], "little")
+        if data[0] >= 12 and size > 0 and len(data) >= data[0] + size + 2:
+            return "fit"
+    try:
+        with ZipFile(BytesIO(data)) as zipped:
+            if any(member.file_size > 0 and not member.is_dir() for member in zipped.infolist()):
+                if zipped.testzip() is None:
+                    return "zip"
+    except (BadZipFile, OSError, EOFError, RuntimeError, zlib.error):
+        pass
+    return None
+
+
+def original_sources(client, store, archive, garmin_id):
+    sources = []
     for digest, file_format in store.originals(garmin_id):
-        if archive.contains(digest):
-            return ("original", digest, file_format), None
+        cached = archive.read(digest)
+        if cached is not None:
+            if original_format(cached) == file_format:
+                return [*sources, ("original", digest, file_format)], None
+            sources.append(("original_error", digest, file_format))
     try:
         data = client.get(f"/download-service/files/activity/{garmin_id}", "Garmin original download", raw=True)
     except runs.ConnectionProblem as err:
-        return None, f"Original unavailable. {err} Retry these dates to request it again."
+        return sources, f"Original unavailable. {err} Retry these dates to request it again."
     if not data:
-        return None, "Original unavailable. Garmin returned an empty file. Retry these dates."
+        return sources, "Original unavailable. Garmin returned an empty file. Retry these dates."
     digest = archive.put(data)
-    if is_zipfile(BytesIO(data)):
-        return ("original", digest, "zip"), None
-    if len(data) >= 12 and data[0] >= 12 and data[8:12] == b".FIT":
-        return ("original", digest, "fit"), None
-    return ("original_error", digest, "unknown"), "Original unavailable. Garmin returned an unrecognised file. Retry these dates."
+    file_format = original_format(data)
+    if file_format:
+        return [*sources, ("original", digest, file_format)], None
+    return [*sources, ("original_error", digest, "unknown")], "Original unavailable. Check the file in Garmin and retry these dates."
 
 
 def import_one(client, store, archive, import_id, garmin_id, listed, page_digest, first, last):
@@ -121,10 +148,8 @@ def import_one(client, store, archive, import_id, garmin_id, listed, page_digest
     if not first <= fields["local_date"] <= last or fields["sport"] not in RUN_TYPES:
         return
     sources = [("list", page_digest, "json"), ("detail", detail_digest, "json")]
-    original, warning = original_source(client, store, archive, garmin_id)
-    if original:
-        sources.append(original)
-    store.save(import_id, fields, sources, warning)
+    originals, warning = original_sources(client, store, archive, garmin_id)
+    store.save(import_id, fields, sources + originals, warning)
 
 
 def run_import(store, archive, import_id, first, last):
@@ -164,6 +189,9 @@ def run_import(store, archive, import_id, first, last):
     except runs.ConnectionProblem as err:
         state = "failed"
         store.issue(import_id, range_label, "Activity search", str(err))
+    except ArchivePermissionsError as err:
+        state = "failed"
+        store.issue(import_id, range_label, "Private archive", str(err))
     except (OSError, sqlite3.Error):
         state = "failed"
         store.issue(import_id, range_label, "Import storage", "Check the private archive and SQLite storage, then retry.")
@@ -172,4 +200,5 @@ def run_import(store, archive, import_id, first, last):
         # Keep the report actionable without logging upstream payloads or credentials.
         state = "failed"
         store.issue(import_id, range_label, "Import", "Unexpected import error. Check the saved activities and retry these dates.")
-    store.finish(import_id, state)
+    finally:
+        store.finish(import_id, state)

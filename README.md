@@ -30,7 +30,7 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8001 --no-access-log
 
 Open [Imports](http://127.0.0.1:8001/imports), enter the activity's recorded local date in both fields and select **Sync Garmin**. The saved report links to the local activity, its JSON and any download warning. **Recheck these dates** retries the range. A retry keeps the same activity ID. This first importer checks one page of the selected range and flags a full page for follow-up.
 
-The first valid submission creates `runs.sqlite3` in the working directory and archives Garmin's original response bytes in `runs-archive/` beside the database. To keep them elsewhere, set `RUNS_DB_PATH` and optionally `RUNS_ARCHIVE_PATH` before starting the server. Both locations hold private activity data. Stop the server and back up or restore the pair together.
+The first valid submission creates `runs.sqlite3` in the working directory and archives Garmin's original response bytes in `runs-archive/` beside the database. To keep them elsewhere, set `RUNS_DB_PATH` and optionally `RUNS_ARCHIVE_PATH` before starting the server. Use a dedicated archive directory with mode `0700`. The app restricts the database, its journal files and archived sources to the owner before writing or reusing them. Stop the server and back up or restore the pair together.
 
 To reopen a run offline, stop the process and repeat the start command with `RUNS_GARMIN_OFFLINE=1` and the same storage paths. Open the saved report and the activity's **Activity JSON** link. Startup, report refresh and activity views use local storage. An interrupted report retains its dates and any activities already committed.
 

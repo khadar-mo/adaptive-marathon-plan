@@ -5,9 +5,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import tempfile
+import threading
+import time
 
 
 SCHEMA = """
@@ -42,22 +45,53 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def local_id(value):
+    if re.fullmatch(r"[0-9]{1,19}", value):
+        number = int(value)
+        if 0 < number < 2**63:
+            return number
+    return None
+
+
+@contextmanager
+def private_file(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise OSError("Private storage needs a regular file")
+        if mode & 0o077:
+            os.fchmod(fd, mode & 0o600)
+        yield stream
+
+
+class ArchivePermissionsError(OSError):
+    pass
+
+
 class Archive:
     def __init__(self, directory):
         self.directory = Path(directory)
 
-    def contains(self, digest):
+    def read(self, digest):
+        if not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise OSError("Invalid archive reference")
         try:
-            with (self.directory / digest).open("rb") as saved:
-                return hashlib.file_digest(saved, "sha256").hexdigest() == digest
+            with private_file(self.directory / digest) as saved:
+                data = saved.read()
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise OSError("Archived source checksum mismatch")
+            return data
         except FileNotFoundError:
-            return False
+            return None
 
     def put(self, data):
         digest = hashlib.sha256(data).hexdigest()
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.directory.stat().st_mode & 0o077:
+            raise ArchivePermissionsError("Use a private archive directory with mode 0700, then retry these dates.")
         target = self.directory / digest
-        if target.exists() and self.contains(digest):
+        if self.read(digest) is not None:
             return digest
         with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as pending:
             try:
@@ -67,8 +101,8 @@ class Archive:
                 try:
                     os.link(pending.name, target)  # Publish without replacing an immutable source.
                 except FileExistsError:
-                    if not self.contains(digest):
-                        raise OSError("Archived source checksum mismatch") from None
+                    if self.read(digest) is None:
+                        raise OSError("Archived source disappeared during publication") from None
                 directory_fd = os.open(self.directory, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)
@@ -87,6 +121,8 @@ class ActiveImport(Exception):
 class Store:
     def __init__(self, path):
         self.path = Path(path)
+        self.recovery_lock = threading.Lock()
+        self.recovery_pending = True
 
     @contextmanager
     def connect(self, *, write=False, create=False):
@@ -98,6 +134,17 @@ class Store:
                 pass
         if not stat.S_ISREG(self.path.stat().st_mode):
             raise OSError("SQLite needs a regular file")
+        if write:
+            # Earlier versions documented creating an empty DB with the shell's umask.
+            resolved = self.path.resolve(strict=True)
+            with private_file(resolved):
+                pass
+            for suffix in ("-wal", "-shm", "-journal"):
+                try:
+                    with private_file(str(resolved) + suffix):
+                        pass
+                except FileNotFoundError:
+                    pass
         uri = self.path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro")
         with closing(sqlite3.connect(uri, uri=True)) as db:
             db.row_factory = sqlite3.Row
@@ -119,30 +166,56 @@ class Store:
             yield db if initialized else None
 
     def interrupt_unfinished(self):
-        with self.history() as db:
-            pending = db and db.execute("SELECT 1 FROM imports WHERE state='running'").fetchone()
-        if pending:
-            with self.connect(write=True) as db:
-                db.execute("UPDATE imports SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
+        with self.recovery_lock:
+            if self.recovery_pending:
+                with self.history() as db:
+                    pending = db and db.execute("SELECT 1 FROM imports WHERE state='running'").fetchone()
+                if pending:
+                    with self.connect(write=True) as db:
+                        db.execute("UPDATE imports SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
+                self.recovery_pending = False
 
     def start(self, first, last):
+        self.interrupt_unfinished()  # Retry startup recovery if storage was unavailable.
+        active_query = "SELECT id FROM imports WHERE state='running'"
+        with self.history() as db:
+            active = db and db.execute(active_query).fetchone()
+            if active:
+                raise ActiveImport(active["id"])
         with self.connect(write=True, create=True) as db:
-            active = db.execute("SELECT id FROM imports WHERE state='running'").fetchone()
+            active = db.execute(active_query).fetchone()
             if active:
                 raise ActiveImport(active["id"])
             return db.execute("""
                 INSERT INTO imports(requested_from, requested_to, started_at, state)
                 VALUES (?, ?, ?, 'running')""", (first, last, now())).lastrowid
 
+    def write_report(self, statement, parameters):
+        # The background worker still owns the running row while another SQLite
+        # connection holds a lock. Persist its issues and outcome once the lock clears.
+        while True:
+            try:
+                with self.connect(write=True) as db:
+                    db.execute(statement, parameters)
+                return
+            except sqlite3.OperationalError as exc:
+                if (getattr(exc, "sqlite_errorcode", 0) & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                time.sleep(0.05)
+
     def finish(self, import_id, state):
-        with self.connect(write=True) as db:
-            db.execute("UPDATE imports SET state=?, finished_at=? WHERE id=? AND state='running'",
-                       (state, now(), import_id))
+        try:
+            self.write_report("UPDATE imports SET state=?, finished_at=? WHERE id=? AND state='running'",
+                              (state, now(), import_id))
+        except (sqlite3.Error, OSError):
+            # The worker has exited without a durable outcome. Recover the
+            # interrupted report on the next submission if storage comes back.
+            with self.recovery_lock:
+                self.recovery_pending = True
 
     def issue(self, import_id, item, step, message, severity="error"):
-        with self.connect(write=True) as db:
-            db.execute("INSERT INTO import_issues(import_id, severity, item, step, message) VALUES (?, ?, ?, ?, ?)",
-                       (import_id, severity, item, step, message))
+        self.write_report("INSERT INTO import_issues(import_id, severity, item, step, message) VALUES (?, ?, ?, ?, ?)",
+                          (import_id, severity, item, step, message))
 
     def originals(self, garmin_id):
         with self.connect() as db:
@@ -162,15 +235,22 @@ class Store:
                 INSERT INTO activities({', '.join(columns)}, original_warning) VALUES ({bindings}, :original_warning)
                 ON CONFLICT(garmin_id) DO UPDATE SET {updates}, original_warning=excluded.original_warning
                 RETURNING id""", {**fields, "original_warning": warning}).fetchone()["id"]
-            added = 0
+            new_activity_source = False
             for kind, digest, file_format in sources:
-                added += db.execute("""
+                if kind == "original_error":
+                    db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?""",
+                               (activity_id, digest))
+                added = db.execute("""
                     INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
                     VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
                     (activity_id, kind, digest, file_format, now())).rowcount
+                # A list page can change because a different run moved or was edited.
+                if added and kind != "list":
+                    new_activity_source = True
             outcome = "inserted"
             if previous:
-                changed = added or previous["original_warning"] != warning or any(previous[k] != fields[k] for k in columns)
+                changed = (new_activity_source or previous["original_warning"] != warning
+                           or any(previous[k] != fields[k] for k in columns))
                 outcome = "updated" if changed else "unchanged"
             db.execute("INSERT INTO import_activities(import_id, activity_id, outcome) VALUES (?, ?, ?)",
                        (import_id, activity_id, outcome))
@@ -185,7 +265,7 @@ class Store:
 
     def report(self, import_id):
         with self.history() as db:
-            row = db and db.execute("SELECT * FROM imports WHERE id=?", (str(import_id),)).fetchone()
+            row = db and db.execute("SELECT * FROM imports WHERE id=?", (local_id(import_id),)).fetchone()
             if not row:
                 return None
             activities = db.execute("""SELECT a.id, a.garmin_id, ia.outcome FROM import_activities ia
@@ -197,7 +277,7 @@ class Store:
 
     def activity(self, activity_id):
         with self.history() as db:
-            row = db and db.execute("SELECT * FROM activities WHERE id=?", (str(activity_id),)).fetchone()
+            row = db and db.execute("SELECT * FROM activities WHERE id=?", (local_id(activity_id),)).fetchone()
             if not row:
                 return None
             activity = dict(row)

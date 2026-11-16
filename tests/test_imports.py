@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, closing
 import hashlib
 from io import BytesIO
 import json
+import re
 import sqlite3
 import threading
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +15,7 @@ import pytest
 import app
 import garmin_import
 import runs
+from storage import Store
 
 
 pytestmark = pytest.mark.anyio
@@ -25,6 +27,8 @@ LISTED = {"activityId": 42, "activityName": "Fixture", "activityType": {"typeKey
           "duration": 1500, "elapsedDuration": 1800, "distance": 4900, "movingDuration": 1475}
 DETAIL = {"activityId": 42, "activityName": "Track <fixture>", "activityTypeDTO": {"typeKey": "track_running"},
           "summaryDTO": {"distance": 5001.25, "elapsedDuration": 1801.1}}
+# A FIT envelope with a six-byte message definition and trailing file CRC.
+FIT = bytes.fromhex("0c 10 00 00 06 00 00 00 2e 46 49 54 40 00 00 00 00 00 6d 33")
 
 
 @pytest.fixture
@@ -45,9 +49,10 @@ class FixtureGarmin:
         self.calls = []
         self.listed = [LISTED.copy()]
         self.detail = {**DETAIL, "summaryDTO": DETAIL["summaryDTO"].copy()}
+        self.extra_details = {}
         with BytesIO() as output:
             with ZipFile(output, "w") as original:
-                original.writestr("fixture.fit", b"synthetic file bytes")
+                original.writestr("fixture.fit", FIT)
             self.original = output.getvalue()
         self.original_error = None
         self.detail_error = None
@@ -75,8 +80,8 @@ class FixtureGarmin:
             self.before_detail()
             if self.detail_error:
                 raise self.detail_error
-            return BytesIO(self.wire(self.detail))
-        assert path == "/download-service/files/activity/42"
+            return BytesIO(self.wire(self.extra_details.get(path.rsplit("/", 1)[-1], self.detail)))
+        assert path in {f"/download-service/files/activity/{key}" for key in ("42", *self.extra_details)}
         if self.original_error:
             raise self.original_error
         return BytesIO(self.original)
@@ -152,8 +157,11 @@ async def test_saved_bytes_identity_detail_and_cold_offline_reads(history, tmp_p
             assert f'/activities/{local_id}' in (await client.get(report["html_url"])).text
             assert (await client.get(detail_path)).json() == detail
             html = (await client.get(f"/activities/{local_id}")).text
-            assert all(value in html for value in ("Track &lt;fixture&gt;", "5.00 km", "25:00", "30:01",
-                                                    "24:35", detail["start_local"], detail["garmin_url"], detail_path))
+            assert all(value in html for value in ("Track &lt;fixture&gt;", detail["garmin_url"], detail_path))
+            assert dict(re.findall(r"<dt>(.*?)</dt>\s*<dd>(.*?)</dd>", html)) == {
+                "Recorded local start": detail["start_local"], "Distance": "5.00 km",
+                "Watch timer": "25:00", "Elapsed time": "30:01", "Moving time": "24:35",
+            }
         assert history.calls == calls
 
 
@@ -161,6 +169,7 @@ async def test_saved_bytes_identity_detail_and_cold_offline_reads(history, tmp_p
     b'{}', b'null', b'[]', b'{', b'{"from":"2024-02-29"}', b'{"to":"2024-02-29"}',
     b'{"from":"2024-02-30","to":"2024-03-01"}', b'{"from":"2024-03-01","to":"2024-02-29"}',
     b'{"from":"20240229","to":"2024-02-29"}', b'{"from":0,"to":null}', b'{"anything":"else"}',
+    b'{"from":1e999,"to":"2024-02-29"}', br'{"from":"\ud800","to":"2024-02-29"}',
 ])
 async def test_invalid_dates_precede_every_write(history, tmp_path, body):
     async with server() as client:
@@ -184,7 +193,7 @@ async def test_unknown_local_ids_are_not_found(history):
     async with server() as client:
         await submit(client)
         for prefix in ("/api/activities", "/activities", "/api/imports", "/imports"):
-            for unknown in ("999", "garmin-id", "18446744073709551616"):
+            for unknown in ("999", "garmin-id", "1e0", "18446744073709551616", "9" * 4301):
                 assert (await client.get(f"{prefix}/{unknown}")).status_code == 404
 
 
@@ -290,11 +299,13 @@ async def test_bad_detail_never_replaces_a_good_row_and_other_activities_survive
         saved = good["activities"][0]
         path = f'/api/activities/{saved["id"]}'
         before = (await client.get(path)).json()
-        history.listed = [{"activityId": 51}, *history.listed, *history.listed]
+        history.listed = [{**LISTED, "activityId": 51, "activityName": "Another run"}, *history.listed, *history.listed]
         partial = await submit(client)
         # The server returned the detail for 42 in response to the request for 51.
         assert partial["state"] == "partial" and partial["issues"][0]["item"] == "51"
-        assert partial["activities"] == [{**saved, "outcome": "updated"}]
+        assert "did not identify the requested activity" in partial["issues"][0]["message"]
+        assert "/download-service/files/activity/51" not in history.calls
+        assert partial["activities"] == [{**saved, "outcome": "unchanged"}]
         assert history.calls.count("/activity-service/activity/42") == 2
         history.detail_error = runs.ConnectionProblem("Garmin activity detail timed out. Check your connection and retry.")
         history.listed = [LISTED]
@@ -313,7 +324,7 @@ async def test_original_format_and_optional_explicit_moving_time(history, tmp_pa
         assert refused["state"] == "complete" and refused["issues"][0]["step"] == "Original download"
         assert "private provider response" not in json.dumps(refused)
         assert (tmp_path / "archive" / digest(history.original)).read_bytes() == history.original
-        history.original = bytes([14, 16]) + bytes(6) + b".FIT" + bytes(4)
+        history.original = FIT
         history.detail["summaryDTO"].update({"movingDuration": 1440, "duration": 0})
         retried = await submit(client)
         assert retried["state"] == "complete" and not retried["issues"]
@@ -334,3 +345,145 @@ async def test_offline_submission_fails_cleanly_and_empty_retry_is_durable(histo
         empty = await submit(client)
         assert empty["state"] == "complete" and not empty["activities"] and not empty["issues"]
         assert (await client.get(offline["report_url"])).json() == offline
+
+
+async def test_first_import_protects_existing_database_and_live_sidecars(history, tmp_path):
+    path = tmp_path / "runs.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE earlier_data (id INTEGER)")
+        files = [path, tmp_path / "runs.sqlite3-wal", tmp_path / "runs.sqlite3-shm"]
+        for file in files:
+            file.chmod(0o644)
+        async with server() as client:
+            assert (await client.get("/health")).status_code == 200
+            assert (await client.post(SUBMIT, json={"to": DAY["to"]})).status_code == 422
+            assert path.stat().st_mode & 0o777 == 0o644
+            assert (await submit(client))["state"] == "complete"
+            assert all(file.stat().st_mode & 0o077 == 0 for file in files)
+            assert db.execute("SELECT name FROM activities").fetchone() == ("Track <fixture>",)
+
+
+@pytest.mark.parametrize("invalid", ["empty zip", "empty member", "damaged member", "truncated fit"])
+async def test_unusable_original_is_archived_warned_and_retried(history, tmp_path, invalid):
+    good = history.original
+    if invalid in ("empty zip", "empty member"):
+        with BytesIO() as stream:
+            with ZipFile(stream, "w") as zipped:
+                if invalid == "empty member":
+                    zipped.writestr("empty.fit", b"")
+            history.original = stream.getvalue()
+    elif invalid == "damaged member":
+        history.original = good.replace(FIT, b"x" * len(FIT))
+    else:
+        history.original = FIT[:-4]
+    async with server() as client:
+        result = await submit(client)
+        assert result["state"] == "complete" and result["issues"][0]["step"] == "Original download"
+        item, = result["activities"]
+        path = f'/api/activities/{item["id"]}'
+        before = (await client.get(path)).json()
+        assert before["warnings"] and "original" not in {s["kind"] for s in before["sources"]}
+        assert (tmp_path / "archive" / digest(history.original)).read_bytes() == history.original
+        history.original = good
+        recovered = await submit(client)
+        assert recovered["activities"] == [{**item, "outcome": "updated"}] and not recovered["issues"]
+        assert history.calls.count("/download-service/files/activity/42") == 2
+        assert not (await client.get(path)).json()["warnings"]
+
+
+async def test_page_reorder_preserves_activity_outcomes_and_recorded_precision(history):
+    history.listed[0]["startTimeLocal"] = "2024-02-29T12:11"
+    history.listed.append({**LISTED, "activityId": 51})
+    history.extra_details["51"] = {**DETAIL, "activityId": 51}
+    async with server() as client:
+        first = await submit(client)
+        assert len(first["activities"]) == 2
+        history.listed.reverse()
+        repeat = await submit(client)
+        assert repeat["activities"] == [{**item, "outcome": "unchanged"} for item in first["activities"]]
+        local_id = first["activities"][0]["id"]
+        detail = (await client.get(f"/api/activities/{local_id}")).json()
+        assert detail["start_local"] == "2024-02-29 12:11"
+        assert [s["kind"] for s in detail["sources"]].count("list") == 2
+        assert "<dd>2024-02-29 12:11</dd>" in (await client.get(f"/activities/{local_id}")).text
+
+
+async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch):
+    # Acquire a real writer lock just before the background task commits its outcome.
+    entered, proceed = threading.Event(), threading.Event()
+    finish = Store.finish
+    connect = sqlite3.connect
+
+    def delayed_finish(self, import_id, state):
+        entered.set()
+        assert proceed.wait(5)
+        finish(self, import_id, state)
+
+    monkeypatch.setattr(Store, "finish", delayed_finish)
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
+    async with server() as client:
+        pending = asyncio.create_task(client.post(SUBMIT, json=DAY))
+        assert await asyncio.to_thread(entered.wait, 5)
+        with closing(connect(tmp_path / "runs.sqlite3")) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            proceed.set()
+            await asyncio.sleep(0.15)
+            assert not pending.done()
+            conflict = await client.post(SUBMIT, json=DAY)
+            assert conflict.status_code == 409 and conflict.json()["id"] == 1
+            blocker.rollback()
+        response = await pending
+        assert (await client.get(response.json()["report_url"])).json()["state"] == "complete"
+        assert (await submit(client))["state"] == "complete"
+
+
+async def test_restored_storage_must_be_private_and_reused_objects_are_protected(history, tmp_path):
+    directory = tmp_path / "archive"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    listed = history.wire(history.listed)
+    restored = directory / digest(listed)
+    restored.write_bytes(listed)
+    restored.chmod(0o644)
+    async with server() as client:
+        refused = await submit(client)
+        assert refused["state"] == "failed" and not refused["activities"]
+        assert "0700" in refused["issues"][0]["message"]
+        directory.chmod(0o700)
+        assert (await submit(client))["state"] == "complete"
+        assert restored.stat().st_mode & 0o077 == 0
+
+
+async def test_cached_unusable_original_is_reclassified_and_replaced(history, tmp_path):
+    async with server() as client:
+        history.original = FIT[:-4]
+        first = await submit(client)
+        with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+            db.execute("UPDATE activity_sources SET kind='original', format='fit' WHERE kind='original_error'")
+        history.original = FIT
+        result = await submit(client)
+        item, = result["activities"]
+        assert item["id"] == first["activities"][0]["id"] and not result["issues"]
+        assert history.calls.count("/download-service/files/activity/42") == 2
+        row = (await client.get(f'/api/activities/{item["id"]}')).json()
+        assert {s["sha256"]: s["kind"] for s in row["sources"] if s["format"] == "fit"} == {
+            digest(FIT): "original", digest(FIT[:-4]): "original_error",
+        }
+
+
+async def test_retry_recovers_worker_that_could_not_persist_final_state(history, monkeypatch):
+    write_report = Store.write_report
+
+    def unavailable(self, statement, parameters):
+        if statement.startswith("UPDATE imports"):
+            raise OSError("fixture storage unavailable")
+        write_report(self, statement, parameters)
+
+    async with server() as client:
+        with monkeypatch.context() as temporarily:
+            temporarily.setattr(Store, "write_report", unavailable)
+            accepted = (await client.post(SUBMIT, json=DAY)).json()
+        retry = await submit(client)
+        assert retry["state"] == "complete" and retry["activities"][0]["outcome"] == "unchanged"
+        assert (await client.get(accepted["report_url"])).json()["state"] == "interrupted"

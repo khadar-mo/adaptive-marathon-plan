@@ -8,6 +8,8 @@ import stat
 from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -60,6 +62,13 @@ async def storage_error(request, exc):
     return JSONResponse({"detail": "Local storage is unavailable. Check SQLite and archive permissions."}, status_code=503)
 
 
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request, exc):
+    if request.method == "POST" and request.url.path == "/api/imports/garmin":
+        return JSONResponse({"detail": "Enter From and To as YYYY-MM-DD, with From on or before To."}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.get("/health")
 def health():
     path = app.state.store.path
@@ -108,16 +117,16 @@ def reports():
     return [{**row, **report_links(row["id"])} for row in app.state.store.reports()]
 
 
-@app.get("/api/imports/{import_id:int}")
-def report(import_id: int):
+@app.get("/api/imports/{import_id}")
+def report(import_id: str):
     row = app.state.store.report(import_id)
     if row is None:
         raise HTTPException(404, "Import not found.")
-    return {**row, **report_links(import_id)}
+    return {**row, **report_links(row["id"])}
 
 
-@app.get("/api/activities/{activity_id:int}")
-def activity(activity_id: int):
+@app.get("/api/activities/{activity_id}")
+def activity(activity_id: str):
     row = app.state.store.activity(activity_id)
     if row is None:
         raise HTTPException(404, "Activity not found.")
@@ -134,11 +143,11 @@ def imports_page(request: Request):
     return views.imports(reports(), request.query_params.get("from", ""), request.query_params.get("to", ""))
 
 
-@app.get("/imports/{import_id:int}", response_class=HTMLResponse)
-def report_page(import_id: int):
+@app.get("/imports/{import_id}", response_class=HTMLResponse)
+def report_page(import_id: str):
     return views.report(report(import_id))
 
 
-@app.get("/activities/{activity_id:int}", response_class=HTMLResponse)
-def detail_page(activity_id: int):
+@app.get("/activities/{activity_id}", response_class=HTMLResponse)
+def detail_page(activity_id: str):
     return views.activity(activity(activity_id))
