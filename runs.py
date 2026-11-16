@@ -85,14 +85,16 @@ def retry_advice(header):
     return "Wait for the rate limit to reset and retry."
 
 
-def request(url, *, step, reconnect, headers=None, form=None, method=None, plain=False):
+def request(url, *, step, reconnect, headers=None, form=None, method=None, plain=False, raw=False):
     body = urlencode(form).encode() if form is not None else None
-    headers = {"Accept": "*/*" if plain else "application/json", **(headers or {})}
+    headers = {"Accept": "*/*" if plain or raw else "application/json", **(headers or {})}
     if any(not value.isascii() or not value.isprintable() for value in headers.values()):
         raise ConnectionProblem(f"{step}: invalid credential format. {reconnect}")
     req = Request(url, data=body, headers=headers, method=method)
     try:
         with build_opener(NoRedirect()).open(req, timeout=PROVIDER_TIMEOUT) as response:
+            if raw:
+                return response.read()
             return response.read().decode().strip() if plain else json.load(response)
     except HTTPError as err:
         with err:
@@ -116,6 +118,10 @@ def request(url, *, step, reconnect, headers=None, form=None, method=None, plain
 def activity_page(url, token, params, *, step, reconnect, id_field):
     page = request(url + "?" + urlencode(params), headers={"Authorization": "Bearer " + token},
                    step=step, reconnect=reconnect)
+    return validate_page(page, id_field, step)
+
+
+def validate_page(page, id_field, step):
     if not isinstance(page, list) or any(
         not isinstance(a, dict) or not re.fullmatch(r"[0-9]+", str(a.get(id_field)))
         for a in page
@@ -128,7 +134,7 @@ def valid_token(value):
     return isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9._~+/-]+=*", value) is not None
 
 
-def garmin_runs(settings, limit):
+def garmin_token(settings):
     name = "GARMIN_PERSONAL_API_KEY"
     key = settings.get(name, "").strip()
     from_shell = name in os.environ
@@ -143,21 +149,42 @@ def garmin_runs(settings, limit):
     credential_help = f"Check the raw {name} from {source} and its active status in Garmin Connect."
     if from_shell:
         credential_help += " The shell value overrides .env."
+    token = request(GARMIN + "/personalapitoken-service/personal-api/personal-api-key/token",
+                    step="Garmin token exchange", reconnect=credential_help,
+                    method="POST", headers={"Authorization": "ApiKey " + key}, plain=True)
+    if not valid_token(token):
+        raise ConnectionProblem("Garmin token exchange: unexpected token response. Check Garmin availability and retry.")
+    return token
+
+
+class GarminClient:
+    def __init__(self, settings):
+        self.settings = settings
+        self.token = None
+
+    def get(self, path, step, *, raw=False):
+        for attempt in range(2):
+            if self.token is None:
+                self.token = garmin_token(self.settings)
+            try:
+                return request(GARMIN + path, headers={"Authorization": "Bearer " + self.token},
+                               step=step, reconnect=GARMIN_RECONNECT, raw=raw)
+            except ProviderError as err:
+                if err.status != 401:
+                    raise
+                self.token = None
+                if attempt == 1:
+                    raise ConnectionProblem(f"{step}: HTTP 401 after a new bearer token. {GARMIN_RECONNECT}") from None
+
+    def search(self, params, *, raw=False):
+        path = "/activitylist-service/activities/search/activities?" + urlencode(params)
+        return self.get(path, "Garmin activity search", raw=raw)
+
+
+def garmin_runs(settings, limit):
     params = {"activityType": "running", "sortOrder": "desc", "start": 0, "limit": limit}
-    for attempt in range(2):
-        token = request(GARMIN + "/personalapitoken-service/personal-api/personal-api-key/token",
-                        step="Garmin token exchange", reconnect=credential_help,
-                        method="POST", headers={"Authorization": "ApiKey " + key}, plain=True)
-        if not valid_token(token):
-            raise ConnectionProblem("Garmin token exchange: unexpected token response. Check Garmin availability and retry.")
-        try:
-            return activity_page(GARMIN + "/activitylist-service/activities/search/activities", token, params,
-                                 step="Garmin activity search", reconnect=GARMIN_RECONNECT, id_field="activityId")[:limit]
-        except ProviderError as err:
-            if err.status != 401:
-                raise
-            if attempt == 1:
-                raise ConnectionProblem(f"Garmin activity search: HTTP 401 after a new bearer token. {GARMIN_RECONNECT}") from None
+    page = GarminClient(settings).search(params)
+    return validate_page(page, "activityId", "Garmin activity search")[:limit]
 
 
 def strava_code(client_id, redirect):

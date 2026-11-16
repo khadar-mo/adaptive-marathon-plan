@@ -1,8 +1,12 @@
 .env
-docs/
+docs/*
+!docs/specs/
+docs/specs/*
+!docs/specs/adaptive-marathon-plan-mvp-spec.md
 .codex/
 .venv/
 __pycache__/
 .pytest_cache/
 runs.sqlite3
 runs.sqlite3-*
+runs-archive/
