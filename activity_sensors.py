@@ -1,5 +1,5 @@
 """Read optional sensor evidence from the locally archived activity sources."""
-from garmin_activity import json_record, legacy_selected_source, original_fit
+from garmin_activity import archived_fit, json_record, legacy_selected_source, original_fit
 from fit_data import read_messages
 
 
@@ -34,7 +34,7 @@ def json_sensors(data, gid):
     return hr, gps or None
 
 
-def sensor_sources(db, activity, sources):
+def sensor_sources(db, activity, sources, include_uploads):
     gid, aid = activity["garmin_id"], activity["id"]
     if gid:
         # An explicit edit can return to an older content hash. Use the selected scan,
@@ -47,27 +47,28 @@ def sensor_sources(db, activity, sources):
         for index, kind in enumerate(("detail", "list")):
             if latest:
                 if latest[index]:
-                    yield kind, latest[index]
+                    yield kind, latest[index], None
             else:
                 # Legacy imports did not record the selected version. Use unambiguous evidence.
                 versions = [s["sha256"] for s in sources if s["kind"] == kind]
                 digest = versions[0] if len(versions) == 1 else legacy_selected_source(db, gid, kind)
                 if digest:
-                    yield kind, digest
-        digest = original_fit(db, gid, aid)
-        if digest:
-            yield "fit", digest
-    for source in sources:
-        if source["kind"] == "fit":
-            yield "fit", source["sha256"]
+                    yield kind, digest, None
+        original = original_fit(db, gid, aid)
+        if original:
+            yield "fit", *original
+    if include_uploads:
+        for source in sources:
+            if source["kind"] == "fit":
+                yield "fit", source["sha256"], None
 
 
-def read(db, archive, activity, sources):
+def read(db, archive, activity, sources, *, include_uploads=True):
     values = {"average_hr_bpm": None, "gps_available": None}
     origins = {}
-    for kind, digest in sensor_sources(db, activity, sources):
+    for kind, digest, outer in sensor_sources(db, activity, sources, include_uploads):
         try:
-            data = archive.read(digest)
+            data = archived_fit(archive, digest, outer) if kind == "fit" else archive.read(digest)
             if data is None:
                 continue
             pair = fit_sensors(data) if kind == "fit" else json_sensors(data, activity["garmin_id"])

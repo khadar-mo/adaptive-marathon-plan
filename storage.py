@@ -215,9 +215,10 @@ class Store:
     def __init__(self, path, archive=None):
         self.path = Path(path)
         self.archive = archive or Archive(self.path.with_name("runs-archive"))
-        self.recovery_lock = threading.Lock()
+        self.recovery_lock = threading.RLock()
         self.recovery_pending = True
         self.finish_failure = None
+        self.active_import = None
 
     @contextmanager
     def connect(self, *, write=False, create=False, timeout=5):
@@ -297,7 +298,16 @@ class Store:
                 self.recovery_pending = False
 
     def start(self, first, last, *, source='garmin'):
-        self.interrupt_unfinished()  # Retry startup recovery if storage was unavailable.
+        # Return the committed ID immediately even if the worker is blocked inside
+        # its final SQLite write. Keep the durable check for startup and recovery.
+        with self.recovery_lock:
+            if self.active_import is not None:
+                raise ActiveImport(self.active_import)
+            self.interrupt_unfinished()
+            self.active_import = self._start_report(first, last, source)
+            return self.active_import
+
+    def _start_report(self, first, last, source):
         active_query = "SELECT id FROM imports WHERE state='running'"
         with self.history() as db:
             active = db and db.execute(active_query).fetchone()
@@ -363,15 +373,20 @@ class Store:
                 time.sleep(0.05)
 
     def finish(self, import_id, state):
+        failure = None
         try:
             self.write_report("UPDATE imports SET state=?, finished_at=? WHERE id=? AND state='running'",
                               (state, now(), import_id), review_import=import_id if state == "partial" else None)
         except (sqlite3.Error, OSError) as exc:
             # The worker has exited without a durable outcome. Recover the
             # interrupted report on the next submission if storage comes back.
-            with self.recovery_lock:
-                self.finish_failure = (import_id, storage_failure("Finish import report", exc))
+            failure = storage_failure("Finish import report", exc)
+        with self.recovery_lock:
+            if failure:
+                self.finish_failure = (import_id, failure)
                 self.recovery_pending = True
+            if self.active_import == import_id:
+                self.active_import = None
 
     def issue(self, import_id, item, step, message, severity="error"):
         self.write_report("INSERT INTO import_issues(import_id, severity, item, step, message) VALUES (?, ?, ?, ?, ?)",
@@ -504,14 +519,17 @@ class Store:
                 return None
             activity_id = row["id"]
             aliases = garmin_activity.active_aliases(db, activity_id)[activity_id]
-            activity = garmin_activity.running_headline(db, self.archive, dict(row), aliases)
+            activity = garmin_activity.running_headline(db, self.archive, dict(row), aliases, include_laps=True)
             warning = activity.pop("original_warning")
             sources = [dict(s) for s in db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
                                     WHERE activity_id=? ORDER BY rowid""", (activity_id,))]
-            sensors, origins = activity_sensors.read(db, self.archive, activity, sources)
-            laps = db.execute("""SELECT sequence, 'fit' AS source, distance_m, timer_seconds, elapsed_seconds, moving_seconds
-                                 FROM laps WHERE activity_id=? ORDER BY sequence""", (activity_id,))
-            laps = [dict(lap) for lap in laps]
+            sensors, origins = activity_sensors.read(db, self.archive, activity, sources,
+                                                     include_uploads=activity["garmin_id"] == row["garmin_id"])
+            laps = activity.pop("laps", None)
+            if laps is None:
+                laps = [dict(lap) for lap in db.execute("""SELECT sequence, 'fit' AS source, distance_m,
+                            timer_seconds, elapsed_seconds, moving_seconds FROM laps
+                            WHERE activity_id=? ORDER BY sequence""", (activity_id,))]
             warnings = [warning] if warning else []
             metric_sources = json.loads(activity["metric_sources"])
             for key, singular, plural in (("distance_m", "distance", "distances"), ("timer_seconds", "timer time", "timer times"),

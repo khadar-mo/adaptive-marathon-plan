@@ -1,12 +1,13 @@
 """Garmin headline fields and the local evidence for explicitly linked activity IDs."""
 from collections import defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import re
 
-from fit_data import decode_fit
-from fit_store import merge_fields, retain_fit_fields
+from fit_data import decode_fit, fit_member
+from fit_store import merge_fields
 import runs
 
 
@@ -113,15 +114,31 @@ def active_aliases(db, activity_id=None):
 
 
 def original_fit(db, gid, aid):
-    original = db.execute("""SELECT m.fit_sha FROM garmin_original_versions v
+    original = db.execute("""SELECT m.fit_sha, m.original_sha FROM garmin_original_versions v
         JOIN original_members m ON m.original_sha=v.original_sha
         JOIN activity_sources s ON s.sha256=m.original_sha AND s.activity_id=?
         WHERE v.garmin_id=? ORDER BY v.last_import_id DESC, v.rowid DESC LIMIT 1""", (aid, gid)).fetchone()
     if not original:
-        original = db.execute("""SELECT m.fit_sha FROM legacy_garmin_originals l
+        original = db.execute("""SELECT m.fit_sha, m.original_sha FROM legacy_garmin_originals l
             JOIN original_members m ON m.original_sha=l.original_sha
             WHERE l.garmin_id=? ORDER BY l.rowid DESC LIMIT 1""", (gid,)).fetchone()
-    return original[0] if original else None
+    return tuple(original) if original and original[0] else None
+
+
+def archived_fit(archive, member_sha, original_sha=None):
+    try:
+        member = archive.read(member_sha)
+        if member is not None:
+            return member
+    except OSError:
+        pass
+    if original_sha and original_sha != member_sha:
+        original = archive.read(original_sha)
+        if original:
+            _, member = fit_member(original)
+            if hashlib.sha256(member).hexdigest() == member_sha:
+                return member
+    return None
 
 
 def archived_record(archive, digest, gid):
@@ -132,7 +149,7 @@ def archived_record(archive, digest, gid):
         return {}
 
 
-def running_headline(db, archive, row, aliases):
+def running_headline(db, archive, row, aliases, *, include_laps=False):
     """Prefer the primary running headline. If reclassified, use a still-running linked recording."""
     if not aliases or not row["garmin_id"] or row["sport"] in RUN_TYPES:
         return row
@@ -143,15 +160,17 @@ def running_headline(db, archive, row, aliases):
     fields = activity_fields(gid, listed, detail or {"activityId": gid})
     fields["local_date"] = selected["local_date"]
     fields["sport"] = fields["sport"] or "running"
-    digest = original_fit(db, gid, row["id"])
+    original = original_fit(db, gid, row["id"])
+    fit = None
     try:
-        member = digest and archive.read(digest)
+        member = original and archived_fit(archive, *original)
         if member:
-            fields = merge_fields(fields, decode_fit(member)["fields"])
+            fit = decode_fit(member)
+            fields = merge_fields(fields, fit["fields"])
     except (OSError, ValueError):
         pass
-    fields = retain_fit_fields(fields, row)
-    if "original_warning" in row:
-        fields["original_warning"] = ("Original unavailable. Recheck these dates to request it again."
-                                      if selected["status"] == "saved" and not selected["original_available"] else None)
+    if include_laps:
+        # Two explicitly linked recordings can have different lap buttons and pause times.
+        fields["laps"] = [{**lap, "sequence": n, "source": "fit"} for n, lap in enumerate(fit["laps"], 1)] if fit else []
+        fields["original_warning"] = None if fit else "Original unavailable. Recheck these dates to request it again."
     return {**row, **fields}

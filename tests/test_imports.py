@@ -440,7 +440,8 @@ async def test_page_reorder_preserves_activity_outcomes_and_recorded_precision(h
         assert "<dt>Recorded local start</dt><dd><span>2024-02-29 12:11</span>" in (await client.get(f"/activities/{local_id}")).text
 
 
-async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch):
+@pytest.mark.parametrize("short_timeout", [True, False], ids=["retry-busy", "default-timeout"])
+async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch, short_timeout):
     # Acquire a real writer lock just before the background task commits its outcome.
     entered, proceed = threading.Event(), threading.Event()
     finish = Store.finish
@@ -452,7 +453,8 @@ async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, m
         finish(self, import_id, state)
 
     monkeypatch.setattr(Store, "finish", delayed_finish)
-    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
+    if short_timeout:
+        monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
     async with server() as client:
         pending = asyncio.create_task(client.post(SUBMIT, json=DAY))
         assert await asyncio.to_thread(entered.wait, 5)
@@ -461,8 +463,11 @@ async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, m
             proceed.set()
             await asyncio.sleep(0.15)
             assert not pending.done()
-            conflict = await client.post(SUBMIT, json=DAY)
-            assert conflict.status_code == 409 and conflict.json()["id"] == 1
+            # Both submission routes must answer while the external lock is still held.
+            for request in (lambda: client.post(SUBMIT, json=DAY),
+                            lambda: client.post("/api/imports/fit", files={"files": ("synthetic.fit", FIT)})):
+                conflict = await asyncio.wait_for(request(), timeout=1)
+                assert conflict.status_code == 409 and conflict.json()["id"] == 1
             blocker.rollback()
         response = await pending
         assert (await client.get(response.json()["report_url"])).json()["state"] == "complete"

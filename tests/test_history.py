@@ -9,7 +9,7 @@ import runs
 import storage
 from fit_fixture import START, make_fit
 from test_fit_import import resolve, upload, zipped
-from test_imports import DAY, OCTOBER, add_run, anyio_backend, history, server, submit
+from test_imports import DAY, OCTOBER, add_run, anyio_backend, digest, history, server, submit
 
 
 pytestmark = pytest.mark.anyio
@@ -214,6 +214,35 @@ async def test_partial_week_drilldown_matches_its_displayed_dates(history):
         detail = await period(client, {"from": "2026-10-01", "to": "2026-10-04"})
         assert [r["garmin_id"] for r in detail["activities"]] == ["51"]
         assert (await client.get("/favicon.ico")).status_code == 204
+
+
+async def test_reclassified_primary_opens_the_running_alias_recorded_laps(history, tmp_path):
+    history.listed = []
+    add_run(history, 91, "2026-10-20")
+    history.original = zipped(make_fit(laps=[(5000, 1500, 1800)], metrics={"total_moving_time": 1499}))
+    async with server() as client:
+        await submit(client, WEEK)
+        history.listed = []
+        add_run(history, 92, "2026-10-21")
+        history.listed[0].pop("movingDuration")
+        alias_fit = make_fit(laps=[(3000, 900, 1000), (2000, 600, 800)], metrics={"avg_heart_rate": 144})
+        history.original = zipped(alias_fit)
+        pending = await submit(client, WEEK)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        assert [l["distance_m"] for l in (await client.get("/api/activities/1")).json()["laps"]] == [5000]
+        add_run(history, 91, "2026-10-20", "cycling")
+        await submit(client, WEEK)
+        # The original ZIP is sufficient even if its extracted member later disappears.
+        (tmp_path / "archive" / digest(alias_fit)).unlink()
+        detail = (await client.get("/api/activities/1")).json()
+        assert detail["garmin_id"] == "92" and [l["distance_m"] for l in detail["laps"]] == [3000, 2000]
+        assert detail["average_hr_bpm"] == 144 and detail["moving_seconds"] is None
+        html = (await client.get("/activities/1")).text
+        assert "3000 m" in html and "2000 m" in html and "5000 m" not in html
+        (tmp_path / "archive" / digest(history.original)).unlink()
+        missing = (await client.get("/api/activities/1")).json()
+        assert missing["laps"] == [] and missing["average_hr_bpm"] is None
+        assert any("Original unavailable" in warning for warning in missing["warnings"])
 
 
 async def test_lap_only_gps_and_timing_discrepancies(history):
