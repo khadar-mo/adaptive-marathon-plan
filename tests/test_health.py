@@ -32,7 +32,7 @@ def serve_database(path):
         server = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "app:app", "--fd", str(fd), "--log-level", "warning"],
             cwd=Path(__file__).resolve().parents[1], pass_fds=(fd,),
-            env={"RUNS_DB_PATH": str(path), "PYTHONDONTWRITEBYTECODE": "1"},
+            env={"RUNS_DB_PATH": str(path), "RUNS_GARMIN_OFFLINE": "1", "PYTHONDONTWRITEBYTECODE": "1"},
         )
         try:
             deadline = time.monotonic() + 10

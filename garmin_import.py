@@ -1,13 +1,13 @@
 """Import running history by recorded local date from the Garmin Personal API."""
 from datetime import datetime, timezone
-from io import BytesIO
 import json
 import math
 import os
 import re
 import sqlite3
-from zipfile import ZipFile
 
+from fit_data import FitError
+from fit_import import index_originals, unpack_original
 import garmin_coverage
 import runs
 from storage import ArchiveChecksumError, ArchivePermissionsError
@@ -103,35 +103,6 @@ def activity_fields(garmin_id, listed, detail):
     return fields
 
 
-def fit_envelope(header, length):
-    size = int.from_bytes(header[4:8], "little")
-    return (len(header) >= 12 and header[0] >= 12 and header[8:12] == b".FIT"
-            and size > 0 and length >= header[0] + size + 2)
-
-
-def original_format(data):
-    # Check the container without decoding the FIT session or extracting files to disk.
-    if fit_envelope(data[:12], len(data)):
-        return "fit"
-    try:
-        with ZipFile(BytesIO(data)) as zipped:
-            members = [member for member in zipped.infolist() if not member.is_dir()]
-            if not any(member.file_size for member in members):
-                return None
-            for member in members:
-                if member.filename.lower().endswith(".fit"):
-                    with zipped.open(member) as file:
-                        if not fit_envelope(file.read(12), member.file_size):
-                            return None
-            if zipped.testzip() is None:
-                return "zip"
-    except Exception:
-        # ZIP metadata and the different compression codecs have no common
-        # decode exception. Keep any unreadable original as a warning.
-        return None
-    return None
-
-
 def cached_source(archive, digest):
     try:
         return archive.read(digest)
@@ -150,26 +121,30 @@ def original_sources(client, store, archive, garmin_id, scan_id):
         if cached is None:
             sources.append(("original_unavailable", digest, file_format))
         else:
-            if original_format(cached) == file_format:
-                return [*sources, ("original", digest, file_format)], None
-            sources.append(("original_error", digest, file_format))
+            try:
+                file_format, fit = unpack_original(archive, cached)
+                return [*sources, ("original", digest, file_format)], None, fit
+            except FitError:
+                sources.append(("original_error", digest, file_format))
+            except OSError:
+                sources.append(("original_unavailable", digest, file_format))
     store.write_report("UPDATE garmin_scan_items SET original_requested=1 WHERE scan_id=? AND garmin_id=?",
                        (scan_id, garmin_id))
     try:
         data = client.get(f"/download-service/files/activity/{garmin_id}", "Garmin original download", raw=True)
     except runs.ConnectionProblem as err:
-        return sources, f"Original unavailable. {err} Retry these dates to request it again."
+        return sources, f"Original unavailable. {err} Retry these dates to request it again.", None
     if not data:
-        return sources, "Original unavailable. Garmin returned an empty file. Retry these dates."
+        return sources, "Original unavailable. Garmin returned an empty file. Retry these dates.", None
     try:
         digest = archive.put(data)
+        file_format, fit = unpack_original(archive, data)
+    except FitError as err:
+        return [*sources, ("original_error", digest, "unknown")], f"Original unavailable. {err} Retry these dates.", None
     except OSError:
-        return sources, "Original unavailable. Check the private archive permissions and retry these dates."
-    file_format = original_format(data)
-    if file_format:
-        sources = [source for source in sources if source[1] != digest]
-        return [*sources, ("original", digest, file_format)], None
-    return [*sources, ("original_error", digest, "unknown")], "Original unavailable. Check the file in Garmin and retry these dates."
+        return sources, "Original unavailable. Check the private archive permissions and retry these dates.", None
+    sources = [source for source in sources if source[1] != digest]
+    return [*sources, ("original", digest, file_format)], None, fit
 
 
 def same_json(left, right):
@@ -217,15 +192,15 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, ver
     sources = [("detail", detail_digest, "json")]
     if page_digest:
         sources.insert(0, ("list", page_digest, "json"))
-    warning = None
+    warning = fit = None
     if status == "saved":
-        originals, warning = original_sources(client, store, archive, garmin_id, scan_id)
+        originals, warning, fit = original_sources(client, store, archive, garmin_id, scan_id)
         sources.extend(originals)
     # Keep the wire bytes even when only their JSON serialization changed.
     detail_changed = detail_digest not in versions and not any(
         same_json(decode(raw, "archived detail", dict), detail)
         for version in versions if (raw := cached_source(archive, version)) is not None)
-    store.save(scan["import_id"], fields, sources, warning, scan_id=scan_id, detail_sha=detail_digest,
+    store.save(scan["import_id"], fields, sources, warning, fit, scan_id=scan_id, detail_sha=detail_digest,
                detail_changed=detail_changed, status=status)
 
 
@@ -308,6 +283,7 @@ def run_import(store, archive, import_id):
     state = "failed"
     label = f"Import {import_id}"
     try:
+        index_originals(store, archive)
         scans = store.scans(import_id)
         label = f'{scans[0]["first"]} to {scans[0]["last"]}'
         client = open_garmin()

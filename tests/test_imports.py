@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 import app
+from fit_fixture import make_fit
 import garmin_coverage
 import garmin_import
 import runs
@@ -31,8 +32,7 @@ LISTED = {"activityId": 42, "activityName": "Fixture", "activityType": {"typeKey
           "duration": 1500, "elapsedDuration": 1800, "distance": 4900, "movingDuration": 1475}
 DETAIL = {"activityId": 42, "activityName": "Track <fixture>", "activityTypeDTO": {"typeKey": "track_running"},
           "summaryDTO": {"distance": 5001.25, "elapsedDuration": 1801.1}}
-# A FIT envelope with a six-byte message definition and trailing file CRC.
-FIT = bytes.fromhex("0c 10 00 00 06 00 00 00 2e 46 49 54 40 00 00 00 00 00 6d 33")
+FIT = make_fit()
 
 
 @pytest.fixture
@@ -58,6 +58,7 @@ class FixtureGarmin:
             with ZipFile(output, "w") as original:
                 original.writestr("fixture.fit", FIT)
             self.original = output.getvalue()
+        self.default_original = self.original
         self.original_error = None
         self.detail_error = None
         self.before_detail = lambda: None
@@ -96,6 +97,9 @@ class FixtureGarmin:
         assert path in {f"/download-service/files/activity/{key}" for key in ("42", *self.extra_details)}
         if self.original_error:
             raise self.original_error
+        gid = path.rsplit("/", 1)[-1]
+        if gid != "42" and self.original == self.default_original:
+            return BytesIO(make_fit(serial=int(gid)))
         return BytesIO(self.original)
 
 
@@ -497,10 +501,10 @@ async def test_cached_unusable_original_is_reclassified_and_replaced(history, tm
 async def test_retry_recovers_worker_that_could_not_persist_final_state(history, monkeypatch):
     write_report = Store.write_report
 
-    def unavailable(self, statement, parameters):
+    def unavailable(self, statement, parameters, **options):
         if statement.startswith("UPDATE imports"):
             raise OSError("fixture storage unavailable")
-        write_report(self, statement, parameters)
+        write_report(self, statement, parameters, **options)
 
     async with server() as client:
         with monkeypatch.context() as temporarily:
@@ -958,10 +962,7 @@ async def test_fit_only_reports_never_seed_garmin_coverage_or_retries(history, t
 
     monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 11, 1))
     with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
-        db.executescript(storage.SCHEMA.replace("requested_from TEXT NOT NULL, requested_to TEXT NOT NULL",
-                                                "requested_from TEXT, requested_to TEXT")
-                         .replace("start_local TEXT NOT NULL, local_date TEXT NOT NULL", "start_local TEXT, local_date TEXT"))
-        db.execute("ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'garmin'")
+        db.executescript(storage.SCHEMA)
         db.executemany("""INSERT INTO imports(requested_from, requested_to, started_at, state, source)
                           VALUES (?, ?, '2026-10-30T12:00:00+00:00', 'partial', 'fit')""",
                        [(None, None), ("2026-05-01", "2026-05-01")])

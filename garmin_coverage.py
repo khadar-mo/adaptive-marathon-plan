@@ -105,7 +105,7 @@ def checked_ranges(db, scan):
         return []
     missing = []
     for row in db.execute("""SELECT DISTINCT local_date FROM garmin_scan_items
-                             WHERE scan_id=? AND status='missing_activity'""", (scan["id"],)):
+                             WHERE scan_id=? AND status IN ('missing_activity', 'pending_identity')""", (scan["id"],)):
         day = row["local_date"]
         if day is None or not scan["first"] <= day <= scan["last"]:
             return []
@@ -127,7 +127,7 @@ def outstanding_items(db):
             WHERE status != 'outside_range' GROUP BY garmin_id)
         SELECT i.*, s.first, s.last FROM latest l JOIN garmin_scan_items i USING(garmin_id, scan_id)
         JOIN garmin_scans s ON s.id=i.scan_id
-        WHERE i.status IN ('missing_activity', 'retry_elsewhere') OR (i.status='saved' AND i.original_available=0)
+        WHERE i.status IN ('missing_activity', 'pending_identity', 'retry_elsewhere') OR (i.status='saved' AND i.original_available=0)
         ORDER BY i.scan_id, i.garmin_id""").fetchall()
 
 
@@ -167,7 +167,7 @@ def plan(db, first, last):
 def legacy_report(first, last):
     return {"mode": "legacy", "from": first, "to": last, "coverage": "unchecked",
             "search_from": first, "search_to": last, "pages_read": None, "enumerated": False,
-            "scanned_from": None, "scanned_to": None, "checked_ranges": [], "unique_ids_found": None,
+            "scanned_from": None, "scanned_to": None, "checked_ranges": [], "unique_ids_found": None, "saved_garmin_ids": None,
             "excluded": None, "missing_metadata": None, "originals_requested": None, "originals_available": None}
 
 
@@ -177,8 +177,8 @@ def scan_report(db, scan):
     items = db.execute("SELECT * FROM garmin_scan_items WHERE scan_id=?", (scan["id"],)).fetchall()
     saved = [i for i in items if i["status"] == "saved"]
     dates = [i["local_date"] for i in saved if i["local_date"]]
-    missing = [i["garmin_id"] for i in items if i["status"] == "missing_activity"]
-    counted = [i for i in items if i["status"] in ("saved", "missing_activity")]
+    missing = [i["garmin_id"] for i in items if i["status"] in ("missing_activity", "pending_identity")]
+    counted = [i for i in items if i["status"] in ("saved", "missing_activity", "pending_identity")]
     checked = checked_ranges(db, scan)
     if not scan["enumerated"] or not observed_window(scan):
         status = "unchecked"
@@ -196,6 +196,7 @@ def scan_report(db, scan):
         "scanned_to": scan["last"] if scan["enumerated"] else None, "enumerated": bool(scan["enumerated"]),
         "checked_ranges": [{"from": iso(a), "to": iso(b)} for a, b in checked],
         "unique_ids_found": sum(i["from_search"] for i in counted),
+        "saved_garmin_ids": sorted(i["garmin_id"] for i in saved),
         "excluded": sum(i["status"] in ("outside_range", "resolved_outside", "retry_elsewhere", "excluded_sport")
                         for i in items),
         "missing_activity_ids": missing, "unidentified_records": scan["unidentified"],

@@ -32,7 +32,7 @@ Open [Imports](http://127.0.0.1:8001/imports) and select **Sync Garmin**. With b
 
 To recheck October, enter 1 October 2026 and 31 October 2026. Garmin search covers an extra day on either side and reads every page through an empty result. The importer checks the sport and recorded local date, refreshes details for each run, and reuses good archived originals. Normal sync refreshes details when a list record changes or its detail is missing.
 
-The report lists saved Garmin IDs, counts of inserts, updates and unchanged runs, exclusions, fully checked dates and any missing activities or originals. JSON formatting changes preserve both raw responses and count as unchanged. A checked empty range has no returned runs. An unread or repeated page leaves coverage incomplete. A missing original is a warning and its summary still counts. **Recheck these dates** retries the range and preserves existing activity IDs.
+The report lists saved Garmin IDs, counts of inserts, updates and unchanged runs, exclusions, fully checked dates and any missing activities or originals. Each scan shows the Garmin IDs it saved, including IDs linked to the same local activity. JSON formatting changes preserve both raw responses and count as unchanged. A checked empty range has no returned runs. An unread or repeated page leaves coverage incomplete. A missing original is a warning and its summary still counts. **Recheck these dates** retries the range and preserves existing activity IDs.
 
 The first valid submission creates `runs.sqlite3` in the working directory and archives Garmin's original response bytes in `runs-archive/` beside the database. To keep them elsewhere, set `RUNS_DB_PATH` and optionally `RUNS_ARCHIVE_PATH` before starting the server. Use a dedicated archive directory with mode `0700`. The app restricts the database, its journal files and archived sources to the owner before writing or reusing them. Stop the server and back up or restore the pair together.
 
@@ -42,8 +42,16 @@ The JSON endpoint accepts `{}` for normal sync or an inclusive pair such as `{"f
 
 Back up the database and archive together before upgrading. On the first submission the app adds scan tracking to an existing database. Earlier one-page reports and their saved activities remain available. A new normal sync verifies coverage from June.
 
+## Recover an offline FIT
+
+On **Imports**, choose one or more exported FIT files and select **Upload FIT files**. You can do this with `RUNS_GARMIN_OFFLINE=1`. The report lists every file, including failed exports. Open an activity to see the recorded laps, watch timer and elapsed time. Uploads never contribute to Garmin date-range coverage.
+
+A renamed FIT and the identical member of a downloaded ZIP keep the same local activity ID. A unique match on manufacturer, product, device serial, creation time and UTC session start also links recordings. A nearby start or conflicting identity appears under **Needs review**. Open the proposed activities, then choose **Link to activity** or **Keep separate**. A FIT without a recorded local offset stays undated until Garmin supplies its date or you confirm it. Decisions survive a restart and a repeated upload.
+
+The multipart endpoint is `POST /api/imports/fit` with one or more `files` fields. The 202 response links to the saved report. To resolve a reported issue, send JSON to `POST /api/imports/{id}/issues/{issue_id}/resolve` with `{"action":"link","activity_id":1}`, `{"action":"keep_separate"}` or `{"action":"set_local_date","local_date":"2026-11-01"}`. Before upgrading a database from the first Garmin importer, stop the server and back up the database and archive together. On startup the app indexes its archived originals locally.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.
 
-To run the tests, activate the virtual environment, install `requirements-dev.txt` with pip and run `python3 -m pytest -q`. The tests use synthetic activities, temporary databases and loopback HTTP.
+To run the tests, activate the virtual environment, install `requirements-dev.txt` with pip and run `python3 -m pytest -q`. The tests use synthetic activities, temporary databases and loopback HTTP. The browser replay runs with Chrome or Chromium on PATH and is required in GitHub Actions.
