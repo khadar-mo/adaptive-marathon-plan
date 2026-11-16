@@ -2,6 +2,8 @@
 from datetime import datetime, timedelta
 import json
 
+import garmin_coverage
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS fit_sources (
@@ -143,6 +145,13 @@ def merge_fields(fields, fallback):
     return fields
 
 
+def retain_fit_fields(fields, previous):
+    origins = json.loads(previous["metric_sources"])
+    recorded = {k: previous[k] if origins.get(k) == "fit" else None for k in fields}
+    recorded["metric_sources"] = previous["metric_sources"]
+    return merge_fields(fields, recorded)
+
+
 def record_activity(db, import_id, activity_id, outcome):
     db.execute("""INSERT INTO import_activities(import_id, activity_id, outcome) VALUES (?, ?, ?)
                   ON CONFLICT(import_id, activity_id) DO UPDATE SET outcome=excluded.outcome
@@ -154,6 +163,29 @@ def store_laps(db, activity_id, laps):
     db.executemany("""INSERT INTO laps(activity_id, sequence, distance_m, timer_seconds, elapsed_seconds, moving_seconds)
                       VALUES (:activity_id, :sequence, :distance_m, :timer_seconds, :elapsed_seconds, :moving_seconds)""",
                    ({**lap, "activity_id": activity_id, "sequence": n} for n, lap in enumerate(laps, 1)))
+
+
+def save_sources(db, activity_id, sources, acquired_at):
+    changed = False
+    for kind, digest, file_format in sources:
+        acquired = acquired_at
+        if kind in ("original", "original_error", "original_unavailable"):
+            first_acquisition = db.execute("""SELECT min(acquired_at) FROM activity_sources
+                WHERE activity_id=? AND sha256=? AND kind IN ('original', 'original_error', 'original_unavailable')""",
+                (activity_id, digest)).fetchone()[0]
+            if first_acquisition:
+                acquired = first_acquisition
+                db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND sha256=? AND kind!=?
+                    AND kind IN ('original', 'original_error', 'original_unavailable')""", (activity_id, digest, kind))
+                db.execute("""UPDATE activity_sources SET acquired_at=? WHERE activity_id=? AND sha256=?
+                              AND kind=? AND acquired_at>?""", (acquired, activity_id, digest, kind, acquired))
+        added = db.execute("""
+            INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
+            (activity_id, kind, digest, file_format, acquired)).rowcount
+        if added and kind not in ("list", "detail"):
+            changed = True
+    return changed
 
 
 def save(db, import_id, payload, target, acquired_at):
@@ -170,10 +202,7 @@ def save(db, import_id, payload, target, acquired_at):
             warning = previous["original_warning"]
         else:
             # Keep FIT-only values when a Garmin update lacks its optional original.
-            origins = json.loads(previous["metric_sources"])
-            old_fit = {k: previous[k] if origins.get(k) == "fit" else None for k in fields}
-            old_fit["metric_sources"] = previous["metric_sources"]
-            fields = merge_fields(fields, old_fit)
+            fields = retain_fit_fields(fields, previous)
         db.execute(f"""UPDATE activities SET {', '.join(k+'=:'+k for k in fields)}, original_warning=:warning
                        WHERE id=:target""", {**fields, "warning": warning, "target": target})
     else:
@@ -184,13 +213,8 @@ def save(db, import_id, payload, target, acquired_at):
                                        {', '.join(':'+k for k in fields)}, :warning)""",
                             {**fields, "warning": warning}).lastrowid
     changed = not previous or previous["original_warning"] != warning or any(previous[k] != v for k, v in fields.items())
-    for kind, digest, file_format in payload["sources"]:
-        if kind == "original_error":
-            db.execute("DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?", (target, digest))
-        added = db.execute("""INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
-                              VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""", (target, kind, digest, file_format, acquired_at))
-        if added.rowcount and kind != "list":
-            changed = True
+    source_changed = save_sources(db, target, payload["sources"], acquired_at)
+    changed = changed or source_changed or payload.get("detail_changed", False)
     if fit:
         for sha, identity in recordings(db, payload).items():
             db.execute("""INSERT INTO fit_sources(sha256, identity, activity_id) VALUES (?, ?, ?)
@@ -212,6 +236,20 @@ def save(db, import_id, payload, target, acquired_at):
     return target
 
 
+def complete_reviewed_import(db, import_id):
+    row = db.execute(f"""SELECT source FROM imports WHERE id=? AND state='partial'
+                         AND EXISTS (SELECT 1 FROM import_issues WHERE import_id=imports.id AND severity='review')
+                         AND NOT EXISTS ({OPEN_ISSUES})""", (import_id,)).fetchone()
+    if not row:
+        return
+    if row["source"] == "garmin":
+        scans = db.execute("""SELECT s.*, i.started_at FROM garmin_scans s JOIN imports i ON i.id=s.import_id
+                              WHERE s.import_id=?""", (import_id,)).fetchall()
+        if not scans or any(garmin_coverage.scan_report(db, s)["coverage"] not in ("checked", "checked_empty") for s in scans):
+            return
+    db.execute("UPDATE imports SET state='complete' WHERE id=?", (import_id,))
+
+
 def apply_review(db, key, action, target, confirmed_date=None):
     db.execute("UPDATE fit_reviews SET resolution=?, activity_id=?, local_date=? WHERE key=?",
                (action, target, confirmed_date, key))
@@ -221,8 +259,11 @@ def apply_review(db, key, action, target, confirmed_date=None):
         record_activity(db, import_id, target, "unchanged")
         db.execute("""UPDATE fit_uploads SET activity_id=? WHERE import_id=? AND sha256 IN
                       (SELECT sha256 FROM fit_sources WHERE activity_id=?)""", (target, import_id, target))
-        db.execute(f"UPDATE imports SET state='complete' WHERE id=? AND state='partial' AND NOT EXISTS ({OPEN_ISSUES})",
-                   (import_id,))
+        if key.startswith("garmin:"):
+            gid = key.split(":")[1]
+            db.execute("""UPDATE garmin_scan_items SET status='saved' WHERE garmin_id=? AND status='pending_identity'
+                          AND scan_id IN (SELECT id FROM garmin_scans WHERE import_id=?)""", (gid, import_id))
+        complete_reviewed_import(db, import_id)
 
 
 def settle_other_versions(db, key, payload, target, acquired_at, import_id):

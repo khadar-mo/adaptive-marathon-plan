@@ -61,4 +61,9 @@ def test_upload_and_resolution_in_chrome(tmp_path):
             expect(page.get_by_text("Complete", exact=True)).to_be_visible()
             page.get_by_role("link", name="Open activity 3").click()
             expect(page.get_by_text("2024-02-29", exact=True)).to_be_visible()
+            page.get_by_role("link", name="Imports", exact=True).click()
+            with page.expect_response(base + "/api/imports/garmin") as normal:
+                page.get_by_role("button", name="Sync Garmin").click()
+            assert normal.value.status == 202 and normal.value.request.post_data_json == {}
+            expect(page.get_by_text("Coverage", exact=True)).to_be_visible()
             assert errors == []

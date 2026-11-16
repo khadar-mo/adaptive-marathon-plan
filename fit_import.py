@@ -21,11 +21,14 @@ def index_originals(store, archive):
                  LEFT JOIN original_members m ON m.original_sha=s.sha256
                  WHERE s.kind='original' AND m.original_sha IS NULL ORDER BY s.rowid""").fetchall()
     for (outer,) in originals:
-        data = archive.read(outer)
-        if data is None:
-            continue
         try:
+            data = archive.read(outer)
+            if data is None:
+                continue
             _, fit = unpack_original(archive, data)
+        except OSError:
+            # A missing or inaccessible legacy original can be repaired by Garmin.
+            continue
         except FitError:
             fit = None
         with store.connect(write=True) as db:

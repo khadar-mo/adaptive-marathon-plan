@@ -1,5 +1,5 @@
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 import sqlite3
 import threading
@@ -9,6 +9,7 @@ from zipfile import ZipFile
 from garmin_fit_sdk import convert_datetime_to_timestamp
 import pytest
 
+import garmin_coverage
 from fit_fixture import START, make_fit
 from test_imports import DETAIL, LISTED, digest, history, server, submit
 from runs import ConnectionProblem
@@ -492,3 +493,59 @@ async def test_latest_compatible_garmin_metrics_and_laps_survive_either_resoluti
         assert history.calls.count("/download-service/files/activity/42") == downloads
         after = (await client.get("/api/activities/2")).json()
         assert after["distance_m"] == 8000 and after["laps"][0]["distance_m"] == 102
+
+
+async def test_normal_sync_holds_only_the_unresolved_garmin_day(history, monkeypatch):
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 7, 1))
+    start = convert_datetime_to_timestamp(datetime(2026, 6, 11, 12, tzinfo=timezone.utc))
+    fits = make_fit(start=start, created=start)
+    history.listed[0].update(startTimeLocal="2026-06-11 13:00:00", startTimeGMT="2026-06-11 12:00:00")
+    history.original = zipped(make_fit(start=start + 15, serial=None))
+    async with server() as client:
+        upload_report = await upload(client, ("export.fit", fits))
+        assert upload_report["scans"] == [] and not history.calls
+        pending = await submit(client, {})
+        scan, = pending["scans"]
+        assert (scan["from"], scan["to"], scan["coverage"]) == ("2026-06-01", "2026-07-01", "missing_activity")
+        assert scan["unique_ids_found"] == 1 and scan["missing_activity_ids"] == ["42"]
+        assert scan["checked_ranges"] == [{"from": "2026-06-01", "to": "2026-06-10"},
+                                          {"from": "2026-06-12", "to": "2026-07-01"}]
+        assert pending["state"] == "partial" and not pending["activities"]
+        history.listed = []
+        retry = await submit(client, {})
+        assert retry["state"] == "partial" and retry["scans"][0]["unique_ids_found"] == 0
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        for report in (pending, retry):
+            reopened = (await client.get(report["report_url"])).json()
+            scan, = reopened["scans"]
+            assert reopened["state"] == "complete" and scan["coverage"] == "checked"
+            assert reopened["activities"][0]["id"] == 1 and sum(reopened["counts"].values()) == 1
+            assert scan["originals_available"] == 1 and scan["missing_activity_ids"] == []
+        assert (await submit(client, {}))["requested_from"] == "2026-06-18"
+        assert (await upload(client, ("renamed.fit", fits)))["activities"][0]["id"] == 1
+        assert (await client.get("/api/activities/2")).status_code == 404
+
+
+async def test_identity_resolution_does_not_complete_future_dates(history):
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client, {"from": "2024-02-29", "to": "2099-01-01"})
+        assert pending["state"] == "partial" and pending["scans"][0]["missing_activity_ids"] == ["42"]
+        assert (await resolve(client, pending, {"action": "keep_separate"})).status_code == 200
+        reopened = (await client.get(pending["report_url"])).json()
+        assert reopened["state"] == "partial" and reopened["scans"][0]["coverage"] == "unchecked"
+        assert reopened["scans"][0]["missing_activity_ids"] == [] and reopened["activities"][0]["id"] == 2
+
+
+async def test_excluded_garmin_edit_preserves_recorded_fit_measurements(history):
+    history.listed[0].pop("movingDuration")
+    history.original = zipped(make_fit(metrics={"total_moving_time": 111}))
+    async with server() as client:
+        first = await submit(client)
+        path = f'/api/activities/{first["activities"][0]["id"]}'
+        history.detail["activityTypeDTO"] = {"typeKey": "cycling"}
+        changed = await submit(client)
+        assert changed["scans"][0]["excluded"] == 1 and not changed["activities"]
+        row = (await client.get(path)).json()
+        assert row["sport"] == "cycling" and row["moving_seconds"] == 111 and row["metric_sources"]["moving_seconds"] == "fit"

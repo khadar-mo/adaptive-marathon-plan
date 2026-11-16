@@ -31,6 +31,10 @@ document.addEventListener('submit', async event => {
     const headers = {};
     if (form.enctype !== 'multipart/form-data') {
         const fields = Object.fromEntries(data);
+        if (form.getAttribute('action') === '/api/imports/garmin' && !fields.from && !fields.to) {
+            delete fields.from;
+            delete fields.to;
+        }
         if (button.name === 'action') {
             fields.action = button.value;
             if (fields.action !== 'link') delete fields.activity_id;
@@ -84,7 +88,7 @@ def resolve_form(issue):
 
 def period(row):
     if row["source"] == "fit":
-        return "FIT upload"
+        return "FIT import"
     return f'{escape(row["requested_from"])} to {escape(row["requested_to"])}'
 
 
@@ -96,14 +100,36 @@ def imports(rows, first, last, pending):
                       f'{resolve_form(i)}</li>' for i in pending)
     return page("Imports", f"""
 <form method="post" action="/api/imports/garmin"><fieldset><legend>Garmin date range</legend>
-<label>From <input type="date" name="from" required value="{escape(first)}"></label>
-<label>To <input type="date" name="to" required value="{escape(last)}"></label>
+<p>Leave both dates empty for normal sync, or enter both to recheck a range.</p>
+<label>From <input type="date" name="from" value="{escape(first)}"></label>
+<label>To <input type="date" name="to" value="{escape(last)}"></label>
 <button type="submit">Sync Garmin</button></fieldset></form>
 <form method="post" action="/api/imports/fit" enctype="multipart/form-data"><fieldset><legend>Offline FIT upload</legend>
 <label>FIT files <input type="file" name="files" accept=".fit" required multiple></label>
 <button type="submit">Upload FIT files</button></fieldset></form>
 <p id="message" role="status"></p>{('<h2>Needs review</h2><ul>' + reviews + '</ul>') if reviews else ''}
 <h2>Saved reports</h2>{history}{SUBMIT}""")
+
+
+def scan_summary(scan):
+    if scan["mode"] == "legacy":
+        return "<p>Coverage unchecked. This earlier importer did not record pagination or original request counts.</p>"
+    labels = {"checked": "Fully checked", "checked_empty": "Fully checked · No runs returned",
+              "unchecked": "Coverage incomplete · Unchecked", "missing_activity": "Coverage incomplete · Missing activity"}
+    checked = ", ".join(f'{r["from"]} to {r["to"]}' for r in scan["checked_ranges"]) or "None"
+    saved_dates = (f'<p>Saved runs span {escape(scan["earliest_saved"])} to {escape(scan["latest_saved"])}.</p>'
+                   if scan["earliest_saved"] else "")
+    retry = ""
+    if scan["mode"] == "retry":
+        query = escape(urlencode({"from": scan["from"], "to": scan["to"]}))
+        retry = f'<p><a href="/imports?{query}">Recheck {escape(scan["from"])} to {escape(scan["to"])}</a></p>'
+    return f"""<h3>{labels[scan["coverage"]]} · {escape(scan["from"])} to {escape(scan["to"])}</h3>
+<p>Search bounds {escape(scan["search_from"])} to {escape(scan["search_to"])} · {scan["pages_read"]} pages read.
+Fully checked dates: {checked}.</p>
+<p>{scan["unique_ids_found"]} unique run IDs found · {scan["excluded"]} excluded ·
+{len(scan["missing_activity_ids"])} missing activities · {scan["unidentified_records"]} unidentified records.</p>
+<p>Original files: {scan["originals_available"]} available · {scan["originals_requested"]} requested ·
+{len(scan["missing_original_ids"])} missing.</p>{saved_dates}{retry}"""
 
 
 def report(row):
@@ -123,12 +149,17 @@ def report(row):
         progress = "<p>The app stopped before this import finished.</p>"
     saved = f"<ul>{activities}</ul>" if activities else "<p>No activities saved in this attempt.</p>"
     retry = '<a href="/imports">Upload FIT files</a>'
+    scans = ""
     if row["source"] == "garmin":
         query = escape(urlencode({"from": row["requested_from"], "to": row["requested_to"]}))
         retry = f'<a href="/imports?{query}">Recheck these dates</a>'
+        scans = "<h2>Coverage</h2>" + "".join(scan_summary(s) for s in row["scans"])
+    counts = row["counts"]
     return page(f'Import {row["id"]}', f"""
 <p><strong>{escape(state.capitalize())}</strong> · {period(row)}</p>
-<p>Started {escape(row["started_at"])}</p>{progress}<h2>Saved activities</h2>{saved}
+<p>Started {escape(row["started_at"])}</p>{progress}{scans}
+<h2>Saved activities</h2><p>{counts["inserted"]} inserted · {counts["updated"]} updated ·
+{counts["unchanged"]} unchanged.</p>{saved}
 {('<h2>Uploaded files</h2><ul>' + files + '</ul>') if files else ''}
 {('<h2>Import issues</h2><ul>' + issues + '</ul>') if issues else ''}
 <p id="message" role="status"></p><p><a href="{row["report_url"]}">Report JSON</a></p><p>{retry}</p>{SUBMIT}""")
