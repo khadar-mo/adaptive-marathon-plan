@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
-from zipfile import ZipFile
+from zipfile import ZIP_LZMA, ZipFile
 
 import httpx
 import pytest
@@ -477,8 +477,8 @@ async def test_cached_unusable_original_is_reclassified_and_replaced(history, tm
         assert item["id"] == first["activities"][0]["id"] and not result["issues"]
         assert history.calls.count("/download-service/files/activity/42") == 2
         row = (await client.get(f'/api/activities/{item["id"]}')).json()
-        assert {s["sha256"]: s["kind"] for s in row["sources"] if s["format"] == "fit"} == {
-            digest(FIT): "original", digest(FIT[:-4]): "original_error",
+        assert {(s["sha256"], s["kind"]) for s in row["sources"] if s["format"] == "fit"} == {
+            (digest(FIT), "original"), (digest(FIT[:-4]), "original_error"),
         }
 
 
@@ -535,3 +535,21 @@ finally:
             holder.commit()
         assert lock_status() == "acquired"
         assert (await client.get("/api/activities/1")).json()["name"] == "local edit"
+
+
+async def test_broken_zip_codec_warns_and_other_runs_are_saved(history):
+    with BytesIO() as stream:
+        with ZipFile(stream, "w", compression=ZIP_LZMA) as zipped:
+            zipped.writestr("fixture.fit", FIT)
+        damaged = bytearray(stream.getvalue())
+    # The ZIP LZMA stream starts with two version bytes and a two-byte properties length.
+    payload_start = damaged.index(b"fixture.fit") + len(b"fixture.fit")
+    damaged[payload_start + 4] = 255
+    history.original = bytes(damaged)
+    history.listed.append({**LISTED, "activityId": 51})
+    history.extra_details["51"] = {**DETAIL, "activityId": 51}
+    async with server() as client:
+        report = await submit(client)
+        assert report["state"] == "complete"
+        assert {a["garmin_id"] for a in report["activities"]} == {"42", "51"}
+        assert [(i["step"], i["severity"]) for i in report["issues"]] == [("Original download", "warning")] * 2
