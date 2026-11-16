@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, closing
 from datetime import date
+import errno
 import hashlib
 from io import BytesIO
 import json
@@ -174,9 +175,11 @@ async def test_saved_bytes_identity_detail_and_cold_offline_reads(history, tmp_p
             assert (await client.get(detail_path)).json() == detail
             html = (await client.get(f"/activities/{local_id}")).text
             assert all(value in html for value in ("Track &lt;fixture&gt;", detail["garmin_url"], detail_path))
-            assert dict(re.findall(r"<dt>(.*?)</dt>\s*<dd>(.*?)</dd>", html)) == {
+            assert dict(re.findall(r"<dt>(.*?)</dt>\s*<dd><span>(.*?)</span>", html)) == {
                 "Recorded local start": detail["start_local"], "Distance": "5.00 km",
                 "Watch timer": "25:00", "Elapsed time": "30:01", "Moving time": "24:35",
+                "Timer pace": "5:00/km", "Moving pace": "4:55/km",
+                "Average heart rate": "Not available", "GPS": "Not available",
             }
         assert history.calls == calls
 
@@ -246,7 +249,9 @@ async def test_optional_measurements_do_not_inherit_other_durations(history):
         activity = (await client.get(f"/api/activities/{local_id}")).json()
         assert activity["timer_seconds"] is None and activity["moving_seconds"] is None
         assert activity["distance_m"] == 4900 and activity["elapsed_seconds"] == 1801.1
-        assert (await client.get(f"/activities/{local_id}")).text.count("Not available") == 2
+        html = (await client.get(f"/activities/{local_id}")).text
+        for label in ("Watch timer", "Moving time", "Timer pace", "Moving pace"):
+            assert f"<dt>{label}</dt><dd><span>Not available</span>" in html
 
 
 async def test_concurrent_submission_returns_the_active_report(history):
@@ -432,10 +437,11 @@ async def test_page_reorder_preserves_activity_outcomes_and_recorded_precision(h
         detail = (await client.get(f"/api/activities/{local_id}")).json()
         assert detail["start_local"] == "2024-02-29 12:11"
         assert [s["kind"] for s in detail["sources"]].count("list") == 2
-        assert "<dd>2024-02-29 12:11</dd>" in (await client.get(f"/activities/{local_id}")).text
+        assert "<dt>Recorded local start</dt><dd><span>2024-02-29 12:11</span>" in (await client.get(f"/activities/{local_id}")).text
 
 
-async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch):
+@pytest.mark.parametrize("short_timeout", [True, False], ids=["retry-busy", "default-timeout"])
+async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch, short_timeout):
     # Acquire a real writer lock just before the background task commits its outcome.
     entered, proceed = threading.Event(), threading.Event()
     finish = Store.finish
@@ -447,7 +453,8 @@ async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, m
         finish(self, import_id, state)
 
     monkeypatch.setattr(Store, "finish", delayed_finish)
-    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
+    if short_timeout:
+        monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0.02}))
     async with server() as client:
         pending = asyncio.create_task(client.post(SUBMIT, json=DAY))
         assert await asyncio.to_thread(entered.wait, 5)
@@ -456,8 +463,11 @@ async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, m
             proceed.set()
             await asyncio.sleep(0.15)
             assert not pending.done()
-            conflict = await client.post(SUBMIT, json=DAY)
-            assert conflict.status_code == 409 and conflict.json()["id"] == 1
+            # Both submission routes must answer while the external lock is still held.
+            for request in (lambda: client.post(SUBMIT, json=DAY),
+                            lambda: client.post("/api/imports/fit", files={"files": ("synthetic.fit", FIT)})):
+                conflict = await asyncio.wait_for(request(), timeout=1)
+                assert conflict.status_code == 409 and conflict.json()["id"] == 1
             blocker.rollback()
         response = await pending
         assert (await client.get(response.json()["report_url"])).json()["state"] == "complete"
@@ -503,7 +513,7 @@ async def test_retry_recovers_worker_that_could_not_persist_final_state(history,
 
     def unavailable(self, statement, parameters, **options):
         if statement.startswith("UPDATE imports"):
-            raise OSError("fixture storage unavailable")
+            raise OSError(errno.ENOSPC, "fixture-private-message", "/private-fixture/path")
         write_report(self, statement, parameters, **options)
 
     async with server() as client:
@@ -512,7 +522,29 @@ async def test_retry_recovers_worker_that_could_not_persist_final_state(history,
             accepted = (await client.post(SUBMIT, json=DAY)).json()
         retry = await submit(client)
         assert retry["state"] == "complete" and retry["activities"][0]["outcome"] == "unchanged"
-        assert (await client.get(accepted["report_url"])).json()["state"] == "interrupted"
+        interrupted = (await client.get(accepted["report_url"])).json()
+        assert interrupted["state"] == "interrupted"
+        assert "Finish import report failed (ENOSPC)" in interrupted["issues"][0]["message"]
+        assert "fixture-private" not in str(interrupted) and "/private-fixture" not in str(interrupted)
+
+
+@pytest.mark.parametrize("failure,code", [("sqlite", "SQLITE_IOERR_LOCK"), ("os", "EACCES")])
+async def test_normal_sync_reports_storage_operation_and_safe_error_code(history, monkeypatch, failure, code):
+    def unavailable(*args):
+        if failure == "os":
+            raise OSError(errno.EACCES, "fixture-private-message", "/private-fixture/path")
+        error = sqlite3.OperationalError("fixture-private-message")
+        error.sqlite_errorcode = sqlite3.SQLITE_IOERR_LOCK
+        error.sqlite_errorname = code
+        raise error
+    monkeypatch.setattr(garmin_import, "scan_range", unavailable)
+    async with server() as client:
+        report = await submit(client, {})
+        assert report["state"] == "failed"
+        issue, = report["issues"]
+        assert issue["step"] == "Import storage" and f"Scan date range failed ({code})" in issue["message"]
+        html = (await client.get(report["html_url"])).text
+        assert code in html and "fixture-private" not in html and "/private-fixture" not in html
 
 
 async def test_securing_existing_database_preserves_cross_process_write_lock(history, tmp_path, monkeypatch):

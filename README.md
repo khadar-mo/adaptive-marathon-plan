@@ -42,6 +42,18 @@ The JSON endpoint accepts `{}` for normal sync or an inclusive pair such as `{"f
 
 Back up the database and archive together before upgrading. On the first submission the app adds scan tracking to an existing database. Earlier one-page reports and their saved activities remain available. A new normal sync verifies coverage from June.
 
+## Read running history
+
+Open [History](http://127.0.0.1:8001/history). Choose **Month** or **Week (Monday–Sunday)**, enter a date in the period and select **Show history**. The initial view uses the current month in Europe/London. Each activity belongs to its recorded local date, including when travelling. Undated FIT runs appear below the period totals until you confirm their dates on Imports.
+
+For October reconciliation, open [1–31 October 2026](http://127.0.0.1:8001/history?from=2026-10-01&to=2026-10-31) and [19–25 October 2026](http://127.0.0.1:8001/history?from=2026-10-19&to=2026-10-25). The contributing runs list gives the linked Garmin IDs. Totals sum the recorded metres and seconds before rounding. Missing measurements have a known subtotal and a missing count. All runs tied at the longest unrounded distance are linked. Coverage identifies dates still to verify and links to their recheck form.
+
+An explicitly linked recording counts once on its primary running activity’s local date. The period lists the linked running IDs dated inside it. If Garmin changes the primary to another sport, a remaining running ID supplies the date and measurements.
+
+Open a run for its watch timer, elapsed time, timer pace, available moving measurements and recorded laps. Each available measurement names its source. Optional heart rate and GPS availability are read from the saved Garmin summaries and FIT evidence on the detail page. History and activity detail work offline with the same local database and archive.
+
+**History JSON** opens `GET /api/history` for the displayed dates. It accepts an inclusive `from` and `to` pair, or `period=week|month` and a `date` within it. The response includes contributing activities, known totals, longest local IDs, checked ranges and gaps. The `weeks` and `months` arrays group contributing runs within the requested bounds. **Activity JSON** opens the local detail, including raw measurements, display values, metric sources, ordered laps and download warnings.
+
 ## Recover an offline FIT
 
 On **Imports**, choose one or more exported FIT files and select **Upload FIT files**. You can do this with `RUNS_GARMIN_OFFLINE=1`. The report lists every file, including failed exports. Open an activity to see the recorded laps, watch timer and elapsed time. Uploads never contribute to Garmin date-range coverage.

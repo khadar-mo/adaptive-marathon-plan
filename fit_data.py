@@ -44,12 +44,17 @@ def measurements(message):
     return fields
 
 
-def decode_fit(data):
+def read_messages(data):
     decoder = Decoder(Stream.from_byte_array(data))
     messages, errors = decoder.read(convert_datetimes_to_dates=False, convert_types_to_strings=False,
                                    expand_sub_fields=False, merge_heart_rates=False)
     if errors:
         raise FitError("Damaged FIT. Export the original file again and retry.")
+    return messages
+
+
+def decode_fit(data):
+    messages = read_messages(data)
     sessions = messages.get("session_mesgs", [])
     activities = messages.get("activity_mesgs", [])
     if len(sessions) > 1 or any(a.get("type") == 1 or a.get("num_sessions", 1) != 1 for a in activities):

@@ -1,6 +1,9 @@
 """HTML views of the same local records returned by the API."""
+from datetime import date
 from html import escape
 from urllib.parse import urlencode
+
+from history import calendar_period, kilometres, UNAVAILABLE
 
 
 def page(title, content):
@@ -15,7 +18,17 @@ fieldset {{display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; padding:
 fieldset > label {{min-width: 0; max-width: 100%}}
 label, input {{display: block}} input, select {{max-width: 100%; box-sizing: border-box}} button, input, select {{font: inherit; padding: .35rem}}
 dt {{font-weight: bold}} dd {{margin: 0 0 .7rem}} li {{margin: .5rem 0}} a {{color: #17523d}}
-</style></head><body><nav><a href="/imports">Imports</a></nav><main><h1>{escape(title)}</h1>
+nav {{display:flex; gap:1.5rem; padding-bottom:.65rem; border-bottom:1px solid #bccbc2}}
+h1, h2, h3 {{line-height:1.2}} h2 {{margin:1.75rem 0 .75rem}}
+.totals, .detail-metrics {{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(12rem,100%),1fr)); gap:.7rem 1rem}}
+.totals {{padding:1rem; background:#eff5f0; border-top:2px solid #31654c}}
+.totals dd {{font-size:1.35rem}} small {{display:block; font-size:.85rem; color:#46564b}}
+.run-list {{padding:0; list-style:none}} .run-list li {{padding:.6rem 0; border-bottom:1px solid #d9e1db}}
+.run-list strong {{display:inline-block; margin-right:.65rem}}
+.table-wrap {{max-width:100%; overflow:auto}} table {{border-collapse:collapse}}
+th, td {{padding:.35rem .65rem; text-align:left; border-bottom:1px solid #d9e1db}}
+:focus-visible {{outline:3px solid #1a704e; outline-offset:2px}}
+</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a></nav><main><h1>{escape(title)}</h1>
 {content}</main></body></html>"""
 
 
@@ -171,31 +184,112 @@ def report(row):
 <p id="message" role="status"></p><p><a href="{row["report_url"]}">Report JSON</a></p><p>{retry}</p>{SUBMIT}""")
 
 
-def duration(seconds):
-    if seconds is None:
-        return "Not available"
-    minutes, seconds = divmod(round(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
+def run_link(row):
+    return f'<a href="/activities/{row["id"]}">{escape(row["name"] or ("Activity " + str(row["id"])))}</a>'
+
+
+def run_list(rows):
+    items = []
+    for row in rows:
+        ids = ", ".join(escape(gid) for gid in row["garmin_ids"])
+        source = f"Garmin {ids}" if ids else "FIT"
+        when = row["start_local"] or row["local_date"] or "Undated"
+        items.append(f'<li><strong>{run_link(row)}</strong> {row["display"]["distance_m"]}'
+                     f'<small>{escape(when)} · {source}</small></li>')
+    return '<ul class="run-list">' + "".join(items) + '</ul>'
+
+
+def history_error(message):
+    return page("History", f'<p>{escape(message)}</p><p><a href="/history">Choose another period</a></p>')
+
+
+def history_page(data):
+    first, last = data["from"], data["to"]
+    anchor = date.fromisoformat(first)
+    is_week = calendar_period(anchor, "week") == (anchor, date.fromisoformat(last))
+    selector = f"""<form action="/history" method="get"><fieldset><legend>Choose a period</legend>
+<div><label for="history-period">Period</label><select id="history-period" name="period"><option value="month">Month</option>
+<option value="week"{' selected' if is_week else ''}>Week (Monday–Sunday)</option></select></div>
+<label>Date in period <input type="date" name="date" value="{first}" required></label>
+<button type="submit">Show history</button></fieldset></form>"""
+    rows = data["activities"]
+    by_id = {r["id"]: r for r in rows}
+    leaders = ", ".join(run_link(by_id[i]) for i in data["longest_run_ids"])
+    longest = f'{kilometres(data["longest_distance_m"])}<small>{leaders}</small>' if leaders else UNAVAILABLE
+    summary = f'<div><dt>Runs</dt><dd>{data["run_count"]}</dd></div>'
+    for key, label in (("distance_m", "Distance"), ("timer_seconds", "Watch timer"),
+                       ("elapsed_seconds", "Elapsed time"), ("moving_seconds", "Moving time")):
+        item = data["totals"][key]
+        missing = item["missing_count"]
+        note = f'<small>{missing} missing</small>' if missing else ""
+        subtotal = item["display"]
+        summary += f'<div><dt>{"Known " + label.lower() if missing else label}</dt><dd>{subtotal}{note}</dd></div>'
+    summary += f'<div><dt>Longest known run</dt><dd>{longest}</dd></div>'
+    coverage = data["coverage"]
+    coverage_html = "<p>Garmin coverage complete.</p>"
+    if coverage["gaps"]:
+        gaps = []
+        for gap in coverage["gaps"]:
+            query = escape(urlencode(gap))
+            gaps.append(f'<li>{gap["from"]} to {gap["to"]} · <a href="/imports?{query}">Recheck these dates</a></li>')
+        coverage_html = "<p>Garmin coverage incomplete. Unverified dates</p><ul>" + "".join(gaps) + "</ul>"
+    activities = run_list(rows) if rows else "<p>No saved runs in this period.</p>"
+    if coverage["complete"] and not rows:
+        activities = "<p>No runs returned for this fully checked period.</p>"
+    undated = ""
+    if data["undated_activities"]:
+        undated = ('<h2>Undated runs</h2><p>Outside period totals until a local date is confirmed on '
+                   '<a href="/imports">Imports</a>.</p>' + run_list(data["undated_activities"]))
+    weeks = ""
+    if not is_week and data["weeks"]:
+        items = []
+        for week in data["weeks"]:
+            distance = week["totals"]["distance_m"]
+            missing = f' · known subtotal, {distance["missing_count"]} missing' if distance["missing_count"] else ""
+            query = escape(urlencode({"from": week["from"], "to": week["to"]}))
+            count = week["run_count"]
+            items.append(f'<li><a href="/history?{query}">{week["from"]} to {week["to"]}</a>'
+                         f' · {count} {"run" if count == 1 else "runs"} · {distance["display"]}{missing}</li>')
+        weeks = "<h2>Weekly totals within this period</h2><ul>" + "".join(items) + "</ul>"
+    query = escape(urlencode({"from": first, "to": last}))
+    return page("History", f"""{selector}<h2>{first} to {last}</h2><dl class="totals">{summary}</dl>
+{coverage_html}<h2>Contributing runs</h2>{activities}{weeks}{undated}<p><a href="/api/history?{query}">History JSON</a></p>""")
 
 
 def activity(row):
-    measurements = [
-        ("Confirmed local date" if row["local_date"] and not row["start_local"] else "Recorded local start",
-         row["start_local"] or row["local_date"] or "Undated"),
-        ("Distance", f'{row["distance_m"] / 1000:.2f} km' if row["distance_m"] is not None else "Not available"),
-        ("Watch timer", duration(row["timer_seconds"])), ("Elapsed time", duration(row["elapsed_seconds"])),
-        ("Moving time", duration(row["moving_seconds"])),
-    ]
-    values = "".join(f"<dt>{label}</dt><dd>{escape(value)}</dd>" for label, value in measurements)
+    display = row["display"]
+    values = []
+    def metric(label, value, *keys):
+        names = {"detail": "Garmin detail", "list": "Garmin summary", "fit": "FIT", "user": "Confirmed"}
+        sources = dict.fromkeys(row["metric_sources"].get(key) for key in keys)
+        origins = ", ".join(names[source] for source in sources if source in names)
+        note = f"<small>{origins}</small>" if origins and value != UNAVAILABLE else ""
+        values.append(f"<div><dt>{label}</dt><dd><span>{escape(value)}</span>{note}</dd></div>")
+
+    confirmed = row["local_date"] and not row["start_local"]
+    metric("Confirmed local date" if confirmed else "Recorded local start", row["start_local"] or row["local_date"] or "Undated",
+           "local_date" if confirmed else "start_local")
+    for label, key in (("Distance", "distance_m"), ("Watch timer", "timer_seconds"), ("Elapsed time", "elapsed_seconds"),
+                       ("Moving time", "moving_seconds")):
+        metric(label, display[key], key)
+    for label, kind in (("Timer pace", "timer"), ("Moving pace", "moving")):
+        metric(label, display[kind + "_pace_seconds_per_km"], kind + "_seconds", "distance_m")
+    metric("Average heart rate", f'{row["average_hr_bpm"]:g} bpm' if row["average_hr_bpm"] is not None else UNAVAILABLE,
+           "average_hr_bpm")
+    metric("GPS", "Recorded" if row["gps_available"] else UNAVAILABLE, "gps_available")
     warnings = "".join(f"<p>{escape(warning)}</p>" for warning in row["warnings"])
-    garmin_link = (f'<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">Garmin Connect activity '
-                  f'{escape(row["garmin_id"])}</a></p>' if row["garmin_url"] else "")
+    garmin_link = "".join(f'<p><a href="https://connect.garmin.com/modern/activity/{escape(gid)}" rel="noreferrer">'
+                          f'Garmin Connect activity {escape(gid)}</a></p>' for gid in row["garmin_ids"])
+    moving = any(lap["moving_seconds"] is not None for lap in row["laps"])
     laps = "".join(f'<tr><th scope="row">{lap["sequence"]}</th><td>' +
                    (f'{lap["distance_m"]:.2f}'.rstrip("0").rstrip(".") + ' m' if lap["distance_m"] is not None else "Not available") +
-                   f'</td><td>{duration(lap["timer_seconds"])}</td><td>{duration(lap["elapsed_seconds"])}</td></tr>'
+                   f'</td><td>{lap["display"]["timer_seconds"]}</td><td>{lap["display"]["elapsed_seconds"]}</td>' +
+                   (f'<td>{lap["display"]["moving_seconds"]}</td>' if moving else "") + '</tr>'
                    for lap in row["laps"])
-    lap_table = ('<h2>Recorded laps</h2><table><thead><tr><th>Lap</th><th>Distance</th><th>Watch timer</th>'
-                 '<th>Elapsed time</th></tr></thead><tbody>' + laps + '</tbody></table>') if laps else '<p>No recorded laps available.</p>'
+    lap_table = ('<div class="table-wrap"><table><caption>FIT laps in recorded order</caption><thead><tr>'
+                 '<th>Lap</th><th>Distance</th><th>Watch timer</th><th>Elapsed time</th>' +
+                 ('<th>Moving time</th>' if moving else '') + '</tr></thead><tbody>' + laps +
+                 '</tbody></table></div>') if laps else '<p>Not available</p>'
     return page(row["name"] or "Activity detail", f"""
-{garmin_link}<dl>{values}</dl>{warnings}{lap_table}<p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
+{garmin_link}<dl class="detail-metrics">{''.join(values)}</dl>{warnings}<h2>Recorded laps</h2>{lap_table}
+<p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
