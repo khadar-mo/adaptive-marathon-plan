@@ -17,20 +17,27 @@ If Garmin rejects the token exchange with HTTP 401, the message identifies where
 
 To verify Garmin, stop the local app, run the one-run command above and open the activity link in Garmin Connect. Compare the ID in the link, recorded local start, distance in kilometres at the same precision, and **Elapsed Time** within one second under **Stats → Timing**. The **Time** row there corresponds to the CLI's first duration column. Keep the activity and measurements private. Report only the match result.
 
-## Check local storage
+## Import a Garmin run
 
-From the repository directory, install the server and create an empty local database on first use.
+From the repository directory, use Python 3.11 or newer to install the server and start one local process.
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-python3 -c "import sqlite3; sqlite3.connect('runs.sqlite3').close()"
-python3 -m uvicorn app:app --host 127.0.0.1 --port 8001
+python3 -m uvicorn app:app --host 127.0.0.1 --port 8001 --no-access-log
 ```
 
-To use an existing SQLite file, set `RUNS_DB_PATH` in the server's environment and skip the database creation step. The default is `runs.sqlite3` in the server's working directory.
+Open [Imports](http://127.0.0.1:8001/imports), enter the activity's recorded local date in both fields and select **Sync Garmin**. The saved report links to the local activity, its JSON and any download warning. **Recheck these dates** retries the range. A retry keeps the same activity ID. This first importer checks one page of the selected range and flags a full page for follow-up.
 
-In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure.
+The first valid submission creates `runs.sqlite3` in the working directory and archives Garmin's original response bytes in `runs-archive/` beside the database. To keep them elsewhere, set `RUNS_DB_PATH` and optionally `RUNS_ARCHIVE_PATH` before starting the server. Use a dedicated archive directory with mode `0700`. The app restricts the database, its journal files and archived sources to the owner before writing or reusing them. Stop the server and back up or restore the pair together.
+
+To reopen a run offline, stop the process and repeat the start command with `RUNS_GARMIN_OFFLINE=1` and the same storage paths. Open the saved report and the activity's **Activity JSON** link. Startup, report refresh and activity views use local storage. An interrupted report retains its dates and any activities already committed.
+
+The JSON endpoint accepts an inclusive pair of ISO dates at `POST /api/imports/garmin`, returning HTTP 202 with `id`, `report_url` and `html_url`. `GET /api/imports` lists attempts newest first. `GET /api/imports/{id}` and `GET /api/activities/{id}` read individual reports and activities. Date validation runs before storage writes. A concurrent submission returns HTTP 409 and the running report links.
+
+## Check local storage
+
+In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.
 
 To run the tests, activate the virtual environment, install `requirements-dev.txt` with pip and run `python3 -m pytest -q`. The tests use synthetic activities, temporary databases and loopback HTTP.
