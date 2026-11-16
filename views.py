@@ -29,6 +29,10 @@ form.addEventListener('submit', async event => {
     message.textContent = 'Starting import…';
     try {
         const dates = Object.fromEntries(new FormData(form));
+        if (!dates.from && !dates.to) {
+            delete dates.from;
+            delete dates.to;
+        }
         const response = await fetch('/api/imports/garmin', {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(dates)
         });
@@ -60,10 +64,26 @@ def imports(rows, first, last):
     history = f"<ul>{attempts}</ul>" if attempts else "<p>No saved imports.</p>"
     return page("Imports", f"""
 <form method="post" action="/api/imports/garmin"><fieldset><legend>Garmin date range</legend>
-<label>From <input type="date" name="from" required value="{escape(first)}"></label>
-<label>To <input type="date" name="to" required value="{escape(last)}"></label>
+<p>Leave both dates empty for normal sync, or enter both to recheck a range.</p>
+<label>From <input type="date" name="from" value="{escape(first)}"></label>
+<label>To <input type="date" name="to" value="{escape(last)}"></label>
 <button type="submit">Sync Garmin</button></fieldset></form>
 <p id="message" role="status"></p><h2>Saved reports</h2>{history}{SUBMIT}""")
+
+
+def scan_summary(scan):
+    labels = {"checked": "Fully checked", "checked_empty": "Fully checked · No runs returned",
+              "unchecked": "Coverage incomplete · Unchecked", "missing_activity": "Coverage incomplete · Missing activity"}
+    checked = ", ".join(f'{r["from"]} to {r["to"]}' for r in scan["checked_ranges"]) or "None"
+    saved_dates = (f'<p>Saved runs span {escape(scan["earliest_saved"])} to {escape(scan["latest_saved"])}.</p>'
+                   if scan["earliest_saved"] else "")
+    return f"""<h3>{labels[scan["coverage"]]} · {escape(scan["from"])} to {escape(scan["to"])}</h3>
+<p>Search bounds {escape(scan["search_from"])} to {escape(scan["search_to"])} · {scan["pages_read"]} pages read.
+Fully checked dates: {checked}.</p>
+<p>{scan["unique_ids_found"]} unique run IDs found · {scan["excluded"]} excluded ·
+{len(scan["missing_activity_ids"])} missing activities · {scan["unidentified_records"]} unidentified records.</p>
+<p>Original files: {scan["originals_available"]} available · {scan["originals_requested"]} requested ·
+{len(scan["missing_original_ids"])} missing.</p>{saved_dates}"""
 
 
 def report(row):
@@ -80,9 +100,13 @@ def report(row):
         progress = "<p>The app stopped before this import finished.</p>"
     saved = f"<ul>{activities}</ul>" if activities else "<p>No activities saved in this attempt.</p>"
     retry = escape(urlencode({"from": first, "to": last}))
+    scans = "".join(scan_summary(s) for s in row["scans"]) or "<p>Detailed scan coverage is unavailable.</p>"
+    counts = row["counts"]
     return page(f'Import {row["id"]}', f"""
 <p><strong>{escape(state.capitalize())}</strong> · {escape(first)} to {escape(last)}</p>
-<p>Started {escape(row["started_at"])}</p>{progress}<h2>Saved activities</h2>{saved}
+<p>Started {escape(row["started_at"])}</p>{progress}<h2>Coverage</h2>{scans}
+<h2>Saved activities</h2><p>{counts["inserted"]} inserted · {counts["updated"]} updated ·
+{counts["unchanged"]} unchanged.</p>{saved}
 {('<h2>Import issues</h2><ul>' + issues + '</ul>') if issues else ''}
 <p><a href="{row["report_url"]}">Report JSON</a></p>
 <p><a href="/imports?{retry}">Recheck these dates</a></p>""")

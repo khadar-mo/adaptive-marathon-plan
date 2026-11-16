@@ -87,11 +87,15 @@ def health():
 
 class DateRange(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    first: str = Field(alias="from", pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-    last: str = Field(alias="to", pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+    first: str | None = Field(None, alias="from", pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+    last: str | None = Field(None, alias="to", pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
     @model_validator(mode="after")
     def ordered_calendar_dates(self):
+        if not self.model_fields_set:
+            return self
+        if self.first is None or self.last is None:
+            raise ValueError("Supply both From and To.")
         if date.fromisoformat(self.first) > date.fromisoformat(self.last):
             raise ValueError("From must be on or before To.")
         return self
@@ -108,7 +112,7 @@ def submit(dates: DateRange, background: BackgroundTasks):
     except ActiveImport as active:
         return JSONResponse({"detail": "An import is already running.", **report_links(active.import_id)}, status_code=409)
     links = report_links(import_id)
-    background.add_task(run_import, app.state.store, app.state.archive, import_id, dates.first, dates.last)
+    background.add_task(run_import, app.state.store, app.state.archive, import_id)
     return JSONResponse(links, status_code=202, headers={"Location": links["report_url"]})
 
 

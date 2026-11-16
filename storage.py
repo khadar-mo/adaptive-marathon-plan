@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 
+import garmin_coverage
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS imports (
@@ -161,6 +163,11 @@ class Store:
                 db.executescript(SCHEMA)
             with db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                if create and not db.execute("SELECT 1 FROM sqlite_master WHERE name='garmin_scans'").fetchone():
+                    for statement in garmin_coverage.SCHEMA.strip().split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                    garmin_coverage.migrate(db)
                 yield db
 
     @contextmanager
@@ -194,9 +201,34 @@ class Store:
             active = db.execute(active_query).fetchone()
             if active:
                 raise ActiveImport(active["id"])
-            return db.execute("""
+            scans = garmin_coverage.plan(db, first, last)
+            _, first, last = scans[0]
+            import_id = db.execute("""
                 INSERT INTO imports(requested_from, requested_to, started_at, state)
                 VALUES (?, ?, ?, 'running')""", (first, last, now())).lastrowid
+            db.executemany("INSERT INTO garmin_scans(import_id, mode, first, last) VALUES (?, ?, ?, ?)",
+                           [(import_id, mode, start, end) for mode, start, end in scans])
+            return import_id
+
+    def scans(self, import_id):
+        with self.connect() as db:
+            return db.execute("SELECT * FROM garmin_scans WHERE import_id=? ORDER BY id", (import_id,)).fetchall()
+
+    def retry_items(self, first, last):
+        start, end = garmin_coverage.bounds(first, last)
+        with self.connect() as db:
+            return [i for i in garmin_coverage.outstanding_items(db)
+                    if (span := garmin_coverage.item_range(i))[0] <= end and start <= span[1]]
+
+    def observe(self, scan_id, garmin_id, local_date, page_sha, record_sha, from_search):
+        with self.connect(write=True) as db:
+            previous = db.execute("""SELECT status, record_sha, detail_sha FROM garmin_scan_items
+                WHERE garmin_id=? AND status!='outside_range' ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
+            db.execute("""INSERT INTO garmin_scan_items(scan_id, garmin_id, local_date, list_sha, record_sha, from_search)
+                VALUES (?, ?, ?, ?, ?, ?)""", (scan_id, garmin_id, local_date, page_sha, record_sha, from_search))
+            if previous and previous["status"] == "saved" and previous["record_sha"] == record_sha:
+                return previous["detail_sha"]
+        return None
 
     def write_report(self, statement, parameters):
         # The background worker still owns the running row while another SQLite
@@ -232,7 +264,7 @@ class Store:
                                  WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
             return [tuple(row) for row in rows]
 
-    def save(self, import_id, fields, sources, warning):
+    def save(self, import_id, fields, sources, warning, *, scan_id, detail_sha, original_requested):
         # Every key is supplied by the normalizer; no upstream field name enters SQL.
         columns = tuple(fields)
         bindings = ", ".join(":" + key for key in columns)
@@ -262,6 +294,9 @@ class Store:
                 outcome = "updated" if changed else "unchanged"
             db.execute("INSERT INTO import_activities(import_id, activity_id, outcome) VALUES (?, ?, ?)",
                        (import_id, activity_id, outcome))
+            db.execute("""UPDATE garmin_scan_items SET status='saved', local_date=?, detail_sha=?,
+                          original_requested=?, original_available=? WHERE scan_id=? AND garmin_id=?""",
+                       (fields["local_date"], detail_sha, original_requested, warning is None, scan_id, fields["garmin_id"]))
             if warning:
                 db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
                               VALUES (?, 'warning', ?, 'Original download', ?)""",
@@ -281,7 +316,14 @@ class Store:
                                     (import_id,))
             issues = db.execute("SELECT severity, item, step, message FROM import_issues WHERE import_id=? ORDER BY id",
                                 (import_id,))
-            return {**dict(row), "activities": [dict(a) for a in activities], "issues": [dict(i) for i in issues]}
+            activities = [dict(a) for a in activities]
+            scans = []
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='garmin_scans'").fetchone():
+                scans = [garmin_coverage.scan_report(db, scan) for scan in db.execute(
+                    "SELECT * FROM garmin_scans WHERE import_id=? ORDER BY id", (import_id,))]
+            return {**dict(row), "activities": activities, "issues": [dict(i) for i in issues],
+                    "counts": {outcome: sum(a["outcome"] == outcome for a in activities)
+                               for outcome in ("inserted", "updated", "unchanged")}, "scans": scans}
 
     def activity(self, activity_id):
         with self.history() as db:

@@ -1,4 +1,4 @@
-"""Import an explicitly selected date range from the Garmin Personal API."""
+"""Import running history by recorded local date from the Garmin Personal API."""
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -8,13 +8,14 @@ import re
 import sqlite3
 from zipfile import ZipFile
 
+import garmin_coverage
 import runs
 from storage import ArchivePermissionsError
 
 
 PAGE_SIZE = 20
 RUN_TYPES = {"running", "trail_running", "treadmill_running", "track_running", "virtual_run", "virtual_running",
-             "indoor_running", "ultra_run", "obstacle_run", "street_running"}
+             "indoor_track_running", "indoor_running", "ultra_run", "obstacle_run", "street_running"}
 
 
 def open_garmin():
@@ -89,9 +90,12 @@ def activity_fields(garmin_id, listed, detail):
     if utc and utc.tzinfo is None:
         utc = utc.replace(tzinfo=timezone.utc)
     name = detail.get("activityName") or listed.get("activityName")
+    activity_sport = sport(detail, "activityTypeDTO") or sport(listed, "activityType")
+    if activity_sport is None:
+        raise runs.ConnectionProblem("Activity type is missing. Check the activity in Garmin and retry.")
     fields = {
         "garmin_id": garmin_id, "name": name if isinstance(name, str) else None,
-        "sport": sport(detail, "activityTypeDTO") or sport(listed, "activityType") or "running",
+        "sport": activity_sport,
         "start_local": local, "local_date": local[:10],
         "start_utc": utc.astimezone(timezone.utc).isoformat() if utc else None,
     }
@@ -137,80 +141,147 @@ def original_sources(client, store, archive, garmin_id):
         cached = archive.read(digest)
         if cached is not None:
             if original_format(cached) == file_format:
-                return [*sources, ("original", digest, file_format)], None
+                return [*sources, ("original", digest, file_format)], None, False
             sources.append(("original_error", digest, file_format))
     try:
         data = client.get(f"/download-service/files/activity/{garmin_id}", "Garmin original download", raw=True)
     except runs.ConnectionProblem as err:
-        return sources, f"Original unavailable. {err} Retry these dates to request it again."
+        return sources, f"Original unavailable. {err} Retry these dates to request it again.", True
     if not data:
-        return sources, "Original unavailable. Garmin returned an empty file. Retry these dates."
+        return sources, "Original unavailable. Garmin returned an empty file. Retry these dates.", True
     digest = archive.put(data)
     file_format = original_format(data)
     if file_format:
-        return [*sources, ("original", digest, file_format)], None
-    return [*sources, ("original_error", digest, "unknown")], "Original unavailable. Check the file in Garmin and retry these dates."
+        return [*sources, ("original", digest, file_format)], None, True
+    return [*sources, ("original_error", digest, "unknown")], "Original unavailable. Check the file in Garmin and retry these dates.", True
 
 
-def import_one(client, store, archive, import_id, garmin_id, listed, page_digest, first, last):
-    data = client.get(f"/activity-service/activity/{garmin_id}", "Garmin activity detail", raw=True)
-    detail_digest = archive.put(data)
-    detail = decode(data, "detail", dict)
-    fields = activity_fields(garmin_id, listed, detail)
-    if not first <= fields["local_date"] <= last or fields["sport"] not in RUN_TYPES:
-        return
-    sources = [("list", page_digest, "json"), ("detail", detail_digest, "json")]
-    originals, warning = original_sources(client, store, archive, garmin_id)
-    store.save(import_id, fields, sources + originals, warning)
+def import_one(client, store, archive, scan, garmin_id, listed, page_digest, cached):
+    scan_id = scan["id"]
+    first, last = scan["first"], scan["last"]
+    listed_sport = sport(listed, "activityType")
+    status = None
+    if listed_sport and listed_sport not in RUN_TYPES:
+        status = "excluded_sport"
+    else:
+        data = archive.read(cached) if cached and scan["mode"] != "range" else None
+        if data is None:
+            data = client.get(f"/activity-service/activity/{garmin_id}", "Garmin activity detail", raw=True)
+        detail_digest = archive.put(data)
+        fields = activity_fields(garmin_id, listed, decode(data, "detail", dict))
+        if fields["sport"] not in RUN_TYPES:
+            status = "excluded_sport"
+        elif not first <= fields["local_date"] <= last:
+            status = "outside_range"
+        else:
+            sources = [("detail", detail_digest, "json")]
+            if page_digest:
+                sources.insert(0, ("list", page_digest, "json"))
+            originals, warning, requested = original_sources(client, store, archive, garmin_id)
+            store.save(scan["import_id"], fields, sources + originals, warning, scan_id=scan_id,
+                       detail_sha=detail_digest, original_requested=requested)
+    if status:
+        store.write_report("UPDATE garmin_scan_items SET status=? WHERE scan_id=? AND garmin_id=?",
+                           (status, scan_id, garmin_id))
 
 
-def run_import(store, archive, import_id, first, last):
-    range_label = f"{first} to {last}"
+def process_item(client, store, archive, scan, garmin_id, listed, page_digest, from_search=True):
+    # If recording the discovery itself fails, the range cannot claim enumeration.
+    local = local_timestamp(listed.get("startTimeLocal"))
+    cached = store.observe(scan["id"], garmin_id, local[:10] if local else None, page_digest,
+                           garmin_coverage.record_hash(listed), from_search)
+    try:
+        import_one(client, store, archive, scan, garmin_id, listed, page_digest, cached)
+    except runs.ConnectionProblem as err:
+        store.issue(scan["import_id"], garmin_id, "Activity detail", str(err))
+    except (UnicodeError, OverflowError):
+        store.issue(scan["import_id"], garmin_id, "Activity detail", "Invalid activity fields. Check Garmin and retry.")
+    except (OSError, sqlite3.Error):
+        store.issue(scan["import_id"], garmin_id, "Save activity", "Check the private archive and SQLite storage, then retry.")
+
+
+def valid_id(item):
+    value = str(item.get("activityId")) if isinstance(item, dict) else ""
+    return value if re.fullmatch(r"[1-9][0-9]*", value) else None
+
+
+def scan_range(client, store, archive, scan):
+    import_id, scan_id = scan["import_id"], scan["id"]
+    first, last = scan["first"], scan["last"]
+    label = f"{first} to {last}"
+    start, end = garmin_coverage.search_bounds(first, last)
+    pending = store.retry_items(first, last)
+    seen, invalid = set(), set()
+    offset = 0
+    while True:
+        # Search every sport so subtypes omitted by Garmin's parent filter are still seen.
+        try:
+            data = client.search({"startDate": start, "endDate": end, "start": offset, "limit": PAGE_SIZE}, raw=True)
+            page_digest = archive.put(data)
+            page = decode(data, "activity list", list)
+        except runs.ConnectionProblem as err:
+            store.issue(import_id, label, "Activity search", f"Offset {offset}. {err}")
+            return
+        store.write_report("UPDATE garmin_scans SET pages=pages+1 WHERE id=?", (scan_id,))
+        if not page:
+            break
+        progress = False
+        for listed in page:
+            garmin_id = valid_id(listed)
+            if garmin_id is None:
+                fingerprint = garmin_coverage.record_hash(listed)
+                if fingerprint not in invalid:
+                    invalid.add(fingerprint)
+                    progress = True
+                    store.write_report("UPDATE garmin_scans SET unidentified=unidentified+1 WHERE id=?", (scan_id,))
+                    store.issue(import_id, label, "Activity list", f"Missing or invalid Garmin ID at offset {offset}. Recheck these dates.")
+            elif garmin_id not in seen:
+                seen.add(garmin_id)
+                progress = True
+                process_item(client, store, archive, scan, garmin_id, listed, page_digest)
+        if not progress:
+            store.issue(import_id, label, "Activity search", f"Offset {offset} repeated previously returned records. Recheck these dates.")
+            return
+        offset += len(page)
+
+    # A failed ID may disappear from search. Use its saved list evidence to retry it directly.
+    for item in pending:
+        garmin_id = item["garmin_id"]
+        if garmin_id in seen:
+            continue
+        listed = {"activityId": garmin_id}
+        page_digest = item["list_sha"]
+        if page_digest:
+            raw = archive.read(page_digest)
+            if raw is not None:
+                listed = next((row for row in decode(raw, "archived list", list) if valid_id(row) == garmin_id), listed)
+            else:
+                page_digest = None
+        process_item(client, store, archive, scan, garmin_id, listed, page_digest, from_search=False)
+    store.write_report("UPDATE garmin_scans SET enumerated=1 WHERE id=?", (scan_id,))
+
+
+def run_import(store, archive, import_id):
     state = "failed"
+    scans = store.scans(import_id)
+    label = f'{scans[0]["first"]} to {scans[0]["last"]}'
     try:
         client = open_garmin()
-        data = client.search({"activityType": "running", "startDate": first, "endDate": last,
-                              "start": 0, "limit": PAGE_SIZE}, raw=True)
-        page_digest = archive.put(data)
-        page = decode(data, "activity list", list)
-        state = "complete"
-        seen = set()
-        for listed in page:
-            garmin_id = str(listed.get("activityId")) if isinstance(listed, dict) else ""
-            if not re.fullmatch(r"[1-9][0-9]*", garmin_id):
-                store.issue(import_id, range_label, "Activity list", "Missing or invalid Garmin ID. Recheck these dates.")
-                state = "partial"
-                continue
-            if garmin_id in seen:
-                continue
-            seen.add(garmin_id)
-            try:
-                import_one(client, store, archive, import_id, garmin_id, listed, page_digest, first, last)
-            except runs.ConnectionProblem as err:
-                store.issue(import_id, garmin_id, "Activity detail", str(err))
-                state = "partial"
-            except (UnicodeError, OverflowError):
-                store.issue(import_id, garmin_id, "Activity detail", "Invalid activity fields. Check Garmin and retry.")
-                state = "partial"
-            except (OSError, sqlite3.Error):
-                store.issue(import_id, garmin_id, "Save activity", "Check the private archive and SQLite storage, then retry.")
-                state = "partial"
-        if len(page) >= PAGE_SIZE:
-            store.issue(import_id, range_label, "Activity search", "The first page was full. Recheck a smaller date range.")
+        for scan in scans:
+            label = f'{scan["first"]} to {scan["last"]}'
+            scan_range(client, store, archive, scan)
+        report = store.report(str(import_id))
+        if all(s["coverage"] in ("checked", "checked_empty") for s in report["scans"]):
+            state = "complete"
+        elif any(s["pages_read"] for s in report["scans"]):
             state = "partial"
     except runs.ConnectionProblem as err:
-        state = "failed"
-        store.issue(import_id, range_label, "Activity search", str(err))
+        store.issue(import_id, label, "Activity search", str(err))
     except ArchivePermissionsError as err:
-        state = "failed"
-        store.issue(import_id, range_label, "Private archive", str(err))
+        store.issue(import_id, label, "Private archive", str(err))
     except (OSError, sqlite3.Error):
-        state = "failed"
-        store.issue(import_id, range_label, "Import storage", "Check the private archive and SQLite storage, then retry.")
+        store.issue(import_id, label, "Import storage", "Check the private archive and SQLite storage, then retry.")
     except Exception:
-        # Background exceptions cannot be returned to the already accepted request.
-        # Keep the report actionable without logging upstream payloads or credentials.
-        state = "failed"
-        store.issue(import_id, range_label, "Import", "Unexpected import error. Check the saved activities and retry these dates.")
+        store.issue(import_id, label, "Import", "Unexpected import error. Check the saved activities and retry these dates.")
     finally:
         store.finish(import_id, state)

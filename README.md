@@ -17,7 +17,7 @@ If Garmin rejects the token exchange with HTTP 401, the message identifies where
 
 To verify Garmin, stop the local app, run the one-run command above and open the activity link in Garmin Connect. Compare the ID in the link, recorded local start, distance in kilometres at the same precision, and **Elapsed Time** within one second under **Stats → Timing**. The **Time** row there corresponds to the CLI's first duration column. Keep the activity and measurements private. Report only the match result.
 
-## Import a Garmin run
+## Sync Garmin history
 
 From the repository directory, use Python 3.11 or newer to install the server and start one local process.
 
@@ -28,13 +28,19 @@ python3 -m pip install -r requirements.txt
 python3 -m uvicorn app:app --host 127.0.0.1 --port 8001 --no-access-log
 ```
 
-Open [Imports](http://127.0.0.1:8001/imports), enter the activity's recorded local date in both fields and select **Sync Garmin**. The saved report links to the local activity, its JSON and any download warning. **Recheck these dates** retries the range. A retry keeps the same activity ID. This first importer checks one page of the selected range and flags a full page for follow-up.
+Open [Imports](http://127.0.0.1:8001/imports) and select **Sync Garmin**. With both dates blank, the first sync checks 1 June 2026 through today in Europe/London. Later syncs revisit the last 14 continuously verified dates and catch up through today. The same attempt retries outstanding failures on older dates. Each retry range has its own coverage in the report.
+
+To recheck October, enter 1 October 2026 and 31 October 2026. Garmin search covers an extra day on either side and reads every page through an empty result. The importer checks the sport and recorded local date, refreshes details for each run, and reuses good archived originals. Normal sync refreshes details when a list record changes or its detail is missing.
+
+The report lists saved Garmin IDs, counts of inserts, updates and unchanged runs, exclusions, fully checked dates and any missing activities or originals. A checked empty range has no returned runs. An unread or repeated page leaves coverage incomplete. A missing original is a warning and its summary still counts. **Recheck these dates** retries the range and preserves existing activity IDs.
 
 The first valid submission creates `runs.sqlite3` in the working directory and archives Garmin's original response bytes in `runs-archive/` beside the database. To keep them elsewhere, set `RUNS_DB_PATH` and optionally `RUNS_ARCHIVE_PATH` before starting the server. Use a dedicated archive directory with mode `0700`. The app restricts the database, its journal files and archived sources to the owner before writing or reusing them. Stop the server and back up or restore the pair together.
 
 To reopen a run offline, stop the process and repeat the start command with `RUNS_GARMIN_OFFLINE=1` and the same storage paths. Open the saved report and the activity's **Activity JSON** link. Startup, report refresh and activity views use local storage. An interrupted report retains its dates and any activities already committed.
 
-The JSON endpoint accepts an inclusive pair of ISO dates at `POST /api/imports/garmin`, returning HTTP 202 with `id`, `report_url` and `html_url`. `GET /api/imports` lists attempts newest first. `GET /api/imports/{id}` and `GET /api/activities/{id}` read individual reports and activities. Date validation runs before storage writes. A concurrent submission returns HTTP 409 and the running report links.
+The JSON endpoint accepts `{}` for normal sync or an inclusive pair such as `{"from":"2026-10-01","to":"2026-10-31"}` at `POST /api/imports/garmin`, returning HTTP 202 with `id`, `report_url` and `html_url`. `GET /api/imports` lists attempts newest first. `GET /api/imports/{id}` and `GET /api/activities/{id}` read individual reports and activities. Date validation runs before storage writes. A concurrent submission returns HTTP 409 and the running report links.
+
+Back up the database and archive together before upgrading. On the first submission the app adds scan tracking to an existing database. Earlier one-page reports and their saved activities remain available. A new normal sync verifies coverage from June.
 
 ## Check local storage
 
