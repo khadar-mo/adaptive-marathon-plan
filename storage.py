@@ -235,20 +235,20 @@ class Store:
     def observe(self, scan_id, garmin_id, local_date, page_sha, record_sha, from_search):
         with self.connect(write=True) as db:
             previous = db.execute("""SELECT status, record_sha, detail_sha FROM garmin_scan_items
-                WHERE garmin_id=? AND status!='outside_range' ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
+                WHERE garmin_id=? ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
             db.execute("""INSERT INTO garmin_scan_items(scan_id, garmin_id, local_date, list_sha, record_sha, from_search)
                 VALUES (?, ?, ?, ?, ?, ?)""", (scan_id, garmin_id, local_date, page_sha, record_sha, from_search))
             saved = db.execute("""SELECT detail_sha FROM garmin_scan_items WHERE garmin_id=?
                                   AND detail_sha IS NOT NULL
                                   ORDER BY scan_id DESC LIMIT 1""", (garmin_id,)).fetchone()
-            if not saved:
-                # A PR #9 database keeps its detail in activity_sources.
-                saved = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
-                                      WHERE a.garmin_id=? AND s.kind='detail' ORDER BY s.rowid DESC LIMIT 1""",
-                                   (garmin_id,)).fetchone()
-            reusable = bool(previous and saved and previous["status"] == "saved"
+            reusable = bool(previous and saved and previous["status"] != "missing_activity"
                             and previous["record_sha"] == record_sha and previous["detail_sha"] == saved[0])
-            return (saved[0] if saved else None), reusable
+            if saved:
+                return [saved[0]], reusable
+            # PR #9 kept distinct detail versions without recording which one was last selected.
+            versions = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
+                                     WHERE a.garmin_id=? AND s.kind='detail' ORDER BY s.rowid DESC""", (garmin_id,))
+            return [row[0] for row in versions], False
 
     def write_report(self, statement, parameters):
         # The background worker still owns the running row while another SQLite
@@ -281,7 +281,8 @@ class Store:
         with self.connect() as db:
             rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s
                                  JOIN activities a ON a.id=s.activity_id
-                                 WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
+                                 WHERE a.garmin_id=? AND s.kind IN ('original', 'original_unavailable')
+                                 ORDER BY (s.kind='original') DESC, s.rowid DESC""", (garmin_id,))
             return [tuple(row) for row in rows]
 
     def save(self, import_id, fields, sources, warning, *, scan_id, detail_sha, detail_changed, status):
@@ -295,18 +296,25 @@ class Store:
                 # An observed date/sport edit still applies to the stored activity.
                 # Excluded IDs do not contribute to the range's saved IDs or counts.
                 db.execute("""UPDATE garmin_scan_items SET status=?, detail_sha=? WHERE scan_id=? AND garmin_id=?""",
-                           (status, detail_sha if previous else None, scan_id, fields["garmin_id"]))
+                           (status, detail_sha, scan_id, fields["garmin_id"]))
                 if previous is None:
                     return
                 warning = previous["original_warning"]
+                if fields["local_date"] is None:
+                    fields = {**{key: previous[key] for key in columns}, "sport": fields["sport"]}
+                elif fields["sport"] is None:
+                    fields = {**fields, "sport": previous["sport"]}
             activity_id = db.execute(f"""
                 INSERT INTO activities({', '.join(columns)}, original_warning) VALUES ({bindings}, :original_warning)
                 ON CONFLICT(garmin_id) DO UPDATE SET {updates}, original_warning=excluded.original_warning
                 RETURNING id""", {**fields, "original_warning": warning}).fetchone()["id"]
             changed_source = detail_changed
             for kind, digest, file_format in sources:
-                if kind == "original_error":
+                if kind in ("original_error", "original_unavailable"):
                     db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?""",
+                               (activity_id, digest))
+                elif kind == "original":
+                    db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original_unavailable' AND sha256=?""",
                                (activity_id, digest))
                 added = db.execute("""
                     INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
@@ -346,11 +354,13 @@ class Store:
             issues = db.execute("SELECT severity, item, step, message FROM import_issues WHERE import_id=? ORDER BY id",
                                 (import_id,))
             activities = [dict(a) for a in activities]
-            scans = [garmin_coverage.legacy_report(row["requested_from"], row["requested_to"])]
+            scans = []
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='garmin_scans'").fetchone():
                 scans = [garmin_coverage.scan_report(db, scan) for scan in db.execute(
                     """SELECT s.*, i.started_at FROM garmin_scans s JOIN imports i ON i.id=s.import_id
                        WHERE s.import_id=? ORDER BY s.id""", (import_id,))]
+            elif row["requested_from"] and row["requested_to"] and ("source" not in row.keys() or row["source"] == "garmin"):
+                scans = [garmin_coverage.legacy_report(row["requested_from"], row["requested_to"])]
             return {**dict(row), "activities": activities, "issues": [dict(i) for i in issues],
                     "counts": {outcome: sum(a["outcome"] == outcome for a in activities)
                                for outcome in ("inserted", "updated", "unchanged")}, "scans": scans}

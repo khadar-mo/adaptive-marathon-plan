@@ -866,6 +866,7 @@ async def test_sport_date_and_exclusions_follow_explicit_detail(history):
         assert (await client.get(path)).json()["sport"] == "cycling"
         listed["activityType"] = {"typeKey": " "}
         history.extra_details["49"]["activityTypeDTO"]["typeKey"] = ""
+        history.extra_details["49"]["summaryDTO"]["startTimeLocal"] = "2026-10-31 00:12:00"
         missing = await submit(client, OCTOBER)
         assert missing["scans"][0]["coverage"] == "missing_activity" and missing["scans"][0]["missing_metadata"] == 1
 
@@ -905,3 +906,116 @@ async def test_initial_scan_read_failure_does_not_stick_running(history, monkeyp
             failed = await submit(client)
         assert failed["state"] == "failed" and failed["issues"][0]["step"] == "Import storage"
         assert (await submit(client))["state"] == "complete"
+
+async def test_normal_uses_authoritative_sport_and_skips_undated_cycling(history, monkeypatch):
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 11, 1))
+    history.listed = []
+    add_run(history, 70, "2026-06-02", sport="cycling")
+    history.extra_details["70"]["activityTypeDTO"] = {"typeKey": "trail_running"}
+    cyclist = add_run(history, 71, "2026-10-20", sport="cycling")
+    del cyclist["startTimeLocal"]
+    async with server() as client:
+        first = await submit(client, {})
+        assert first["state"] == "complete" and [a["garmin_id"] for a in first["activities"]] == ["70"]
+        assert first["scans"][0]["excluded"] == 1 and first["scans"][0]["missing_metadata"] == 0
+        assert (await submit(client, OCTOBER))["scans"][0]["coverage"] == "checked_empty"
+        assert (await submit(client, {}))["state"] == "complete"
+        assert history.calls.count("/activity-service/activity/71") == 2
+
+
+async def test_corrected_date_is_retained_when_required_sport_is_missing(history, monkeypatch):
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 7, 1))
+    history.listed = []
+    add_run(history, 73, "2026-06-25", sport="")
+    history.extra_details["73"]["summaryDTO"]["startTimeLocal"] = "2026-06-02 09:00:00"
+    async with server() as client:
+        bad = await submit(client, {"from": "2026-06-01", "to": "2026-06-30"})
+        assert bad["scans"][0]["checked_ranges"] == [{"from": "2026-06-01", "to": "2026-06-01"},
+                                                     {"from": "2026-06-03", "to": "2026-06-30"}]
+        history.listed = []
+        history.extra_details["73"]["activityTypeDTO"]["typeKey"] = "running"
+        retry = await submit(client, {})
+        assert retry["requested_from"] == "2026-06-01" and retry["state"] == "complete"
+        assert [a["garmin_id"] for a in retry["activities"]] == ["73"]
+
+
+async def test_corrupt_cache_replaced_with_a_different_original(history, tmp_path):
+    async with server() as client:
+        first = await submit(client)
+        old_digest = digest(history.original)
+        (tmp_path / "archive" / old_digest).write_bytes(b"corrupted after the first import")
+        history.original = FIT
+        retry = await submit(client)
+        assert retry["state"] == "complete" and retry["scans"][0]["originals_requested"] == 1
+        detail = (await client.get(f'/api/activities/{first["activities"][0]["id"]}')).json()
+        assert {s["sha256"] for s in detail["sources"] if s["kind"] == "original"} == {digest(FIT)}
+        assert {s["sha256"] for s in detail["sources"] if s["kind"] == "original_unavailable"} == {old_digest}
+        assert (await submit(client))["counts"]["unchanged"] == 1
+
+
+async def test_fit_only_reports_never_seed_garmin_coverage_or_retries(history, tmp_path, monkeypatch):
+    import storage
+
+    monkeypatch.setattr(garmin_coverage, "today", lambda: date(2026, 11, 1))
+    with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+        db.executescript(storage.SCHEMA.replace("requested_from TEXT NOT NULL, requested_to TEXT NOT NULL",
+                                                "requested_from TEXT, requested_to TEXT"))
+        db.execute("ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'garmin'")
+        db.executemany("""INSERT INTO imports(requested_from, requested_to, started_at, state, source)
+                          VALUES (?, ?, '2026-10-30T12:00:00+00:00', 'partial', 'fit')""",
+                       [(None, None), ("2026-05-01", "2026-05-01")])
+    async with server() as client:
+        for url in ("/api/imports/1", "/api/imports/2"):
+            assert (await client.get(url)).json()["scans"] == []
+        normal = await submit(client, {})
+        assert normal["requested_from"] == "2026-06-01" and len(normal["scans"]) == 1
+        assert normal["scans"][0]["coverage"] == "checked_empty"
+        for url in ("/api/imports/1", "/api/imports/2"):
+            assert (await client.get(url)).json()["scans"] == []
+
+async def test_deeply_nested_valid_detail_repeat_keeps_other_runs(history):
+    detail_value = "fixture"
+    for _ in range(680):
+        detail_value = [detail_value]
+    history.detail["extra"] = detail_value
+    history.wire = lambda record: json.dumps(record, separators=(",", ":")).encode()
+    async with server() as client:
+        assert (await submit(client))["counts"]["inserted"] == 1
+        add_run(history, 51, DAY["from"])
+        history.wire = lambda record: (json.dumps(record, separators=(",", ":")) + " ").encode()
+        repeat = await submit(client)
+        assert repeat["state"] == "complete" and repeat["counts"] == {"inserted": 1, "updated": 0, "unchanged": 1}
+
+
+async def test_upgrade_preserves_reverted_pr9_detail_outcome(history, tmp_path):
+    async with server() as client:
+        first = await submit(client)
+        distance = history.detail["summaryDTO"]["distance"]
+        history.detail["summaryDTO"]["distance"] = 6900
+        await submit(client)
+        history.detail["summaryDTO"]["distance"] = distance
+        await submit(client)
+    with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+        db.execute("DROP TABLE garmin_scan_items")
+        db.execute("DROP TABLE garmin_scans")
+    async with server() as client:
+        history.wire = lambda row: json.dumps(row, sort_keys=True).encode()
+        upgraded = await submit(client)
+        assert upgraded["activities"] == [{**first["activities"][0], "outcome": "unchanged"}]
+        history.detail["metadata"] = {"fixture": "new semantic version"}
+        assert (await submit(client))["counts"]["updated"] == 1
+
+
+async def test_normal_sync_uses_london_today_across_midnight(history, monkeypatch):
+    from datetime import datetime, timezone
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = datetime(2026, 6, 1, 23, 30, tzinfo=timezone.utc)
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(garmin_coverage, "datetime", FixedClock)
+    async with server() as client:
+        report = await submit(client, {})
+        assert (report["requested_from"], report["requested_to"]) == ("2026-06-01", "2026-06-02")

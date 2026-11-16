@@ -77,8 +77,11 @@ def record_hash(record):
 
 def migrate(db):
     # PR #9 never paged to an empty terminator. Keep its reports and queued failures.
+    has_source = any(col["name"] == "source" for col in db.execute("PRAGMA table_info(imports)"))
+    garmin_only = " AND source='garmin'" if has_source else ""
     db.execute("""INSERT INTO garmin_scans(import_id, mode, first, last)
-                  SELECT id, 'legacy', requested_from, requested_to FROM imports ORDER BY id""")
+                  SELECT id, 'legacy', requested_from, requested_to FROM imports
+                  WHERE requested_from IS NOT NULL AND requested_to IS NOT NULL""" + garmin_only + " ORDER BY id")
     db.execute("""INSERT INTO garmin_scan_items(scan_id, garmin_id, local_date, list_sha, status, original_available)
                   SELECT s.id, a.garmin_id, a.local_date,
                          (SELECT sha256 FROM activity_sources WHERE activity_id=a.id AND kind='list'

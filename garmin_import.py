@@ -85,19 +85,15 @@ def activity_fields(garmin_id, listed, detail):
         return None
 
     local = choose("start_local", "startTimeLocal", local_timestamp)
-    if local is None:
-        raise runs.ConnectionProblem("Recorded local start is missing or invalid. Check the activity in Garmin and retry.")
     utc = choose("start_utc", "startTimeGMT", timestamp)
     if utc and utc.tzinfo is None:
         utc = utc.replace(tzinfo=timezone.utc)
     name = detail.get("activityName") or listed.get("activityName")
     activity_sport = sport(detail, "activityTypeDTO") or sport(listed, "activityType")
-    if activity_sport is None:
-        raise runs.ConnectionProblem("Activity type is missing. Check the activity in Garmin and retry.")
     fields = {
         "garmin_id": garmin_id, "name": name if isinstance(name, str) else None,
         "sport": activity_sport,
-        "start_local": local, "local_date": local[:10],
+        "start_local": local, "local_date": local[:10] if local else None,
         "start_utc": utc.astimezone(timezone.utc).isoformat() if utc else None,
     }
     for field, key in (("distance_m", "distance"), ("timer_seconds", "duration"),
@@ -147,7 +143,9 @@ def original_sources(client, store, archive, garmin_id, scan_id):
     sources = []
     for digest, file_format in store.originals(garmin_id):
         cached = cached_source(archive, digest)
-        if cached is not None:
+        if cached is None:
+            sources.append(("original_unavailable", digest, file_format))
+        else:
             if original_format(cached) == file_format:
                 return [*sources, ("original", digest, file_format)], None
             sources.append(("original_error", digest, file_format))
@@ -162,30 +160,31 @@ def original_sources(client, store, archive, garmin_id, scan_id):
     digest = archive.put(data)
     file_format = original_format(data)
     if file_format:
+        sources = [source for source in sources if source[1] != digest]
         return [*sources, ("original", digest, file_format)], None
     return [*sources, ("original_error", digest, "unknown")], "Original unavailable. Check the file in Garmin and retry these dates."
 
 
 def same_json(left, right):
-    if isinstance(left, dict) and isinstance(right, dict):
-        return left.keys() == right.keys() and all(same_json(left[key], right[key]) for key in left)
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(same_json(a, b) for a, b in zip(left, right))
-    if isinstance(left, bool) or isinstance(right, bool):
-        return left is right
-    return left == right
+    pairs = [(left, right)]
+    while pairs:
+        left, right = pairs.pop()
+        if isinstance(left, dict):
+            if not isinstance(right, dict) or left.keys() != right.keys():
+                return False
+            pairs.extend((value, right[key]) for key, value in left.items())
+        elif isinstance(left, list):
+            if not isinstance(right, list) or len(left) != len(right):
+                return False
+            pairs.extend(zip(left, right))
+        elif isinstance(left, bool) != isinstance(right, bool) or left != right:
+            return False
+    return True
 
 
-def import_one(client, store, archive, scan, garmin_id, listed, page_digest, previous_sha, reusable, pending):
+def import_one(client, store, archive, scan, garmin_id, listed, page_digest, versions, reusable, pending):
     scan_id = scan["id"]
-    listed_sport = sport(listed, "activityType")
-    if scan["mode"] != "range" and not previous_sha and not pending and listed_sport and listed_sport not in RUN_TYPES:
-        store.write_report("UPDATE garmin_scan_items SET status='excluded_sport' WHERE scan_id=? AND garmin_id=?",
-                           (scan_id, garmin_id))
-        return
-
-    prior_data = cached_source(archive, previous_sha) if previous_sha else None
-    data = prior_data if reusable and scan["mode"] != "range" else None
+    data = cached_source(archive, versions[0]) if reusable and scan["mode"] != "range" else None
     if data is None:
         data = client.get(f"/activity-service/activity/{garmin_id}", "Garmin activity detail", raw=True)
     detail_digest = archive.put(data)
@@ -195,14 +194,18 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, pre
     store.write_report("UPDATE garmin_scan_items SET local_date=? WHERE scan_id=? AND garmin_id=?",
                        (day, scan_id, garmin_id))
     status = "saved"
-    if fields["sport"] not in RUN_TYPES:
+    if fields["sport"] and fields["sport"] not in RUN_TYPES:
         status = "excluded_sport"
-    elif not scan["first"] <= day <= scan["last"]:
+    elif day and not scan["first"] <= day <= scan["last"]:
         status = "outside_range"
         if pending:
             needs_retry = (pending["first"] <= day <= pending["last"] or pending["status"] == "retry_elsewhere"
                            or pending["status"] == "saved" and not pending["original_available"])
             status = "retry_elsewhere" if needs_retry else "resolved_outside"
+    elif not fields["sport"]:
+        raise runs.ConnectionProblem("Activity type is missing. Check the activity in Garmin and retry.")
+    elif not day:
+        raise runs.ConnectionProblem("Recorded local start is missing or invalid. Check the activity in Garmin and retry.")
 
     sources = [("detail", detail_digest, "json")]
     if page_digest:
@@ -212,8 +215,9 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, pre
         originals, warning = original_sources(client, store, archive, garmin_id, scan_id)
         sources.extend(originals)
     # Keep the wire bytes even when only their JSON serialization changed.
-    detail_changed = (detail_digest != previous_sha
-                      and (prior_data is None or not same_json(decode(prior_data, "archived detail", dict), detail)))
+    detail_changed = detail_digest not in versions and not any(
+        same_json(decode(raw, "archived detail", dict), detail)
+        for version in versions if (raw := cached_source(archive, version)) is not None)
     store.save(scan["import_id"], fields, sources, warning, scan_id=scan_id, detail_sha=detail_digest,
                detail_changed=detail_changed, status=status)
 
@@ -221,10 +225,10 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, pre
 def process_item(client, store, archive, scan, garmin_id, listed, page_digest, pending, from_search=True):
     # If recording the discovery itself fails, the range cannot claim enumeration.
     local = local_timestamp(listed.get("startTimeLocal"))
-    previous_sha, reusable = store.observe(scan["id"], garmin_id, local[:10] if local else None, page_digest,
-                                           garmin_coverage.record_hash(listed), from_search)
+    versions, reusable = store.observe(scan["id"], garmin_id, local[:10] if local else None, page_digest,
+                                       garmin_coverage.record_hash(listed), from_search)
     try:
-        import_one(client, store, archive, scan, garmin_id, listed, page_digest, previous_sha, reusable, pending)
+        import_one(client, store, archive, scan, garmin_id, listed, page_digest, versions, reusable, pending)
     except runs.ConnectionProblem as err:
         store.issue(scan["import_id"], garmin_id, "Activity detail", str(err))
     except (UnicodeError, OverflowError):
