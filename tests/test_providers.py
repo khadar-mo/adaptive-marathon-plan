@@ -1,3 +1,4 @@
+import re
 import socket
 import threading
 from urllib.error import URLError
@@ -47,14 +48,32 @@ def test_garmin_reacquires_once_and_displays_connect_fields(cli, upstream, monke
     }])
     code, out, err = cli("garmin", "--limit", "1")
     assert code == 0 and not err
-    for field in ("https://connect.garmin.com/modern/activity/42", "2026-11-01 00:15:38", "5.12 km", "0:30:01"):
-        assert field in out
+    _, header, row = out.splitlines()
+    assert re.split(r" {2,}", header) == ["Local start", "Distance", "Time", "Elapsed Time", "Activity"]
+    assert re.split(r" {2,}", row) == [
+        "2026-11-01 00:15:38", "5.12 km", "0:25:00", "0:30:01",
+        "Fixture", "https://connect.garmin.com/modern/activity/42",
+    ]
     query = "?activityType=running&sortOrder=desc&start=0&limit=1"
     assert upstream.calls == [
         ("POST", TOKEN, "ApiKey " + GARMIN_KEY, ""), ("GET", SEARCH + query, "Bearer first-token", ""),
         ("POST", TOKEN, "ApiKey " + GARMIN_KEY, ""), ("GET", SEARCH + query, "Bearer second-token", ""),
     ]
     assert all(value not in out for value in (GARMIN_KEY, "first-token", "second-token"))
+
+
+@pytest.mark.parametrize(("timing", "timer", "elapsed"), [
+    ({"elapsedDuration": 1800, "movingDuration": 1490}, "—", "0:30:00"),
+    ({"duration": 1500, "movingDuration": 1490}, "0:25:00", "—"),
+    ({"duration": 0, "elapsedDuration": 60}, "0:00:00", "0:01:00"),
+])
+def test_garmin_timer_and_elapsed_are_independent(timing, timer, elapsed, cli, upstream, monkeypatch):
+    monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", GARMIN_KEY)
+    upstream.reply(b"bearer")
+    upstream.reply([{"activityId": 7, **timing}])
+    code, out, err = cli("garmin", "--limit", "1")
+    assert code == 0 and not err
+    assert re.split(r" {2,}", out.splitlines()[-1])[2:4] == [timer, elapsed]
 
 
 @pytest.mark.parametrize("provider", ["garmin", "strava"])
@@ -193,7 +212,7 @@ def test_unexpected_garmin_token_never_used(invalid, cli, upstream, monkeypatch)
 
 @pytest.mark.parametrize("field", [
     {"startTimeLocal": CLIENT_SECRET}, {"startTimeLocal": "2026-11-01"}, {"distance": -1},
-    {"elapsedDuration": 10**30}, {"activityName": {"token": CLIENT_SECRET}},
+    {"duration": -1}, {"duration": "bad"}, {"elapsedDuration": 10**30}, {"activityName": {"token": CLIENT_SECRET}},
 ])
 def test_invalid_activity_values_fail_without_partial_success(field, cli, upstream, monkeypatch):
     monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", GARMIN_KEY)

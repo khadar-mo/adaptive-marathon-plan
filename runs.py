@@ -338,21 +338,31 @@ def strava_pages(token, limit):
     return runs[:limit]
 
 
+def duration_text(seconds):
+    return str(timedelta(seconds=round(seconds))) if seconds is not None else "—"
+
+
 def activity_row(provider, activity):
     if provider == "garmin":
-        start, seconds, name, ident = (activity.get(k) for k in ("startTimeLocal", "elapsedDuration", "activityName", "activityId"))
+        start, elapsed_seconds, name, ident = (activity.get(k) for k in ("startTimeLocal", "elapsedDuration", "activityName", "activityId"))
+        timer_seconds = activity.get("duration")
         base = "https://connect.garmin.com/modern/activity/"
     else:
-        start, seconds, name, ident = (activity.get(k) for k in ("start_date_local", "elapsed_time", "name", "id"))
+        start, elapsed_seconds, name, ident = (activity.get(k) for k in ("start_date_local", "elapsed_time", "name", "id"))
+        timer_seconds = None
         base = STRAVA + "/activities/"
     metres = activity.get("distance")
-    for value in (metres, seconds):
+    for value in (metres, timer_seconds, elapsed_seconds):
         if value is not None and (type(value) not in (int, float) or value < 0 or not math.isfinite(value)):
             raise ValueError
     if any(value is not None and not isinstance(value, str) for value in (name, start)):
         raise ValueError
     km = f"{metres / 1000:.2f} km" if metres is not None else "—"
-    duration = str(timedelta(seconds=round(seconds))) if seconds is not None else "—"
+    elapsed = duration_text(elapsed_seconds)
+    if provider == "garmin":
+        timing = f"{duration_text(timer_seconds):>8}  {elapsed:>12}"
+    else:
+        timing = f"{elapsed:>8}"
     date = "—"
     if start:
         recorded = re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?", start)
@@ -361,7 +371,7 @@ def activity_row(provider, activity):
         datetime.fromisoformat(start.replace("Z", "+00:00"))  # Reject impossible dates and times.
         date = recorded.group().replace("T", " ")
     title = "".join(char if char.isprintable() else " " for char in (name or "Untitled"))
-    return f"{date:19}  {km:>8}  {duration:>8}   {title}  {base}{ident}"
+    return f"{date:19}  {km:>8}  {timing}   {title}  {base}{ident}"
 
 
 def display(provider, activities):
@@ -371,7 +381,8 @@ def display(provider, activities):
         raise ConnectionProblem(f"{provider.title()} activity list: unexpected activity fields. Check provider availability and retry.") from None
     print(f"{provider.title()} connected. {len(rows)} recent run(s).")
     if rows:
-        print("Local start            Distance   Elapsed   Activity")
+        time_labels = f"{'Time':>8}  {'Elapsed Time':>12}" if provider == "garmin" else f"{'Elapsed':>8}"
+        print(f"{'Local start':19}  {'Distance':>8}  {time_labels}   Activity")
         print(*rows, sep="\n")
     else:
         print("No visible runs found.")
