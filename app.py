@@ -25,8 +25,8 @@ import views
 @asynccontextmanager
 async def lifespan(app):
     path = Path(os.environ.get("RUNS_DB_PATH", "runs.sqlite3"))
-    app.state.store = Store(path)
     app.state.archive = Archive(os.environ.get("RUNS_ARCHIVE_PATH", path.with_name("runs-archive")))
+    app.state.store = Store(path, app.state.archive)
     try:
         app.state.store.interrupt_unfinished()
         index_originals(app.state.store, app.state.archive)

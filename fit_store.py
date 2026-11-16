@@ -74,7 +74,7 @@ def fit_owners(db, column, value):
     original_column = "fit_sha" if column == "sha256" else "identity"
     return {r[0] for r in db.execute(f"""SELECT activity_id FROM fit_sources WHERE {column}=?
                UNION SELECT s.activity_id FROM original_members m JOIN activity_sources s ON s.sha256=m.original_sha
-               WHERE s.kind='original' AND m.{original_column}=?""", (value, value))}
+               WHERE s.kind IN ('original', 'original_unavailable') AND m.{original_column}=?""", (value, value))}
 
 
 def recordings(db, payload):
@@ -165,23 +165,31 @@ def store_laps(db, activity_id, laps):
                    ({**lap, "activity_id": activity_id, "sequence": n} for n, lap in enumerate(laps, 1)))
 
 
-def save_sources(db, activity_id, sources, acquired_at):
+def combine_evidence(previous, current, first_seen):
+    sources = list(dict.fromkeys(tuple(s) for s in [*previous["sources"], *current["sources"]]))
+    acquired = {sha: first_seen for _, sha, _ in previous["sources"]}
+    acquired.update(previous.get("acquired", {}))
+    return {**current, "sources": sources, "acquired": {**current["acquired"], **acquired}}
+
+
+def save_sources(db, activity_id, sources, acquired_at, observed=None):
     changed = False
     for kind, digest, file_format in sources:
-        acquired = acquired_at
+        acquired = observed.get(digest, acquired_at) if observed else acquired_at
         if kind in ("original", "original_error", "original_unavailable"):
             first_acquisition = db.execute("""SELECT min(acquired_at) FROM activity_sources
                 WHERE activity_id=? AND sha256=? AND kind IN ('original', 'original_error', 'original_unavailable')""",
                 (activity_id, digest)).fetchone()[0]
             if first_acquisition:
-                acquired = first_acquisition
+                acquired = min(acquired, first_acquisition)
                 db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND sha256=? AND kind!=?
                     AND kind IN ('original', 'original_error', 'original_unavailable')""", (activity_id, digest, kind))
                 db.execute("""UPDATE activity_sources SET acquired_at=? WHERE activity_id=? AND sha256=?
                               AND kind=? AND acquired_at>?""", (acquired, activity_id, digest, kind, acquired))
         added = db.execute("""
             INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
-            VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO UPDATE SET acquired_at=excluded.acquired_at
+            WHERE excluded.acquired_at<activity_sources.acquired_at""",
             (activity_id, kind, digest, file_format, acquired)).rowcount
         if added and kind not in ("list", "detail"):
             changed = True
@@ -213,7 +221,7 @@ def save(db, import_id, payload, target, acquired_at):
                                        {', '.join(':'+k for k in fields)}, :warning)""",
                             {**fields, "warning": warning}).lastrowid
     changed = not previous or previous["original_warning"] != warning or any(previous[k] != v for k, v in fields.items())
-    source_changed = save_sources(db, target, payload["sources"], acquired_at)
+    source_changed = save_sources(db, target, payload["sources"], acquired_at, payload.get("acquired"))
     changed = changed or source_changed or payload.get("detail_changed", False)
     if fit:
         for sha, identity in recordings(db, payload).items():
@@ -250,23 +258,71 @@ def complete_reviewed_import(db, import_id):
     db.execute("UPDATE imports SET state='complete' WHERE id=?", (import_id,))
 
 
-def apply_review(db, key, action, target, confirmed_date=None):
+def reconcile_scan_edits(db, fields, sources, status, acquired_at):
+    gid = fields["garmin_id"]
+    day = fields["local_date"]
+    pending = db.execute("""SELECT r.issue_id, r.review_key, f.payload, s.id AS scan_id, s.import_id, s.first, s.last, a.started_at
+        FROM garmin_scan_items g JOIN garmin_scans s ON s.id=g.scan_id
+        JOIN imports a ON a.id=s.import_id JOIN import_issues i ON i.import_id=s.import_id AND i.item=g.garmin_id
+        JOIN fit_review_issues r ON r.issue_id=i.id JOIN fit_reviews f ON f.key=r.review_key
+        WHERE g.garmin_id=? AND g.status='pending_identity' AND f.resolution IS NULL""", (gid,)).fetchall()
+    for old in pending:
+        reason = None
+        if status == "excluded_sport":
+            reason = "excluded_sport"
+        elif day and not old["first"] <= day <= old["last"]:
+            reason = "resolved_outside"
+        if reason:
+            # Close this observation without giving a decision about stale metadata
+            # to a future observation of the same recording.
+            closed_key = f'excluded:{old["issue_id"]}'
+            db.execute("""INSERT INTO fit_reviews(key, kind, payload, candidates, resolution)
+                          SELECT ?, kind, payload, candidates, ? FROM fit_reviews WHERE key=?""",
+                       (closed_key, reason, old["review_key"]))
+            db.execute("UPDATE fit_review_issues SET review_key=? WHERE issue_id=?", (closed_key, old["issue_id"]))
+            db.execute("""DELETE FROM fit_reviews WHERE key=? AND NOT EXISTS
+                          (SELECT 1 FROM fit_review_issues WHERE review_key=fit_reviews.key)""", (old["review_key"],))
+            db.execute("UPDATE garmin_scan_items SET status=?, local_date=? WHERE scan_id=? AND garmin_id=?",
+                       (reason, day, old["scan_id"], gid))
+            complete_reviewed_import(db, old["import_id"])
+        elif status != "saved" and day:
+            # A neighboring scan may refresh detail for an earlier in-range decision.
+            previous = json.loads(old["payload"])
+            current = {**previous, "fields": {**fields, "sport": fields["sport"] or previous["fields"]["sport"]},
+                       "sources": sources, "acquired": {sha: acquired_at for _, sha, _ in sources}}
+            payload = combine_evidence(previous, current, old["started_at"])
+            db.execute("UPDATE fit_reviews SET payload=? WHERE key=?", (json.dumps(payload), old["review_key"]))
+            db.execute("UPDATE garmin_scan_items SET local_date=? WHERE scan_id=? AND garmin_id=?",
+                       (day, old["scan_id"], gid))
+
+
+def apply_review(db, key, action, target, confirmed_date=None, *, available=None):
     db.execute("UPDATE fit_reviews SET resolution=?, activity_id=?, local_date=? WHERE key=?",
                (action, target, confirmed_date, key))
     imports = db.execute("""SELECT DISTINCT i.import_id FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
                             WHERE r.review_key=?""", (key,)).fetchall()
+    gid = key.split(":")[1] if key.startswith("garmin:") else None
+    has_original = False
+    if gid and available:
+        payload = json.loads(db.execute("SELECT payload FROM fit_reviews WHERE key=?", (key,)).fetchone()[0])
+        sha = payload["fit"]["sha256"] if payload["fit"] else None
+        originals = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
+                JOIN garmin_original_versions v ON v.original_sha=s.sha256 WHERE s.activity_id=? AND v.garmin_id=?
+                AND s.kind IN ('original', 'original_unavailable') AND (? IS NULL OR m.fit_sha=?)
+                ORDER BY v.last_import_id DESC""", (target, gid, sha, sha))
+        has_original = any(available(r["sha256"]) for r in originals)
     for (import_id,) in imports:
         record_activity(db, import_id, target, "unchanged")
         db.execute("""UPDATE fit_uploads SET activity_id=? WHERE import_id=? AND sha256 IN
                       (SELECT sha256 FROM fit_sources WHERE activity_id=?)""", (target, import_id, target))
-        if key.startswith("garmin:"):
-            gid = key.split(":")[1]
-            db.execute("""UPDATE garmin_scan_items SET status='saved' WHERE garmin_id=? AND status='pending_identity'
-                          AND scan_id IN (SELECT id FROM garmin_scans WHERE import_id=?)""", (gid, import_id))
+        if gid:
+            db.execute("""UPDATE garmin_scan_items SET status='saved', original_available=MAX(original_available, ?)
+                          WHERE garmin_id=? AND status='pending_identity' AND scan_id IN
+                          (SELECT id FROM garmin_scans WHERE import_id=?)""", (has_original, gid, import_id))
         complete_reviewed_import(db, import_id)
 
 
-def settle_other_versions(db, key, payload, target, acquired_at, import_id):
+def settle_other_versions(db, key, payload, target, acquired_at, import_id, available):
     """Attach a compatible earlier original without changing a separately owned recording."""
     gid, latest = payload["fields"]["garmin_id"], payload["fit"]
     if not gid:
@@ -298,10 +354,11 @@ def settle_other_versions(db, key, payload, target, acquired_at, import_id):
         else:
             newest = other["import_id"]
         save(db, other["import_id"], earlier, target, acquired_at)
-        apply_review(db, other["key"], "same_garmin_id", target)
+        apply_review(db, other["key"], "same_garmin_id", target, available=available)
 
 
-def ingest(db, import_id, payload, acquired_at):
+def ingest(db, import_id, payload, acquired_at, available):
+    payload["acquired"] = {sha: acquired_at for _, sha, _ in payload["sources"]}
     fit, gid = payload["fit"], payload["fields"]["garmin_id"]
     if fit:
         for kind, outer, _ in payload["sources"]:
@@ -324,11 +381,12 @@ def ingest(db, import_id, payload, acquired_at):
             key, review = outstanding["key"], outstanding
     if review and not review["resolution"]:
         previous = json.loads(review["payload"])
-        sources = list(dict.fromkeys(tuple(s) for s in [*previous["sources"], *payload["sources"]]))
-        payload = {**payload, "sources": sources}
+        first_seen = db.execute("""SELECT MIN(a.started_at) FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
+                                   JOIN imports a ON a.id=i.import_id WHERE r.review_key=?""", (key,)).fetchone()[0]
+        payload = combine_evidence(previous, payload, first_seen or acquired_at)
         if not fit:
             payload["fit"] = previous["fit"]
-            if payload["fit"]:
+            if payload["fit"] and any(available(sha) for kind, sha, _ in previous["sources"] if kind == "original"):
                 payload["warning"] = None
     target, candidates, hashes = identify(db, payload)
     if review and review["resolution"] and (not hashes or hashes == {review["activity_id"]}):
@@ -340,9 +398,9 @@ def ingest(db, import_id, payload, acquired_at):
         return None
     target = save(db, import_id, payload, target, acquired_at)
     if review and not review["resolution"]:
-        apply_review(db, key, "exact_match", target)
+        apply_review(db, key, "exact_match", target, available=available)
     if fit and gid:
-        settle_other_versions(db, key, payload, target, acquired_at, import_id)
+        settle_other_versions(db, key, payload, target, acquired_at, import_id, available)
     return target
 
 
@@ -378,7 +436,7 @@ def merge_activity(db, donor, target):
     db.execute("INSERT INTO activity_redirects VALUES (?, ?)", (donor, target))
 
 
-def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_at):
+def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_at, available):
     row = db.execute("""SELECT f.* FROM import_issues i JOIN fit_review_issues r ON r.issue_id=i.id
                         JOIN fit_reviews f ON f.key=r.review_key WHERE i.import_id=? AND i.id=?""",
                      (import_id, issue_id)).fetchone()
@@ -411,7 +469,7 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
             if primary:
                 already_recorded = db.execute("""SELECT 1 FROM fit_sources WHERE activity_id=? UNION ALL
                     SELECT 1 FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
-                    WHERE s.activity_id=? AND s.kind='original' AND m.fit_sha IS NOT NULL LIMIT 1""",
+                    WHERE s.activity_id=? AND s.kind IN ('original', 'original_unavailable') AND m.fit_sha IS NOT NULL LIMIT 1""",
                                               (primary[0], primary[0])).fetchone()
                 if owners and primary[0] not in owners and already_recorded:
                     # Two established recordings can stay separate. A decision about
@@ -444,7 +502,7 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
         gid = payload["fields"]["garmin_id"]
         if gid and not db.execute("SELECT 1 FROM activities WHERE garmin_id=?", (gid,)).fetchone():
             db.execute("INSERT OR REPLACE INTO garmin_aliases VALUES (?, ?)", (gid, target))
-    apply_review(db, row["key"], action, target, local_date)
+    apply_review(db, row["key"], action, target, local_date, available=available)
     if row["kind"] == "match":
-        settle_other_versions(db, row["key"], payload, target, acquired_at, import_id)
+        settle_other_versions(db, row["key"], payload, target, acquired_at, import_id, available)
     return target

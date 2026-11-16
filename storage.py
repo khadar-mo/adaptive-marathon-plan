@@ -137,6 +137,12 @@ class Archive:
         except FileNotFoundError:
             return None
 
+    def available(self, digest):
+        try:
+            return self.read(digest) is not None
+        except OSError:
+            return False
+
     def put(self, data):
         return self.put_file(BytesIO(data))
 
@@ -187,8 +193,9 @@ class ActiveImport(Exception):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, archive=None):
         self.path = Path(path)
+        self.archive = archive or Archive(self.path.with_name("runs-archive"))
         self.recovery_lock = threading.Lock()
         self.recovery_pending = True
 
@@ -350,19 +357,30 @@ class Store:
             # local runs. Fetch the current bytes when the cached owner is ambiguous.
             owners = db.execute("""SELECT DISTINCT activity_id FROM fit_reviews WHERE key GLOB ?
                                    AND resolution IS NOT NULL LIMIT 2""", (f"garmin:{garmin_id}:*",)).fetchall()
-            if len(owners) > 1:
+            prefix = f"garmin:{garmin_id}"
+            pending = db.execute("""SELECT 1 FROM fit_reviews WHERE (key=? OR key GLOB ?)
+                                    AND resolution IS NULL LIMIT 1""", (prefix, prefix + ":*")).fetchone()
+            if len(owners) > 1 or pending:
                 return []
-            rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s
-                                 JOIN activities a ON a.id=s.activity_id
-                                 LEFT JOIN garmin_original_versions v ON v.garmin_id=a.garmin_id AND v.original_sha=s.sha256
-                                 WHERE a.garmin_id=? AND s.kind IN ('original', 'original_unavailable')
-                                 ORDER BY (s.kind='original') DESC, COALESCE(v.last_import_id, 0) DESC, s.rowid DESC""", (garmin_id,))
+            owner = fit_store.garmin_owner(db, garmin_id)
+            if not owner:
+                return []
+            # Recheck only the most recently observed version for this upstream ID.
+            # An older usable ZIP may contain different recorded laps.
+            version = db.execute("""SELECT original_sha FROM garmin_original_versions WHERE garmin_id=?
+                                    ORDER BY last_import_id DESC, rowid DESC LIMIT 1""", (garmin_id,)).fetchone()
+            selected = version["original_sha"] if version else None
+            rows = db.execute("""SELECT sha256, format FROM activity_sources WHERE activity_id=?
+                                 AND kind IN ('original', 'original_unavailable') AND (? IS NULL OR sha256=?)
+                                 ORDER BY (kind='original') DESC, rowid DESC""", (owner["id"], selected, selected))
             return [tuple(row) for row in rows]
 
     def save(self, import_id, fields, sources, warning, fit=None, item=None, *,
              scan_id=None, detail_sha=None, detail_changed=False, status="saved"):
         gid = fields["garmin_id"]
         with self.connect(write=True) as db:
+            if scan_id is not None:
+                fit_store.reconcile_scan_edits(db, fields, sources, status, now())
             if status != "saved":
                 db.execute("""UPDATE garmin_scan_items SET status=?, detail_sha=? WHERE scan_id=? AND garmin_id=?""",
                            (status, detail_sha, scan_id, gid))
@@ -380,7 +398,7 @@ class Store:
                 return None
             payload = {"fields": fields, "sources": sources, "warning": warning, "fit": fit,
                        "item": item or gid, "detail_changed": detail_changed}
-            target = fit_store.ingest(db, import_id, payload, now())
+            target = fit_store.ingest(db, import_id, payload, now(), self.archive.available)
             if scan_id is not None:
                 db.execute("""UPDATE garmin_scan_items SET status=?, detail_sha=?, original_available=?
                               WHERE scan_id=? AND garmin_id=?""",
@@ -392,7 +410,8 @@ class Store:
             if db is None:
                 raise KeyError
         with self.connect(write=True) as db:
-            return fit_store.resolve(db, local_id(import_id), local_id(issue_id), action, activity_id, date, now())
+            return fit_store.resolve(db, local_id(import_id), local_id(issue_id), action, activity_id, date,
+                                     now(), self.archive.available)
 
     @staticmethod
     def review_rows(db, import_id=None):

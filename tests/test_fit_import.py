@@ -13,6 +13,7 @@ import garmin_coverage
 from fit_fixture import START, make_fit
 from test_imports import DETAIL, LISTED, digest, history, server, submit
 from runs import ConnectionProblem
+import storage
 from storage import Store
 
 
@@ -24,10 +25,10 @@ def anyio_backend():
     return "asyncio"
 
 
-def zipped(data):
+def zipped(data, name="original/ACTIVITY.FIT"):
     with BytesIO() as stream:
         with ZipFile(stream, "w") as container:
-            container.writestr("original/ACTIVITY.FIT", data)
+            container.writestr(name, data)
         return stream.getvalue()
 
 
@@ -189,7 +190,8 @@ async def test_conflicting_garmin_ids_cannot_split_identical_fit_bytes(history):
         assert row["garmin_id"] == "42" and (await client.get("/api/activities/2")).status_code == 404
 
 
-async def test_pr9_database_preserves_existing_id_and_archived_member_without_garmin(history, tmp_path, monkeypatch):
+@pytest.mark.parametrize("temporarily_missing", [False, True])
+async def test_pr9_database_preserves_existing_id_and_archived_member_without_garmin(history, tmp_path, monkeypatch, temporarily_missing):
     # These are the pre-FIT tables and constraints used by the merged first importer.
     with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
         db.executescript("""
@@ -217,11 +219,22 @@ async def test_pr9_database_preserves_existing_id_and_archived_member_without_ga
     async with server() as client:
         assert (await client.get("/api/imports/5")).json()["source"] == "garmin"
         assert (await client.get("/api/activities/731")).json()["laps"][0]["distance_m"] == 324.5
+        if temporarily_missing:
+            (directory / digest(original)).unlink()
+            history.listed[0].pop("startTimeGMT")
+            history.detail["summaryDTO"]["distance"] = 4500
+            history.original_error = ConnectionProblem("Fixture unavailable.")
+            with monkeypatch.context() as online:
+                online.setenv("RUNS_GARMIN_OFFLINE", "0")
+                missing = await submit(client)
+            assert missing["scans"][0]["missing_original_ids"] == ["42"]
+            (directory / digest(original)).write_bytes(original)
+        prior_calls = list(history.calls)
         replay = await upload(client, ("export.fit", data))
         assert replay["activities"][0]["id"] == 731 and not replay["issues"]
         assert (await client.get("/api/activities/732")).status_code == 404
         assert (await client.get("/api/activities/731")).json()["distance_m"] == 4500
-        assert history.calls == []
+        assert history.calls == prior_calls
 
 
 async def test_recognize_nearby_garmin_run_using_its_fit_start(history):
@@ -352,7 +365,7 @@ async def test_garmin_edits_during_pending_match_keep_fresh_headlines_and_previo
         assert {s["sha256"] for s in row["sources"] if s["kind"] == "detail"} == {old_detail, new_detail}
 
 
-async def test_weak_retry_preserves_newer_conflicting_original_and_owner(history):
+async def test_weak_retry_preserves_newer_conflicting_original_and_owner(history, tmp_path):
     def select_garmin(gid, data):
         history.listed = [{**LISTED, "activityId": gid}]
         history.extra_details[str(gid)] = {**DETAIL, "activityId": gid}
@@ -367,6 +380,8 @@ async def test_weak_retry_preserves_newer_conflicting_original_and_owner(history
         select_garmin(51, x)
         first = await submit(client)
         assert (await resolve(client, first, {"action": "link", "activity_id": 1})).status_code == 200
+        # An unavailable cached source makes the range importer request the newer upstream version.
+        (tmp_path / "archive" / digest(history.original)).unlink()
         select_garmin(51, y)
         changed = await submit(client)
         assert not changed["activities"]
@@ -472,7 +487,7 @@ async def test_resolving_changed_originals_honours_choices_made_while_they_were_
 
 
 @pytest.mark.parametrize("chosen", [0, 1])
-async def test_latest_compatible_garmin_metrics_and_laps_survive_either_resolution_order(history, chosen):
+async def test_latest_compatible_garmin_metrics_and_laps_survive_either_resolution_order(history, chosen, tmp_path):
     files = [make_fit(start=START + 20, serial=None, file_number=n, laps=[(100 + n, 10 + n, 20 + n)]) for n in (1, 2)]
     async with server() as client:
         await upload(client, ("seed.fit", make_fit()))
@@ -493,6 +508,16 @@ async def test_latest_compatible_garmin_metrics_and_laps_survive_either_resoluti
         assert history.calls.count("/download-service/files/activity/42") == downloads
         after = (await client.get("/api/activities/2")).json()
         assert after["distance_m"] == 8000 and after["laps"][0]["distance_m"] == 102
+        preferred = tmp_path / "archive" / digest(history.original)
+        preferred.unlink()
+        history.original_error = ConnectionProblem("Fixture offline.")
+        unavailable = await submit(client)
+        assert unavailable["scans"][0]["originals_requested"] == 1 and unavailable["scans"][0]["missing_original_ids"] == ["42"]
+        assert (await client.get("/api/activities/2")).json()["laps"][0]["distance_m"] == 102
+        preferred.write_bytes(history.original)
+        restored = await submit(client)
+        assert restored["scans"][0]["originals_requested"] == 0 and restored["scans"][0]["originals_available"] == 1
+        assert (await client.get("/api/activities/2")).json()["laps"][0]["distance_m"] == 102
 
 
 async def test_normal_sync_holds_only_the_unresolved_garmin_day(history, monkeypatch):
@@ -549,3 +574,86 @@ async def test_excluded_garmin_edit_preserves_recorded_fit_measurements(history)
         assert changed["scans"][0]["excluded"] == 1 and not changed["activities"]
         row = (await client.get(path)).json()
         assert row["sport"] == "cycling" and row["moving_seconds"] == 111 and row["metric_sources"]["moving_seconds"] == "fit"
+
+
+@pytest.mark.parametrize("edit,reason", [("sport", "excluded_sport"), ("date", "resolved_outside")])
+async def test_recheck_retires_stale_decision_without_creating_a_run(history, edit, reason):
+    history.listed[0].pop("startTimeGMT")
+    history.original = zipped(make_fit(start=START + 10, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client)
+        if edit == "sport":
+            history.detail["activityTypeDTO"] = {"typeKey": "cycling"}
+        else:
+            history.detail["summaryDTO"]["startTimeLocal"] = "2024-03-01 00:15:38"
+        excluded = await submit(client)
+        assert excluded["scans"][0]["excluded"] == 1
+        assert (await resolve(client, pending, {"action": "keep_separate"})).status_code == 409
+        old = (await client.get(pending["report_url"])).json()
+        assert old["state"] == "complete" and old["scans"][0]["coverage"] == "checked_empty"
+        assert old["issues"][0]["resolution"] == reason and not old["activities"]
+        assert "/activities/None" not in (await client.get(old["html_url"])).text
+        assert (await client.get("/api/activities/2")).status_code == 404
+        history.detail = {**DETAIL, "summaryDTO": DETAIL["summaryDTO"].copy()}
+        renewed = await submit(client)
+        assert renewed["state"] == "partial" and renewed["issues"][0]["resolution"] is None
+        assert (await resolve(client, renewed, {"action": "keep_separate"})).json()["activity_id"] == 2
+
+
+async def test_adjacent_range_preserves_a_valid_review_and_its_latest_detail(history):
+    history.listed[0].pop("startTimeGMT")
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client)
+        history.detail["summaryDTO"]["distance"] = 6000
+        neighbor = await submit(client, {"from": "2024-03-01", "to": "2024-03-01"})
+        assert neighbor["scans"][0]["excluded"] == 1
+        assert (await resolve(client, pending, {"action": "keep_separate"})).json()["activity_id"] == 2
+        assert (await client.get("/api/activities/2")).json()["distance_m"] == 6000
+
+
+async def test_linked_garmin_id_reuses_its_own_zip_and_appears_in_scan_receipts(history):
+    raw = make_fit()
+    history.original = zipped(raw)
+    async with server() as client:
+        await submit(client)
+        history.listed = [{**LISTED, "activityId": 51}]
+        history.extra_details["51"] = {**DETAIL, "activityId": 51}
+        history.original = zipped(raw, "second.fit")
+        pending = await submit(client)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        history.original_error = ConnectionProblem("Fixture unavailable.")
+        replay = await submit(client)
+        scan, = replay["scans"]
+        assert scan["saved_garmin_ids"] == ["51"] and replay["activities"][0]["id"] == 1
+        assert scan["originals_requested"] == 0 and scan["missing_original_ids"] == []
+        assert history.calls.count("/download-service/files/activity/51") == 1
+        assert "51" in (await client.get(replay["html_url"])).text
+        assert len((await submit(client, {}))["scans"]) == 1
+
+
+@pytest.mark.parametrize("archive_present", [True, False])
+async def test_resolution_keeps_acquisition_time_and_retries_only_missing_originals(history, monkeypatch, tmp_path, archive_present):
+    first_seen = "2026-07-02T12:00:00+00:00"
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        monkeypatch.setattr(storage, "now", lambda: first_seen)
+        await submit(client)
+        monkeypatch.setattr(storage, "now", lambda: "2026-07-03T12:00:00+00:00")
+        history.original_error = ConnectionProblem("Fixture offline.")
+        if not archive_present:
+            (tmp_path / "archive" / digest(history.original)).unlink()
+        retry = await submit(client)
+        monkeypatch.setattr(storage, "now", lambda: "2026-07-04T12:00:00+00:00")
+        assert (await resolve(client, retry, {"action": "keep_separate"})).json()["activity_id"] == 2
+        scan, = (await client.get(retry["report_url"])).json()["scans"]
+        assert scan["originals_requested"] == 1 and scan["originals_available"] == int(archive_present)
+        assert scan["missing_original_ids"] == ([] if archive_present else ["42"])
+        row = (await client.get("/api/activities/2")).json()
+        assert bool(row["warnings"]) == (not archive_present)
+        original, = [s for s in row["sources"] if s["kind"] == "original"]
+        assert original["acquired_at"] == first_seen
+        assert len((await submit(client, {}))["scans"]) == (1 if archive_present else 2)

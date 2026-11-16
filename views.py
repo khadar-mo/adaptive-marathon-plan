@@ -70,6 +70,10 @@ document.addEventListener('submit', async event => {
 def resolve_form(issue):
     if "kind" not in issue:
         return ""
+    if issue["resolution"] == "excluded_sport":
+        return "<p>Garmin now records this activity as another sport.</p>"
+    if issue["resolution"] == "resolved_outside":
+        return "<p>Garmin moved this activity outside the requested dates.</p>"
     if issue["resolution"]:
         return f'<p>Resolved · <a href="/activities/{issue["activity_id"]}">Open activity {issue["activity_id"]}</a></p>'
     action = f'/api/imports/{issue["import_id"]}/issues/{issue["id"]}/resolve'
@@ -119,6 +123,8 @@ def scan_summary(scan):
     checked = ", ".join(f'{r["from"]} to {r["to"]}' for r in scan["checked_ranges"]) or "None"
     saved_dates = (f'<p>Saved runs span {escape(scan["earliest_saved"])} to {escape(scan["latest_saved"])}.</p>'
                    if scan["earliest_saved"] else "")
+    ids = ", ".join(escape(gid) for gid in scan["saved_garmin_ids"])
+    saved_ids = f"<p><strong>Saved Garmin IDs</strong> {ids}</p>" if ids else ""
     retry = ""
     if scan["mode"] == "retry":
         query = escape(urlencode({"from": scan["from"], "to": scan["to"]}))
@@ -129,7 +135,7 @@ Fully checked dates: {checked}.</p>
 <p>{scan["unique_ids_found"]} unique run IDs found · {scan["excluded"]} excluded ·
 {len(scan["missing_activity_ids"])} missing activities · {scan["unidentified_records"]} unidentified records.</p>
 <p>Original files: {scan["originals_available"]} available · {scan["originals_requested"]} requested ·
-{len(scan["missing_original_ids"])} missing.</p>{saved_dates}{retry}"""
+{len(scan["missing_original_ids"])} missing.</p>{saved_ids}{saved_dates}{retry}"""
 
 
 def report(row):

@@ -19,7 +19,7 @@ def index_originals(store, archive):
             return
         originals = db.execute("""SELECT DISTINCT s.sha256 FROM activity_sources s
                  LEFT JOIN original_members m ON m.original_sha=s.sha256
-                 WHERE s.kind='original' AND m.original_sha IS NULL ORDER BY s.rowid""").fetchall()
+                 WHERE s.kind IN ('original', 'original_unavailable') AND m.original_sha IS NULL ORDER BY s.rowid""").fetchall()
     for (outer,) in originals:
         try:
             data = archive.read(outer)
@@ -35,7 +35,8 @@ def index_originals(store, archive):
             db.execute("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
                        (outer, fit["sha256"] if fit else None, fit["identity"] if fit else None))
             if fit:
-                owners = db.execute("SELECT activity_id FROM activity_sources WHERE kind='original' AND sha256=?",
+                owners = db.execute("""SELECT DISTINCT activity_id FROM activity_sources
+                                       WHERE kind IN ('original', 'original_unavailable') AND sha256=?""",
                                     (outer,)).fetchall()
                 for (owner,) in owners:
                     if not db.execute("SELECT 1 FROM fit_sources WHERE activity_id=?", (owner,)).fetchone():
