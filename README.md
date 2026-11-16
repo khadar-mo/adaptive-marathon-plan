@@ -11,6 +11,8 @@ python3 runs.py strava --limit 1
 
 The default is ten runs. Use `--limit` to request 1–10. An empty list is a successful connection. To grant Strava activity access or reconnect, run `python3 runs.py strava --connect`. The example callback uses port 8000.
 
+If Garmin rejects the token exchange with HTTP 401, the message identifies where the CLI found the key. An exported `GARMIN_PERSONAL_API_KEY` takes precedence over the value in `.env`. To try the file's value for one run, use `env -u GARMIN_PERSONAL_API_KEY python3 runs.py garmin --limit 1`. Use the raw key with no authorization prefix. You can check the key's active status and expiration on the Personal API Key page in Garmin Connect. [Garmin authentication FAQ](https://developer.garmin.com/gc-developer-program/personal/personal-faq)
+
 To verify Garmin, stop the local app, run the one-run command above and open the activity link in Garmin Connect. Compare the ID in the link, recorded local start, distance in kilometres at the same precision, and **elapsed time** within one second. Keep the activity and measurements private. Report only whether all four fields matched.
 
 ## Check local storage

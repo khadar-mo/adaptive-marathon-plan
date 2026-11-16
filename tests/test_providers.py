@@ -70,6 +70,22 @@ def test_empty_list_is_success_and_contacts_only_selected_provider(provider, cli
     assert all(path.startswith("/" + provider + "/") for _, path, _, _ in upstream.calls)
 
 
+@pytest.mark.parametrize("provider", ["garmin", "strava"])
+def test_default_limit_is_ten(provider, cli, upstream, monkeypatch):
+    if provider == "garmin":
+        monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", GARMIN_KEY)
+        upstream.reply(b"bearer")
+        upstream.reply([{"activityId": index} for index in range(1, 12)])
+    else:
+        strava_credentials(monkeypatch)
+        upstream.reply([{"id": index, "type": "Run"} for index in range(1, 12)])
+    code, out, err = cli(provider)
+    assert code == 0 and not err
+    assert "10 recent run(s)" in out and out.splitlines()[-1].endswith("/10")
+    if provider == "garmin":
+        assert parse_qs(urlsplit(upstream.calls[-1][1]).query)["limit"] == ["10"]
+
+
 @pytest.mark.parametrize(("provider", "name"), [("garmin", "GARMIN_PERSONAL_API_KEY"), ("strava", "STRAVA_CLIENT_ID")])
 def test_missing_settings_fail_before_http(provider, name, cli, upstream):
     assert_failure(cli(provider), "credential setup", "set " + name)
@@ -86,10 +102,12 @@ def test_persistent_garmin_401_stops_after_one_retry(cli, upstream, monkeypatch)
 
 
 @pytest.mark.parametrize(("status", "headers", "messages"), [
-    (401, {}, ("401", "replace GARMIN_PERSONAL_API_KEY")),
-    (403, {}, ("403", "access denied", "replace")),
+    (401, {}, ("401", "shell environment", "active status", "overrides .env")),
+    (403, {}, ("403", "access denied", "active status")),
     (429, {"Retry-After": "60"}, ("rate limit", "60 seconds")),
+    (429, {"Retry-After": "00000000060"}, ("retry after 60 seconds",)),
     (429, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, ("retry at Wed, 21 Oct 2026 07:28:00 GMT",)),
+    (429, {"Retry-After": "Wed Oct 21 07:28:00 2026"}, ("retry at Wed, 21 Oct 2026 07:28:00 GMT",)),
     (429, {"Retry-After": CLIENT_SECRET}, ("rate limit", "reset", "retry")),
     (503, {}, ("503", "retry")),
 ])
@@ -98,6 +116,34 @@ def test_garmin_exchange_errors_name_recovery_without_retrying(status, headers, 
     upstream.reply(ERROR_BODY, status, headers)
     assert_failure(cli("garmin"), "Garmin token exchange", *messages)
     assert len(upstream.calls) == 1
+
+
+@pytest.mark.parametrize(("line", "key"), [
+    ("GARMIN_PERSONAL_API_KEY=synthetic-key # comment", GARMIN_KEY),
+    ('export GARMIN_PERSONAL_API_KEY="synthetic-key" # comment', GARMIN_KEY),
+    ("GARMIN_PERSONAL_API_KEY='fixture#key' # comment", "fixture#key"),
+])
+def test_garmin_key_from_file(line, key, cli, upstream, tmp_path):
+    (tmp_path / ".env").write_text(line + "\n")
+    upstream.reply(ERROR_BODY, 401)
+    result = cli("garmin")
+    assert_failure(result, "token exchange", "401", "from .env", "active status")
+    assert key not in result[2] and upstream.calls[0][2] == "ApiKey " + key
+
+
+def test_garmin_shell_override_is_trimmed_and_identified(cli, upstream, tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("GARMIN_PERSONAL_API_KEY=fixture-file\n")
+    monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "  " + GARMIN_KEY + "\t")
+    upstream.reply(ERROR_BODY, 401)
+    result = cli("garmin")
+    assert_failure(result, "from the shell environment", "overrides .env")
+    assert "fixture-file" not in result[2] and upstream.calls[0][2] == "ApiKey " + GARMIN_KEY
+
+
+def test_garmin_pasted_header_is_rejected_before_network(cli, upstream, monkeypatch):
+    monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "ApiKey " + GARMIN_KEY)
+    assert_failure(cli("garmin"), "credential setup", "raw Personal API key")
+    assert not upstream.calls
 
 
 @pytest.mark.parametrize(("provider", "step"), [("garmin", "Garmin activity search"), ("strava", "Strava activity list")])
@@ -128,7 +174,8 @@ def test_unexpected_garmin_token_never_used(invalid, cli, upstream, monkeypatch)
 
 
 @pytest.mark.parametrize("field", [
-    {"startTimeLocal": CLIENT_SECRET}, {"distance": -1}, {"elapsedDuration": 10**30}, {"activityName": {"token": CLIENT_SECRET}},
+    {"startTimeLocal": CLIENT_SECRET}, {"startTimeLocal": "2026-11-01"}, {"distance": -1},
+    {"elapsedDuration": 10**30}, {"activityName": {"token": CLIENT_SECRET}},
 ])
 def test_invalid_activity_values_fail_without_partial_success(field, cli, upstream, monkeypatch):
     monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", GARMIN_KEY)
@@ -137,6 +184,15 @@ def test_invalid_activity_values_fail_without_partial_success(field, cli, upstre
     result = cli("garmin")
     assert_failure(result, "activity list", "unexpected activity fields", "retry")
     assert not result[1]
+
+
+def test_activity_with_only_minutes_preserves_recorded_precision(cli, upstream, monkeypatch):
+    monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", GARMIN_KEY)
+    upstream.reply(b"bearer")
+    upstream.reply([{"activityId": 1, "startTimeLocal": "2026-11-01T08:15+01:00"}])
+    code, out, err = cli("garmin")
+    assert code == 0 and not err
+    assert "2026-11-01 08:15 " in out and "08:15:00" not in out
 
 
 @pytest.mark.parametrize(("provider", "stage"), [("garmin", "Garmin token exchange"), ("strava", "Strava activity list")])
@@ -246,7 +302,10 @@ def test_strava_connect_callback_grants_access_and_reuses_tokens(cli, upstream, 
     browser_threads[0].join(timeout=3)
     assert code == 0 and responses == [200]
     assert all(v not in out + err for v in (CLIENT_SECRET, "synthetic-code", "new-access", "new-refresh"))
-    assert parse_qs(upstream.calls[0][3])["grant_type"] == ["authorization_code"]
+    assert parse_qs(upstream.calls[0][3]) == {
+        "grant_type": ["authorization_code"], "code": ["synthetic-code"],
+        "client_id": ["123"], "client_secret": [CLIENT_SECRET],
+    }
     upstream.reply([])
     assert cli("strava")[0] == 0
     assert [c[2] for c in upstream.calls] == [None, "Bearer new-access", "Bearer new-access"]

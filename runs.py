@@ -47,9 +47,13 @@ def load_settings():
             key, sep, value = line.partition("=")
             if sep and not line.lstrip().startswith("#"):
                 value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                values[key.strip()] = value
+                quoted = re.fullmatch(r"""(["'])(.*?)\1\s*(?:#.*)?""", value)
+                if quoted:
+                    value = quoted.group(2)
+                else:
+                    value = re.split(r"\s+#", value, maxsplit=1)[0]
+                name = re.sub(r"^export\s+", "", key.strip())
+                values[name] = value
     values.update(os.environ)
     return values
 
@@ -69,12 +73,14 @@ class NoRedirect(HTTPRedirectHandler):
 
 def retry_advice(header):
     value = (header or "").strip()
-    if re.fullmatch(r"[0-9]{1,10}", value):
-        return f"Retry after {value} seconds."
+    if re.fullmatch(r"[0-9]+", value):
+        seconds = value.lstrip("0") or "0"
+        return f"Retry after {seconds} seconds."
     try:
         retry_at = parsedate_to_datetime(value)
-        if retry_at.tzinfo is not None:
-            return f"Retry at {format_datetime(retry_at.astimezone(timezone.utc), usegmt=True)}."
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return f"Retry at {format_datetime(retry_at.astimezone(timezone.utc), usegmt=True)}."
     except (ValueError, TypeError, OverflowError):
         pass
     return "Wait for the rate limit to reset and retry."
@@ -124,11 +130,19 @@ def valid_token(value):
 
 
 def garmin_runs(settings, limit):
-    key = required(settings, "GARMIN_PERSONAL_API_KEY")
+    name = "GARMIN_PERSONAL_API_KEY"
+    key = required(settings, name).strip()
+    from_shell = name in os.environ
+    source = "the shell environment" if from_shell else ".env"
+    if not key or re.match(r"^(?:Authorization:|ApiKey\s|Bearer\s)", key, re.IGNORECASE):
+        raise ConnectionProblem(f"Garmin credential setup: set {name} in {source} to the raw Personal API key.")
+    credential_help = f"Check the raw {name} from {source} and its active status in Garmin Connect."
+    if from_shell:
+        credential_help += " The shell value overrides .env."
     params = {"activityType": "running", "sortOrder": "desc", "start": 0, "limit": limit}
     for attempt in range(2):
         token = request(GARMIN + "/personalapitoken-service/personal-api/personal-api-key/token",
-                        step="Garmin token exchange", reconnect=GARMIN_RECONNECT,
+                        step="Garmin token exchange", reconnect=credential_help,
                         method="POST", headers={"Authorization": "ApiKey " + key}, plain=True)
         if not valid_token(token):
             raise ConnectionProblem("Garmin token exchange: unexpected token response. Check Garmin availability and retry.")
@@ -337,8 +351,11 @@ def activity_row(provider, activity):
     duration = str(timedelta(seconds=round(seconds))) if seconds is not None else "—"
     date = "—"
     if start:
-        local = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        date = local.replace(tzinfo=None).isoformat(" ", timespec="seconds")
+        recorded = re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?", start)
+        if not recorded:
+            raise ValueError
+        datetime.fromisoformat(start.replace("Z", "+00:00"))  # Reject impossible dates and times.
+        date = recorded.group().replace("T", " ")
     title = "".join(char if char.isprintable() else " " for char in (name or "Untitled"))
     return f"{date:19}  {km:>8}  {duration:>8}   {title}  {base}{ident}"
 

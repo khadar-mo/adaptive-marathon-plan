@@ -1,6 +1,7 @@
 from contextlib import closing, contextmanager
 from http.client import HTTPConnection
 import json
+import os
 from pathlib import Path
 import socket
 import sqlite3
@@ -72,9 +73,17 @@ def test_health_http_and_cli_for_empty_populated_broken_and_missing_storage(cli,
         code, out, err = cli("health")
         assert code != 0 and "503" in err and "SQLite read permissions" in err
         assert "private-invalid" not in out + err and str(db_path) not in out + err
+        db_path.write_bytes(b"x")
+        assert get_health(port)[0] == 503
         db_path.unlink()
         assert get_health(port)[0] == 503 and not db_path.exists()
         db_path.mkdir()  # Directory where a readable database file is required.
+        assert get_health(port)[0] == 503
+        db_path.rmdir()
+        os.mkfifo(db_path)
+        assert get_health(port)[0] == 503
+        db_path.unlink()
+        db_path.symlink_to(os.devnull)
         assert get_health(port)[0] == 503
 
     code, out, err = cli("health")
@@ -106,3 +115,14 @@ def test_health_timeout(cli, monkeypatch):
         monkeypatch.setattr(runs, "HEALTH_TIMEOUT", 0.05)
         code, out, err = cli("health")
     assert code != 0 and "timed out" in err and "retry" in err
+
+
+def test_health_uses_documented_loopback_address(cli, upstream, monkeypatch):
+    def connect(host, port, timeout):
+        assert (host, port) == ("127.0.0.1", 8001)
+        return HTTPConnection(host, upstream.port, timeout=timeout)
+
+    monkeypatch.setattr(runs, "HTTPConnection", connect)
+    upstream.reply({"status": "ok"})
+    assert cli("health")[0] == 0
+    assert upstream.calls == [("GET", "/health", None, "")]
