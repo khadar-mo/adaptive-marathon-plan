@@ -140,6 +140,24 @@ def test_garmin_shell_override_is_trimmed_and_identified(cli, upstream, tmp_path
     assert "fixture-file" not in result[2] and upstream.calls[0][2] == "ApiKey " + GARMIN_KEY
 
 
+@pytest.mark.parametrize("exported", ["", "   "])
+def test_empty_shell_override_explains_recovery(cli, upstream, tmp_path, monkeypatch, exported):
+    (tmp_path / ".env").write_text("GARMIN_PERSONAL_API_KEY=fixture-file\n")
+    monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", exported)
+    assert_failure(cli("garmin"), "credential setup", "shell environment", "unset", "use .env")
+    assert not upstream.calls
+    monkeypatch.delenv("GARMIN_PERSONAL_API_KEY")
+    upstream.reply(b"bearer")
+    upstream.reply([])
+    assert cli("garmin")[0] == 0
+
+
+def test_comment_after_empty_file_setting_is_missing(cli, upstream, tmp_path):
+    (tmp_path / ".env").write_text("GARMIN_PERSONAL_API_KEY= # fill in later\n")
+    assert_failure(cli("garmin"), "credential setup", "set GARMIN_PERSONAL_API_KEY in .env")
+    assert not upstream.calls
+
+
 def test_garmin_pasted_header_is_rejected_before_network(cli, upstream, monkeypatch):
     monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "ApiKey " + GARMIN_KEY)
     assert_failure(cli("garmin"), "credential setup", "raw Personal API key")

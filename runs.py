@@ -46,12 +46,11 @@ def load_settings():
         for line in path.read_text().splitlines():
             key, sep, value = line.partition("=")
             if sep and not line.lstrip().startswith("#"):
-                value = value.strip()
-                quoted = re.fullmatch(r"""(["'])(.*?)\1\s*(?:#.*)?""", value)
+                quoted = re.fullmatch(r"""(["'])(.*?)\1\s*(?:#.*)?""", value.strip())
                 if quoted:
                     value = quoted.group(2)
                 else:
-                    value = re.split(r"\s+#", value, maxsplit=1)[0]
+                    value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
                 name = re.sub(r"^export\s+", "", key.strip())
                 values[name] = value
     values.update(os.environ)
@@ -131,10 +130,15 @@ def valid_token(value):
 
 def garmin_runs(settings, limit):
     name = "GARMIN_PERSONAL_API_KEY"
-    key = required(settings, name).strip()
+    key = settings.get(name, "").strip()
     from_shell = name in os.environ
     source = "the shell environment" if from_shell else ".env"
-    if not key or re.match(r"^(?:Authorization:|ApiKey\s|Bearer\s)", key, re.IGNORECASE):
+    if not key:
+        advice = f"Set {name} in {source} and retry."
+        if from_shell:
+            advice += " Unset the empty shell value to use .env."
+        raise ConnectionProblem(f"Garmin credential setup failed. {advice}")
+    if re.match(r"^(?:Authorization:|ApiKey\s|Bearer\s)", key, re.IGNORECASE):
         raise ConnectionProblem(f"Garmin credential setup: set {name} in {source} to the raw Personal API key.")
     credential_help = f"Check the raw {name} from {source} and its active status in Garmin Connect."
     if from_shell:
