@@ -135,7 +135,7 @@ def original_format(data):
 def cached_source(archive, digest):
     try:
         return archive.read(digest)
-    except ArchiveChecksumError:
+    except (ArchiveChecksumError, PermissionError):
         return None
 
 
@@ -157,7 +157,10 @@ def original_sources(client, store, archive, garmin_id, scan_id):
         return sources, f"Original unavailable. {err} Retry these dates to request it again."
     if not data:
         return sources, "Original unavailable. Garmin returned an empty file. Retry these dates."
-    digest = archive.put(data)
+    try:
+        digest = archive.put(data)
+    except OSError:
+        return sources, "Original unavailable. Check the private archive permissions and retry these dates."
     file_format = original_format(data)
     if file_format:
         sources = [source for source in sources if source[1] != digest]

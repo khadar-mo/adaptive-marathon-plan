@@ -111,7 +111,9 @@ class Archive:
         try:
             if self.read(digest) is not None:
                 return digest
-        except ArchiveChecksumError:
+        except (ArchiveChecksumError, PermissionError):
+            if not stat.S_ISREG(target.lstat().st_mode):
+                raise
             repair = True
         with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as pending:
             try:
@@ -245,7 +247,19 @@ class Store:
                             and previous["record_sha"] == record_sha and previous["detail_sha"] == saved[0])
             if saved:
                 return [saved[0]], reusable
-            # PR #9 kept distinct detail versions without recording which one was last selected.
+            # A new detail acquired exclusively during the last PR #9 save identifies
+            # its selected version. Overlapping timestamps or a reused blob do not.
+            selected = db.execute("""WITH attempts AS (
+                    SELECT i.id, i.started_at, i.finished_at, a.id AS activity_id FROM imports i
+                    JOIN import_activities ia ON ia.import_id=i.id JOIN activities a ON a.id=ia.activity_id
+                    JOIN garmin_scans g ON g.import_id=i.id AND g.mode='legacy' WHERE a.garmin_id=?
+                ), last_save AS (SELECT * FROM attempts ORDER BY id DESC LIMIT 1)
+                SELECT s.sha256 FROM last_save l JOIN activity_sources s ON s.activity_id=l.activity_id
+                WHERE s.kind='detail' AND s.acquired_at BETWEEN l.started_at AND l.finished_at
+                AND NOT EXISTS (SELECT 1 FROM attempts p WHERE p.id!=l.id AND p.started_at<=s.acquired_at
+                                AND (p.finished_at IS NULL OR s.acquired_at<=p.finished_at))""", (garmin_id,)).fetchall()
+            if len(selected) == 1:
+                return [selected[0][0]], False
             versions = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
                                      WHERE a.garmin_id=? AND s.kind='detail' ORDER BY s.rowid DESC""", (garmin_id,))
             return [row[0] for row in versions], False
@@ -310,16 +324,19 @@ class Store:
                 RETURNING id""", {**fields, "original_warning": warning}).fetchone()["id"]
             changed_source = detail_changed
             for kind, digest, file_format in sources:
-                if kind in ("original_error", "original_unavailable"):
-                    db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?""",
-                               (activity_id, digest))
-                elif kind == "original":
-                    db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original_unavailable' AND sha256=?""",
-                               (activity_id, digest))
+                acquired = now()
+                if kind in ("original", "original_error", "original_unavailable"):
+                    first_acquisition = db.execute("""SELECT min(acquired_at) FROM activity_sources
+                        WHERE activity_id=? AND sha256=? AND kind IN ('original', 'original_error', 'original_unavailable')""",
+                        (activity_id, digest)).fetchone()[0]
+                    if first_acquisition:
+                        acquired = first_acquisition
+                        db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND sha256=? AND kind!=?
+                            AND kind IN ('original', 'original_error', 'original_unavailable')""", (activity_id, digest, kind))
                 added = db.execute("""
                     INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
                     VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
-                    (activity_id, kind, digest, file_format, now())).rowcount
+                    (activity_id, kind, digest, file_format, acquired)).rowcount
                 if added and kind not in ("list", "detail"):
                     changed_source = True
             if status != "saved":

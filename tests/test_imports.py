@@ -965,13 +965,21 @@ async def test_fit_only_reports_never_seed_garmin_coverage_or_retries(history, t
                           VALUES (?, ?, '2026-10-30T12:00:00+00:00', 'partial', 'fit')""",
                        [(None, None), ("2026-05-01", "2026-05-01")])
     async with server() as client:
+        assert "FIT import" in (await client.get("/imports")).text
         for url in ("/api/imports/1", "/api/imports/2"):
-            assert (await client.get(url)).json()["scans"] == []
+            row = (await client.get(url)).json()
+            assert row["scans"] == []
+            html = await client.get(row["html_url"])
+            assert html.status_code == 200 and "FIT import" in html.text and "Recheck these dates" not in html.text
         normal = await submit(client, {})
         assert normal["requested_from"] == "2026-06-01" and len(normal["scans"]) == 1
         assert normal["scans"][0]["coverage"] == "checked_empty"
+        assert "FIT import" in (await client.get("/imports")).text
         for url in ("/api/imports/1", "/api/imports/2"):
-            assert (await client.get(url)).json()["scans"] == []
+            row = (await client.get(url)).json()
+            assert row["scans"] == []
+            html = await client.get(row["html_url"])
+            assert html.status_code == 200 and "FIT import" in html.text and "Recheck these dates" not in html.text
 
 async def test_deeply_nested_valid_detail_repeat_keeps_other_runs(history):
     detail_value = "fixture"
@@ -1019,3 +1027,56 @@ async def test_normal_sync_uses_london_today_across_midnight(history, monkeypatc
     async with server() as client:
         report = await submit(client, {})
         assert (report["requested_from"], report["requested_to"]) == ("2026-06-01", "2026-06-02")
+
+async def test_legacy_unique_last_acquisition_detects_raw_field_revert(history, tmp_path, monkeypatch):
+    import storage
+
+    async with server() as client:
+        history.detail["extra"] = "A"
+        monkeypatch.setattr(storage, "now", lambda: "2026-11-01T12:00:00+00:00")
+        first = await submit(client)
+        history.detail["extra"] = "B"
+        monkeypatch.setattr(storage, "now", lambda: "2026-11-08T12:00:00+00:00")
+        assert (await submit(client))["counts"]["updated"] == 1
+    with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+        db.execute("DROP TABLE garmin_scan_items")
+        db.execute("DROP TABLE garmin_scans")
+    async with server() as client:
+        history.detail["extra"] = "A"
+        history.wire = lambda row: json.dumps(row, sort_keys=True).encode()
+        monkeypatch.setattr(storage, "now", lambda: "2026-11-15T12:00:00+00:00")
+        upgraded = await submit(client)
+        assert upgraded["activities"] == [{**first["activities"][0], "outcome": "updated"}]
+        assert (await submit(client))["counts"]["unchanged"] == 1
+
+
+async def test_unreadable_original_and_restoration_preserve_acquisition_time(history, monkeypatch):
+    import storage
+
+    target = digest(history.original)
+    first_acquired = "2026-11-01T12:00:00+00:00"
+    async with server() as client:
+        monkeypatch.setattr(storage, "now", lambda: first_acquired)
+        first = await submit(client)
+        path = f'/api/activities/{first["activities"][0]["id"]}'
+        previous_read = storage.Archive.read
+        def unreadable(self, sha):
+            if sha == target:
+                raise PermissionError("fixture unreadable file")
+            return previous_read(self, sha)
+        monkeypatch.setattr(storage, "now", lambda: "2026-11-08T12:00:00+00:00")
+        history.detail["summaryDTO"]["distance"] = 7012
+        history.original_error = runs.ConnectionProblem("Fixture original unavailable. Retry.")
+        with monkeypatch.context() as patch:
+            patch.setattr(storage.Archive, "read", unreadable)
+            missing = await submit(client)
+        detail = (await client.get(path)).json()
+        assert missing["state"] == "complete" and missing["scans"][0]["originals_requested"] == 1
+        assert detail["distance_m"] == 7012 and detail["warnings"]
+        held, = [s for s in detail["sources"] if s["kind"] == "original_unavailable"]
+        assert held["sha256"] == target and held["acquired_at"] == first_acquired
+        monkeypatch.setattr(storage, "now", lambda: "2026-11-15T12:00:00+00:00")
+        restored = await submit(client)
+        assert restored["scans"][0]["originals_requested"] == 0 and restored["scans"][0]["originals_available"] == 1
+        recovered, = [s for s in (await client.get(path)).json()["sources"] if s["kind"] == "original"]
+        assert recovered == {**held, "kind": "original"}

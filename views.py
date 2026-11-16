@@ -57,9 +57,15 @@ form.addEventListener('submit', async event => {
 </script>"""
 
 
+def period(row):
+    if row.get("source") == "fit":
+        return "FIT import"
+    return f'{escape(row["requested_from"])} to {escape(row["requested_to"])}'
+
+
 def imports(rows, first, last):
-    attempts = "".join(f'<li><a href="{row["html_url"]}">Import {row["id"]}</a> · {escape(row["requested_from"])}'
-                       f' to {escape(row["requested_to"])} · {escape(row["state"])} · {escape(row["started_at"])}</li>'
+    attempts = "".join(f'<li><a href="{row["html_url"]}">Import {row["id"]}</a> · {period(row)}'
+                       f' · {escape(row["state"])} · {escape(row["started_at"])}</li>'
                        for row in rows)
     history = f"<ul>{attempts}</ul>" if attempts else "<p>No saved imports.</p>"
     return page("Imports", f"""
@@ -95,7 +101,8 @@ Fully checked dates: {checked}.</p>
 def report(row):
     state = row["state"]
     first, last = row["requested_from"], row["requested_to"]
-    activities = "".join(f'<li><a href="/activities/{a["id"]}">Garmin activity {escape(a["garmin_id"])}</a>'
+    activities = "".join(f'<li><a href="/activities/{a["id"]}">'
+                         f'{("Garmin activity " + escape(a["garmin_id"])) if a["garmin_id"] else ("Activity " + str(a["id"]))}</a>'
                          f' · {escape(a["outcome"])}</li>' for a in row["activities"])
     issues = "".join(f'<li><strong>{escape(i["step"])}</strong> · {escape(i["item"])} · {escape(i["message"])}</li>'
                      for i in row["issues"])
@@ -105,17 +112,20 @@ def report(row):
     elif state == "interrupted":
         progress = "<p>The app stopped before this import finished.</p>"
     saved = f"<ul>{activities}</ul>" if activities else "<p>No activities saved in this attempt.</p>"
-    retry = escape(urlencode({"from": first, "to": last}))
-    scans = "".join(scan_summary(s) for s in row["scans"]) or "<p>Detailed scan coverage is unavailable.</p>"
+    retry = scans = ""
+    if row.get("source") != "fit":
+        query = escape(urlencode({"from": first, "to": last}))
+        retry = f'<p><a href="/imports?{query}">Recheck these dates</a></p>'
+        scans = "<h2>Coverage</h2>" + "".join(scan_summary(s) for s in row["scans"])
     counts = row["counts"]
     return page(f'Import {row["id"]}', f"""
-<p><strong>{escape(state.capitalize())}</strong> · {escape(first)} to {escape(last)}</p>
-<p>Started {escape(row["started_at"])}</p>{progress}<h2>Coverage</h2>{scans}
+<p><strong>{escape(state.capitalize())}</strong> · {period(row)}</p>
+<p>Started {escape(row["started_at"])}</p>{progress}{scans}
 <h2>Saved activities</h2><p>{counts["inserted"]} inserted · {counts["updated"]} updated ·
 {counts["unchanged"]} unchanged.</p>{saved}
 {('<h2>Import issues</h2><ul>' + issues + '</ul>') if issues else ''}
 <p><a href="{row["report_url"]}">Report JSON</a></p>
-<p><a href="/imports?{retry}">Recheck these dates</a></p>""")
+{retry}""")
 
 
 def duration(seconds):
