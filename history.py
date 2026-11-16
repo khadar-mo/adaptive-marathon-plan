@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 import json
 
 import garmin_coverage as coverage
-from garmin_import import RUN_TYPES, number
+from garmin_activity import RUN_TYPES, active_aliases, number, running_headline
 
 
 MEASURES = ("distance_m", "timer_seconds", "elapsed_seconds", "moving_seconds")
@@ -100,22 +100,27 @@ def read(store, first, last):
             # A corrected activity can need a retry outside its original scan.
             required = [coverage.item_range(item) for item in coverage.outstanding_items(db) if item["status"] != "saved"]
             verified = coverage.difference(verified, coverage.merged(required))
-            aliases = defaultdict(list)
-            for gid, owner in db.execute("SELECT garmin_id, activity_id FROM garmin_aliases ORDER BY garmin_id"):
-                aliases[owner].append(gid)
+            aliases = active_aliases(db)
             activities = db.execute("""SELECT id, garmin_id, name, sport, start_local, local_date, start_utc,
                         distance_m, timer_seconds, elapsed_seconds, moving_seconds, metric_sources
                     FROM activities WHERE local_date BETWEEN ? AND ? OR local_date IS NULL
-                    ORDER BY start_utc IS NULL, start_utc DESC, id DESC""", (first, last))
+                    OR id IN (SELECT activity_id FROM garmin_aliases)""", (first, last))
             for activity in activities:
-                row = dict(activity)
+                linked = aliases[activity["id"]]
+                row = running_headline(db, store.archive, dict(activity), linked)
                 # Every admitted FIT session is running. Garmin activities can later change sport.
                 if row["garmin_id"] and row["sport"] not in RUN_TYPES:
                     continue
+                if row["local_date"] and not first <= row["local_date"] <= last:
+                    continue
                 row["metric_sources"] = json.loads(row["metric_sources"])
-                row["garmin_ids"] = list(dict.fromkeys(g for g in [row["garmin_id"], *aliases[row["id"]]] if g))
+                ids = [row["garmin_id"]] if row["garmin_id"] else []
+                ids.extend(a["garmin_id"] for a in linked if first <= a["local_date"] <= last)
+                row["garmin_ids"] = list(dict.fromkeys(ids))
                 row.update(measurements(row))
                 (rows if row["local_date"] else undated).append(row)
+    for group in (rows, undated):
+        group.sort(key=lambda r: (r["start_utc"] or "", r["id"]), reverse=True)
     return {"from": first, "to": last, **summarize(rows), "coverage": period_coverage(first, last, verified),
             "activities": rows, "undated_activities": undated,
             "weeks": grouped(rows, first, last, "week"), "months": grouped(rows, first, last, "month")}

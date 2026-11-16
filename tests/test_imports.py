@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, closing
 from datetime import date
+import errno
 import hashlib
 from io import BytesIO
 import json
@@ -507,7 +508,7 @@ async def test_retry_recovers_worker_that_could_not_persist_final_state(history,
 
     def unavailable(self, statement, parameters, **options):
         if statement.startswith("UPDATE imports"):
-            raise OSError("fixture storage unavailable")
+            raise OSError(errno.ENOSPC, "fixture-private-message", "/private-fixture/path")
         write_report(self, statement, parameters, **options)
 
     async with server() as client:
@@ -516,7 +517,29 @@ async def test_retry_recovers_worker_that_could_not_persist_final_state(history,
             accepted = (await client.post(SUBMIT, json=DAY)).json()
         retry = await submit(client)
         assert retry["state"] == "complete" and retry["activities"][0]["outcome"] == "unchanged"
-        assert (await client.get(accepted["report_url"])).json()["state"] == "interrupted"
+        interrupted = (await client.get(accepted["report_url"])).json()
+        assert interrupted["state"] == "interrupted"
+        assert "Finish import report failed (ENOSPC)" in interrupted["issues"][0]["message"]
+        assert "fixture-private" not in str(interrupted) and "/private-fixture" not in str(interrupted)
+
+
+@pytest.mark.parametrize("failure,code", [("sqlite", "SQLITE_IOERR_LOCK"), ("os", "EACCES")])
+async def test_normal_sync_reports_storage_operation_and_safe_error_code(history, monkeypatch, failure, code):
+    def unavailable(*args):
+        if failure == "os":
+            raise OSError(errno.EACCES, "fixture-private-message", "/private-fixture/path")
+        error = sqlite3.OperationalError("fixture-private-message")
+        error.sqlite_errorcode = sqlite3.SQLITE_IOERR_LOCK
+        error.sqlite_errorname = code
+        raise error
+    monkeypatch.setattr(garmin_import, "scan_range", unavailable)
+    async with server() as client:
+        report = await submit(client, {})
+        assert report["state"] == "failed"
+        issue, = report["issues"]
+        assert issue["step"] == "Import storage" and f"Scan date range failed ({code})" in issue["message"]
+        html = (await client.get(report["html_url"])).text
+        assert code in html and "fixture-private" not in html and "/private-fixture" not in html
 
 
 async def test_securing_existing_database_preserves_cross_process_write_lock(history, tmp_path, monkeypatch):

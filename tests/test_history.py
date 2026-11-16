@@ -1,4 +1,6 @@
+from contextlib import closing
 from datetime import date
+import sqlite3
 
 import pytest
 
@@ -181,6 +183,68 @@ async def test_distances_before_rounding_and_linked_ids_count_once(history):
         linked = await period(client, WEEK)
         assert linked["run_count"] == 2 and linked["activities"][0]["garmin_ids"] == ["81", "82"]
         assert linked["totals"] == week["totals"]
+        alias = history.extra_details["82"]
+        alias["activityTypeDTO"]["typeKey"] = "cycling"
+        await submit(client, WEEK)
+        assert (await period(client, WEEK))["activities"][0]["garmin_ids"] == ["81"]
+        alias["activityTypeDTO"]["typeKey"] = "trail_running"
+        alias["summaryDTO"].update(distance=2625, startTimeLocal="2026-10-29 11:30:00")
+        await submit(client, WEEK)
+        assert (await period(client, WEEK))["activities"][0]["garmin_ids"] == ["81"]
+        # Reclassifying the primary must not hide the still-running alias or use cycling metrics.
+        add_run(history, 81, "2026-10-20", "cycling")
+        await submit(client, OCTOBER)
+        assert (await period(client, WEEK))["run_count"] == 1
+        whole = await period(client, OCTOBER)
+        assert whole["run_count"] == 2
+        alternate, = [r for r in whole["activities"] if r["garmin_id"] == "82"]
+        assert (alternate["garmin_ids"], alternate["local_date"], alternate["distance_m"]) == (["82"], "2026-10-29", 2625)
+        detail = (await client.get(f'/api/activities/{alternate["id"]}')).json()
+        assert detail["display"] == alternate["display"] and detail["garmin_url"].endswith("/82")
+
+
+async def test_partial_week_drilldown_matches_its_displayed_dates(history):
+    history.listed = []
+    add_run(history, 50, "2026-09-30")
+    add_run(history, 51, "2026-10-01")
+    async with server() as client:
+        await submit(client, {"from": "2026-09-30", "to": "2026-10-31"})
+        html = (await client.get("/history", params=OCTOBER)).text
+        assert 'href="/history?from=2026-10-01&amp;to=2026-10-04">2026-10-01 to 2026-10-04</a> · 1 run' in html
+        detail = await period(client, {"from": "2026-10-01", "to": "2026-10-04"})
+        assert [r["garmin_id"] for r in detail["activities"]] == ["51"]
+        assert (await client.get("/favicon.ico")).status_code == 204
+
+
+async def test_lap_only_gps_and_timing_discrepancies(history):
+    lap = {"total_distance": 5000, "total_timer_time": 1500, "total_elapsed_time": 1800,
+           "end_position_lat": 1000, "end_position_long": -2000}
+    history.original = zipped(make_fit(messages=[(19, lap)]))
+    history.detail["summaryDTO"].update(distance=5000, duration=1400, elapsedDuration=1610)
+    async with server() as client:
+        await submit(client)
+        run = (await client.get("/api/activities/1")).json()
+        assert run["gps_available"] is True and run["metric_sources"]["gps_available"] == "fit"
+        assert (run["timer_seconds"], run["elapsed_seconds"]) == (1400, 1610)
+        assert (run["laps"][0]["timer_seconds"], run["laps"][0]["elapsed_seconds"]) == (1500, 1800)
+        assert run["warnings"] == ["Recorded lap timer times differ from the Garmin activity timer time.",
+                                  "Recorded lap elapsed times differ from the Garmin activity elapsed time."]
+
+
+async def test_legacy_sensor_uses_selected_detail_acquisition_offline(history, tmp_path, monkeypatch):
+    history.listed[0]["averageHR"] = 100
+    async with server() as client:
+        for hr, stamp in [(140, "10:00:00"), (155, "11:00:00")]:
+            monkeypatch.setattr(storage, "now", lambda stamp=stamp: "2026-11-16T" + stamp + "+00:00")
+            history.detail["summaryDTO"]["averageHR"] = hr
+            await submit(client)
+    with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
+        db.execute("DROP TABLE garmin_scan_items")
+        db.execute("DROP TABLE garmin_scans")
+    monkeypatch.setenv("RUNS_GARMIN_OFFLINE", "1")
+    async with server() as client:
+        reread = (await client.get("/api/activities/1")).json()
+        assert reread["average_hr_bpm"] == 155 and reread["metric_sources"]["average_hr_bpm"] == "detail"
 
 
 @pytest.mark.parametrize("metres,timer,moving,pace,moving_pace", [

@@ -1,6 +1,5 @@
 """Read optional sensor evidence from the locally archived activity sources."""
-import json
-
+from garmin_activity import json_record, legacy_selected_source, original_fit
 from fit_data import read_messages
 
 
@@ -18,24 +17,21 @@ def fit_sensors(data):
     messages = read_messages(data)
     session, = messages["session_mesgs"]  # Only indexed single-session running FITs reach activity detail.
     units = 2**31 / 180  # FIT positions are recorded in semicircles.
-    gps = position(session, "start_position_lat", "start_position_long", units) or any(
-        position(r, "position_lat", "position_long", units) for r in messages.get("record_mesgs", []))
+    gps = any(position(message, prefix + "_lat", prefix + "_long", units)
+              for message in [session, *messages.get("lap_mesgs", [])] for prefix in ("start_position", "end_position"))
+    if not gps:
+        gps = any(position(r, "position_lat", "position_long", units) for r in messages.get("record_mesgs", []))
     return heart_rate(session.get("avg_heart_rate")), gps or None
 
 
 def json_sensors(data, gid):
-    parsed = json.loads(data)
-    records = parsed if isinstance(parsed, list) else [parsed]
-    for record in records:
-        if not isinstance(record, dict) or str(record.get("activityId")) != gid:
-            continue
-        summary = record.get("summaryDTO")
-        summaries = [summary, record] if isinstance(summary, dict) else [record]
-        hr = next((v for r in summaries if (v := heart_rate(r.get("averageHR"))) is not None), None)
-        gps = any(position(r, "startLatitude", "startLongitude") or position(r, "endLatitude", "endLongitude")
-                  or r.get("hasPolyline") is True for r in summaries)
-        return hr, gps or None
-    return None, None
+    record = json_record(data, gid)
+    summary = record.get("summaryDTO")
+    summaries = [summary, record] if isinstance(summary, dict) else [record]
+    hr = next((v for r in summaries if (v := heart_rate(r.get("averageHR"))) is not None), None)
+    gps = any(position(r, "startLatitude", "startLongitude") or position(r, "endLatitude", "endLongitude")
+              or r.get("hasPolyline") is True for r in summaries)
+    return hr, gps or None
 
 
 def sensor_sources(db, activity, sources):
@@ -45,8 +41,9 @@ def sensor_sources(db, activity, sources):
         # not archive insertion order, and never borrow another linked Garmin ID's summary.
         latest = db.execute("""SELECT i.detail_sha, i.list_sha FROM garmin_scan_items i
             WHERE i.garmin_id=? AND i.status IN ('saved','excluded_sport','outside_range','resolved_outside','retry_elsewhere')
-            AND EXISTS (SELECT 1 FROM activity_sources s WHERE s.activity_id=? AND s.kind='detail' AND s.sha256=i.detail_sha)
-            ORDER BY i.scan_id DESC LIMIT 1""", (gid, aid)).fetchone()
+            AND (EXISTS (SELECT 1 FROM activity_sources s WHERE s.activity_id=? AND s.kind='detail' AND s.sha256=i.detail_sha)
+                 OR EXISTS (SELECT 1 FROM garmin_aliases a WHERE a.activity_id=? AND a.garmin_id=i.garmin_id))
+            ORDER BY i.scan_id DESC LIMIT 1""", (gid, aid, aid)).fetchone()
         for index, kind in enumerate(("detail", "list")):
             if latest:
                 if latest[index]:
@@ -54,18 +51,12 @@ def sensor_sources(db, activity, sources):
             else:
                 # Legacy imports did not record the selected version. Use unambiguous evidence.
                 versions = [s["sha256"] for s in sources if s["kind"] == kind]
-                if len(versions) == 1:
-                    yield kind, versions[0]
-        original = db.execute("""SELECT m.fit_sha FROM garmin_original_versions v
-            JOIN original_members m ON m.original_sha=v.original_sha
-            JOIN activity_sources s ON s.sha256=m.original_sha AND s.activity_id=?
-            WHERE v.garmin_id=? ORDER BY v.last_import_id DESC, v.rowid DESC LIMIT 1""", (aid, gid)).fetchone()
-        if not original:
-            original = db.execute("""SELECT m.fit_sha FROM legacy_garmin_originals l
-                JOIN original_members m ON m.original_sha=l.original_sha
-                WHERE l.garmin_id=? ORDER BY l.rowid DESC LIMIT 1""", (gid,)).fetchone()
-        if original and original[0]:
-            yield "fit", original[0]
+                digest = versions[0] if len(versions) == 1 else legacy_selected_source(db, gid, kind)
+                if digest:
+                    yield kind, digest
+        digest = original_fit(db, gid, aid)
+        if digest:
+            yield "fit", digest
     for source in sources:
         if source["kind"] == "fit":
             yield "fit", source["sha256"]

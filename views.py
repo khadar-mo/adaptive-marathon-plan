@@ -246,8 +246,10 @@ def history_page(data):
         for week in data["weeks"]:
             distance = week["totals"]["distance_m"]
             missing = f' · known subtotal, {distance["missing_count"]} missing' if distance["missing_count"] else ""
-            items.append(f'<li><a href="/history?period=week&amp;date={week["from"]}">{week["from"]} to {week["to"]}</a>'
-                         f' · {week["run_count"]} runs · {distance["display"]}{missing}</li>')
+            query = escape(urlencode({"from": week["from"], "to": week["to"]}))
+            count = week["run_count"]
+            items.append(f'<li><a href="/history?{query}">{week["from"]} to {week["to"]}</a>'
+                         f' · {count} {"run" if count == 1 else "runs"} · {distance["display"]}{missing}</li>')
         weeks = "<h2>Weekly totals within this period</h2><ul>" + "".join(items) + "</ul>"
     query = escape(urlencode({"from": first, "to": last}))
     return page("History", f"""{selector}<h2>{first} to {last}</h2><dl class="totals">{summary}</dl>
@@ -276,8 +278,8 @@ def activity(row):
            "average_hr_bpm")
     metric("GPS", "Recorded" if row["gps_available"] else UNAVAILABLE, "gps_available")
     warnings = "".join(f"<p>{escape(warning)}</p>" for warning in row["warnings"])
-    garmin_link = (f'<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">Garmin Connect activity '
-                  f'{escape(row["garmin_id"])}</a></p>' if row["garmin_url"] else "")
+    garmin_link = "".join(f'<p><a href="https://connect.garmin.com/modern/activity/{escape(gid)}" rel="noreferrer">'
+                          f'Garmin Connect activity {escape(gid)}</a></p>' for gid in row["garmin_ids"])
     moving = any(lap["moving_seconds"] is not None for lap in row["laps"])
     laps = "".join(f'<tr><th scope="row">{lap["sequence"]}</th><td>' +
                    (f'{lap["distance_m"]:.2f}'.rstrip("0").rstrip(".") + ' m' if lap["distance_m"] is not None else "Not available") +

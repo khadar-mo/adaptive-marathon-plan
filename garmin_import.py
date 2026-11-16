@@ -1,21 +1,18 @@
 """Import running history by recorded local date from the Garmin Personal API."""
-from datetime import datetime, timezone
 import json
-import math
 import os
 import re
 import sqlite3
 
 from fit_data import FitError
 from fit_import import index_originals, unpack_original
+from garmin_activity import RUN_TYPES, activity_fields, local_timestamp
 import garmin_coverage
 import runs
-from storage import ArchiveChecksumError, ArchivePermissionsError
+from storage import ArchiveChecksumError, ArchivePermissionsError, storage_failure
 
 
 PAGE_SIZE = 20
-RUN_TYPES = {"running", "trail_running", "treadmill_running", "track_running", "virtual_run", "virtual_running",
-             "indoor_track_running", "indoor_running", "ultra_run", "obstacle_run", "street_running"}
 
 
 def open_garmin():
@@ -36,71 +33,6 @@ def decode(data, kind, expected):
         return parsed
     except (ValueError, RecursionError):
         raise runs.ConnectionProblem(f"Unexpected Garmin {kind} JSON. Check Garmin availability and retry.") from None
-
-
-def timestamp(value):
-    if not isinstance(value, str) or not re.match(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}", value):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def local_timestamp(value):
-    if timestamp(value) is not None:
-        return value[:10] + " " + value[11:]
-    return None
-
-
-def number(value):
-    if type(value) in (int, float) and value >= 0:
-        try:
-            if math.isfinite(value):
-                return value
-        except OverflowError:
-            pass
-    return None
-
-
-def sport(record, key):
-    value = record.get(key)
-    key = value.get("typeKey") if isinstance(value, dict) else None
-    return key.strip() or None if isinstance(key, str) else None
-
-
-def activity_fields(garmin_id, listed, detail):
-    if str(detail.get("activityId")) != garmin_id:
-        raise runs.ConnectionProblem("Detail did not identify the requested activity. Recheck these dates.")
-    summary = detail.get("summaryDTO")
-    records = [("detail", summary if isinstance(summary, dict) else {}), ("detail", detail), ("list", listed)]
-    origins = {}
-
-    def choose(field, upstream_key, parse):
-        for source, record in records:
-            value = parse(record.get(upstream_key))
-            if value is not None:
-                origins[field] = source
-                return value
-        return None
-
-    local = choose("start_local", "startTimeLocal", local_timestamp)
-    utc = choose("start_utc", "startTimeGMT", timestamp)
-    if utc and utc.tzinfo is None:
-        utc = utc.replace(tzinfo=timezone.utc)
-    name = detail.get("activityName") or listed.get("activityName")
-    activity_sport = sport(detail, "activityTypeDTO") or sport(listed, "activityType")
-    fields = {
-        "garmin_id": garmin_id, "name": name if isinstance(name, str) else None,
-        "sport": activity_sport,
-        "start_local": local, "local_date": local[:10] if local else None,
-        "start_utc": utc.astimezone(timezone.utc).isoformat() if utc else None,
-    }
-    for field, key in (("distance_m", "distance"), ("timer_seconds", "duration"),
-                       ("elapsed_seconds", "elapsedDuration"), ("moving_seconds", "movingDuration")):
-        fields[field] = choose(field, key, number)
-    fields["metric_sources"] = json.dumps(origins, sort_keys=True)
-    return fields
 
 
 def cached_source(archive, digest):
@@ -215,8 +147,8 @@ def process_item(client, store, archive, scan, garmin_id, listed, page_digest, p
         store.issue(scan["import_id"], garmin_id, "Activity detail", str(err))
     except (UnicodeError, OverflowError):
         store.issue(scan["import_id"], garmin_id, "Activity detail", "Invalid activity fields. Check Garmin and retry.")
-    except (OSError, sqlite3.Error):
-        store.issue(scan["import_id"], garmin_id, "Save activity", "Check the private archive and SQLite storage, then retry.")
+    except (OSError, sqlite3.Error) as exc:
+        store.issue(scan["import_id"], garmin_id, "Save activity", storage_failure("Save activity", exc))
 
 
 def valid_id(item):
@@ -282,14 +214,18 @@ def scan_range(client, store, archive, scan):
 def run_import(store, archive, import_id):
     state = "failed"
     label = f"Import {import_id}"
+    operation = "Index archived originals"
     try:
         index_originals(store, archive)
+        operation = "Read date ranges"
         scans = store.scans(import_id)
         label = f'{scans[0]["first"]} to {scans[0]["last"]}'
         client = open_garmin()
         for scan in scans:
             label = f'{scan["first"]} to {scan["last"]}'
+            operation = "Scan date range"
             scan_range(client, store, archive, scan)
+        operation = "Read import report"
         report = store.report(str(import_id))
         if all(s["coverage"] in ("checked", "checked_empty") for s in report["scans"]):
             state = "complete"
@@ -299,8 +235,8 @@ def run_import(store, archive, import_id):
         store.issue(import_id, label, "Activity search", str(err))
     except ArchivePermissionsError as err:
         store.issue(import_id, label, "Private archive", str(err))
-    except (OSError, sqlite3.Error):
-        store.issue(import_id, label, "Import storage", "Check the private archive and SQLite storage, then retry.")
+    except (OSError, sqlite3.Error) as exc:
+        store.issue(import_id, label, "Import storage", storage_failure(operation, exc))
     except Exception:
         store.issue(import_id, label, "Import", "Unexpected import error. Check the saved activities and retry these dates.")
     finally:

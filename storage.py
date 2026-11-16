@@ -2,6 +2,7 @@
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from io import BytesIO
+import errno
 import hashlib
 import json
 import os
@@ -15,7 +16,14 @@ import time
 
 import activity_sensors
 import fit_store
+import garmin_activity
 import garmin_coverage
+
+
+# The app serves one database. On macOS SQLite, overlapping opens/closes of ro
+# and rw handles in one process can fail with SQLITE_IOERR_LOCK. Keep provider
+# requests outside the lock and keep read-only handles for offline views.
+CONNECTION_LOCK = threading.Lock()
 
 
 SCHEMA = """
@@ -79,6 +87,16 @@ def prepare_schema(db):
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def storage_failure(operation, error):
+    """Describe the failing operation without including paths, SQL or provider data."""
+    if isinstance(error, sqlite3.Error):
+        name = getattr(error, "sqlite_errorname", None)
+        code = name if isinstance(name, str) and isinstance(getattr(sqlite3, name, None), int) else "SQLite error"
+    else:
+        code = errno.errorcode.get(error.errno, f"errno {error.errno}" if type(error.errno) is int else "OS error")
+    return f"{operation} failed ({code}). Check the private archive and SQLite storage, then retry."
 
 
 def local_id(value):
@@ -199,9 +217,10 @@ class Store:
         self.archive = archive or Archive(self.path.with_name("runs-archive"))
         self.recovery_lock = threading.Lock()
         self.recovery_pending = True
+        self.finish_failure = None
 
     @contextmanager
-    def connect(self, *, write=False, create=False):
+    def connect(self, *, write=False, create=False, timeout=5):
         if create:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
@@ -220,7 +239,7 @@ class Store:
                 except FileNotFoundError:
                     pass
         uri = self.path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro")
-        with closing(sqlite3.connect(uri, uri=True)) as db:
+        with CONNECTION_LOCK, closing(sqlite3.connect(uri, uri=True, timeout=timeout)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
             if create:
@@ -268,7 +287,13 @@ class Store:
                         pass
                 if pending:
                     with self.connect(write=True) as db:
+                        if self.finish_failure:
+                            import_id, message = self.finish_failure
+                            db.execute("""INSERT INTO import_issues(import_id,severity,item,step,message)
+                                SELECT id,'error','Import report','Import storage',? FROM imports
+                                WHERE id=? AND state='running'""", (message, import_id))
                         db.execute("UPDATE imports SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
+                self.finish_failure = None
                 self.recovery_pending = False
 
     def start(self, first, last, *, source='garmin'):
@@ -315,19 +340,9 @@ class Store:
                             and previous["record_sha"] == record_sha and previous["detail_sha"] == saved[0])
             if saved:
                 return [saved[0]], reusable
-            # A new detail acquired exclusively during the last PR #9 save identifies
-            # its selected version. Overlapping timestamps or a reused blob do not.
-            selected = db.execute("""WITH attempts AS (
-                    SELECT i.id, i.started_at, i.finished_at, a.id AS activity_id FROM imports i
-                    JOIN import_activities ia ON ia.import_id=i.id JOIN activities a ON a.id=ia.activity_id
-                    JOIN garmin_scans g ON g.import_id=i.id AND g.mode='legacy' WHERE a.garmin_id=?
-                ), last_save AS (SELECT * FROM attempts ORDER BY id DESC LIMIT 1)
-                SELECT s.sha256 FROM last_save l JOIN activity_sources s ON s.activity_id=l.activity_id
-                WHERE s.kind='detail' AND s.acquired_at BETWEEN l.started_at AND l.finished_at
-                AND NOT EXISTS (SELECT 1 FROM attempts p WHERE p.id!=l.id AND p.started_at<=s.acquired_at
-                                AND (p.finished_at IS NULL OR s.acquired_at<=p.finished_at))""", (garmin_id,)).fetchall()
-            if len(selected) == 1:
-                return [selected[0][0]], False
+            selected = garmin_activity.legacy_selected_source(db, garmin_id, "detail")
+            if selected:
+                return [selected], False
             versions = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
                                      WHERE a.garmin_id=? AND s.kind='detail' ORDER BY s.rowid DESC""", (garmin_id,))
             return [row[0] for row in versions], False
@@ -351,10 +366,11 @@ class Store:
         try:
             self.write_report("UPDATE imports SET state=?, finished_at=? WHERE id=? AND state='running'",
                               (state, now(), import_id), review_import=import_id if state == "partial" else None)
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError) as exc:
             # The worker has exited without a durable outcome. Recover the
             # interrupted report on the next submission if storage comes back.
             with self.recovery_lock:
+                self.finish_failure = (import_id, storage_failure("Finish import report", exc))
                 self.recovery_pending = True
 
     def issue(self, import_id, item, step, message, severity="error"):
@@ -487,7 +503,8 @@ class Store:
             if not row:
                 return None
             activity_id = row["id"]
-            activity = dict(row)
+            aliases = garmin_activity.active_aliases(db, activity_id)[activity_id]
+            activity = garmin_activity.running_headline(db, self.archive, dict(row), aliases)
             warning = activity.pop("original_warning")
             sources = [dict(s) for s in db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
                                     WHERE activity_id=? ORDER BY rowid""", (activity_id,))]
@@ -496,11 +513,18 @@ class Store:
                                  FROM laps WHERE activity_id=? ORDER BY sequence""", (activity_id,))
             laps = [dict(lap) for lap in laps]
             warnings = [warning] if warning else []
-            if row["garmin_id"] and row["distance_m"] is not None and laps and all(lap["distance_m"] is not None for lap in laps):
-                if abs(sum(lap["distance_m"] for lap in laps) - row["distance_m"]) > 1:
-                    warnings.append("Recorded lap distances differ from the Garmin activity distance.")
+            metric_sources = json.loads(activity["metric_sources"])
+            for key, singular, plural in (("distance_m", "distance", "distances"), ("timer_seconds", "timer time", "timer times"),
+                                          ("elapsed_seconds", "elapsed time", "elapsed times"), ("moving_seconds", "moving time", "moving times")):
+                if (activity["garmin_id"] and metric_sources.get(key) != "fit" and activity[key] is not None
+                        and laps and all(lap[key] is not None for lap in laps)
+                        and abs(sum(lap[key] for lap in laps) - activity[key]) > 1):
+                    warnings.append(f"Recorded lap {plural} differ from the Garmin activity {singular}.")
             fits = db.execute("SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity_id,))
+            gids = [activity["garmin_id"]] if activity["garmin_id"] else []
+            gids.extend(alias["garmin_id"] for alias in aliases)
             return {**activity, **sensors, "laps": laps, "fit_sha256": [f[0] for f in fits],
-                    "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"] if row["garmin_id"] else None,
-                    "metric_sources": {**json.loads(row["metric_sources"]), **origins}, "sources": sources,
+                    "garmin_ids": list(dict.fromkeys(gids)),
+                    "garmin_url": "https://connect.garmin.com/modern/activity/" + activity["garmin_id"] if activity["garmin_id"] else None,
+                    "metric_sources": {**metric_sources, **origins}, "sources": sources,
                     "warnings": warnings}

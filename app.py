@@ -1,5 +1,5 @@
 """One loopback FastAPI process for local running history."""
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager
 from datetime import date
 import os
 from pathlib import Path
@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -85,8 +85,7 @@ def health():
         # A new SQLite file may be empty. An initialized file has at least one 512-byte page.
         if not stat.S_ISREG(info.st_mode) or 0 < info.st_size < 512:
             raise OSError("Invalid SQLite file")
-        uri = path.absolute().as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
+        with app.state.store.connect(timeout=1) as db:
             db.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
     except (OSError, sqlite3.Error, ValueError):
         raise HTTPException(status_code=503, detail="SQLite is unavailable.") from None
@@ -236,6 +235,12 @@ def history_page(request: Request):
 @app.get("/", include_in_schema=False)
 def home():
     return RedirectResponse("/history")
+
+
+@app.get("/favicon.ico", include_in_schema=False, status_code=204)
+def favicon():
+    # Chrome requests this when the runner opens a JSON document directly.
+    return Response(status_code=204)
 
 
 @app.get("/imports", response_class=HTMLResponse)
