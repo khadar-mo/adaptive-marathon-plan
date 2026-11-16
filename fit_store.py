@@ -258,7 +258,20 @@ def complete_reviewed_import(db, import_id):
     db.execute("UPDATE imports SET state='complete' WHERE id=?", (import_id,))
 
 
-def reconcile_scan_edits(db, fields, sources, status, acquired_at):
+def same_pending_recording(db, earlier, observed):
+    if not earlier or not observed or earlier["sha256"] == observed["sha256"]:
+        return True
+    prior = fit_owners(db, "sha256", earlier["sha256"]) or fit_owners(db, "identity", earlier["identity"])
+    current = fit_owners(db, "sha256", observed["sha256"]) or fit_owners(db, "identity", observed["identity"])
+    if prior and current:
+        return len(prior) == 1 and prior == current
+    if earlier["identity"] and observed["identity"]:
+        return earlier["identity"] == observed["identity"]
+    start = earlier["fields"]["start_utc"]
+    return start is not None and start == observed["fields"]["start_utc"]
+
+
+def reconcile_scan_edits(db, fields, fit, sources, status, acquired_at):
     gid = fields["garmin_id"]
     day = fields["local_date"]
     pending = db.execute("""SELECT r.issue_id, r.review_key, f.payload, s.id AS scan_id, s.import_id, s.first, s.last, a.started_at
@@ -266,7 +279,18 @@ def reconcile_scan_edits(db, fields, sources, status, acquired_at):
         JOIN imports a ON a.id=s.import_id JOIN import_issues i ON i.import_id=s.import_id AND i.item=g.garmin_id
         JOIN fit_review_issues r ON r.issue_id=i.id JOIN fit_reviews f ON f.key=r.review_key
         WHERE g.garmin_id=? AND g.status='pending_identity' AND f.resolution IS NULL""", (gid,)).fetchall()
+    if pending and not fit:
+        latest = db.execute("""SELECT m.fit_sha, m.identity, f.payload FROM garmin_original_versions v
+                JOIN original_members m ON m.original_sha=v.original_sha LEFT JOIN fit_reviews f
+                ON f.key='garmin:' || v.garmin_id || ':' || m.fit_sha WHERE v.garmin_id=?
+                ORDER BY v.last_import_id DESC, v.rowid DESC LIMIT 1""", (gid,)).fetchone()
+        if latest:
+            fit = (json.loads(latest["payload"])["fit"] if latest["payload"] else
+                   {"sha256": latest["fit_sha"], "identity": latest["identity"], "fields": {"start_utc": None}})
     for old in pending:
+        previous = json.loads(old["payload"])
+        if not same_pending_recording(db, previous["fit"], fit):
+            continue
         reason = None
         if status == "excluded_sport":
             reason = "excluded_sport"
@@ -290,7 +314,6 @@ def reconcile_scan_edits(db, fields, sources, status, acquired_at):
                        (day, old["scan_id"], gid))
             if status != "saved":
                 # A neighboring scan may refresh detail for an earlier in-range decision.
-                previous = json.loads(old["payload"])
                 current = {**previous, "fields": {**fields, "sport": fields["sport"] or previous["fields"]["sport"]},
                            "sources": sources, "acquired": {sha: acquired_at for _, sha, _ in sources}}
                 payload = combine_evidence(previous, current, old["started_at"])
@@ -309,9 +332,11 @@ def apply_review(db, key, action, target, confirmed_date=None, *, available=None
         payload = json.loads(db.execute("SELECT payload FROM fit_reviews WHERE key=?", (key,)).fetchone()[0])
         sha = payload["fit"]["sha256"] if payload["fit"] else None
         originals = db.execute("""SELECT s.sha256, m.fit_sha FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
-                JOIN garmin_original_versions v ON v.original_sha=s.sha256 WHERE s.activity_id=? AND v.garmin_id=?
-                AND s.kind IN ('original', 'original_unavailable') ORDER BY v.last_import_id DESC, v.rowid DESC""",
-                               (target, gid)).fetchall()
+                LEFT JOIN garmin_original_versions v ON v.original_sha=s.sha256 AND v.garmin_id=:gid
+                LEFT JOIN legacy_garmin_originals l ON l.original_sha=s.sha256 AND l.garmin_id=:gid
+                WHERE s.activity_id=:target AND (v.garmin_id IS NOT NULL OR l.garmin_id IS NOT NULL)
+                AND s.kind IN ('original', 'original_unavailable') ORDER BY v.last_import_id DESC, v.rowid DESC, s.rowid DESC""",
+                               {"target": target, "gid": gid}).fetchall()
         candidates = [r for r in originals if r["fit_sha"] == sha] if sha else originals[:1]
         has_original = any(available(r["sha256"]) for r in candidates)
         if not originals or sha is None or originals[0]["fit_sha"] == sha:

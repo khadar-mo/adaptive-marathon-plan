@@ -234,6 +234,15 @@ class Store:
                         if statement.strip():
                             db.execute(statement)
                     garmin_coverage.migrate(db)
+                if create and not db.execute("SELECT 1 FROM sqlite_master WHERE name='legacy_garmin_originals'").fetchone():
+                    # Before FIT linking, an original on a Garmin row belonged to that upstream ID.
+                    # Keep that fact even when another ID later supplies identical bytes.
+                    db.execute("""CREATE TABLE legacy_garmin_originals (
+                        garmin_id TEXT NOT NULL, original_sha TEXT NOT NULL, PRIMARY KEY (garmin_id, original_sha))""")
+                    db.execute("""INSERT OR IGNORE INTO legacy_garmin_originals
+                        SELECT a.garmin_id, s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
+                        WHERE a.garmin_id IS NOT NULL AND s.kind IN ('original', 'original_unavailable')
+                        AND NOT EXISTS (SELECT 1 FROM garmin_original_versions v WHERE v.original_sha=s.sha256)""")
                 yield db
 
     @contextmanager
@@ -252,7 +261,7 @@ class Store:
                 with self.history() as db:
                     pending = db and db.execute("SELECT 1 FROM imports WHERE state='running'").fetchone()
                     upgrade = db and db.execute("""SELECT COUNT(*) FROM sqlite_master
-                                                   WHERE name IN ('garmin_aliases', 'garmin_scans')""").fetchone()[0] < 2
+                                                   WHERE name IN ('garmin_aliases', 'garmin_scans', 'legacy_garmin_originals')""").fetchone()[0] < 3
                 if upgrade:
                     with self.connect(write=True, create=True):
                         pass
@@ -372,8 +381,9 @@ class Store:
             selected = version["original_sha"] if version else None
             rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s JOIN activities a ON a.id=s.activity_id
                 WHERE s.activity_id=:owner AND s.kind IN ('original', 'original_unavailable') AND
-                (s.sha256=:selected OR (:selected IS NULL AND a.garmin_id=:gid AND NOT EXISTS
-                 (SELECT 1 FROM garmin_original_versions v WHERE v.original_sha=s.sha256)))
+                (s.sha256=:selected OR (:selected IS NULL AND (
+                    EXISTS (SELECT 1 FROM legacy_garmin_originals l WHERE l.garmin_id=:gid AND l.original_sha=s.sha256) OR
+                    (a.garmin_id=:gid AND NOT EXISTS (SELECT 1 FROM garmin_original_versions v WHERE v.original_sha=s.sha256)))))
                 ORDER BY (s.kind='original') DESC, s.rowid DESC""", {"owner": owner["id"], "selected": selected, "gid": garmin_id})
             return [tuple(row) for row in rows]
 
@@ -382,7 +392,7 @@ class Store:
         gid = fields["garmin_id"]
         with self.connect(write=True) as db:
             if scan_id is not None:
-                fit_store.reconcile_scan_edits(db, fields, sources, status, now())
+                fit_store.reconcile_scan_edits(db, fields, fit, sources, status, now())
             if status != "saved":
                 db.execute("""UPDATE garmin_scan_items SET status=?, detail_sha=? WHERE scan_id=? AND garmin_id=?""",
                            (status, detail_sha, scan_id, gid))

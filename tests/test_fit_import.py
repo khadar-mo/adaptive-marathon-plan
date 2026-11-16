@@ -190,8 +190,7 @@ async def test_conflicting_garmin_ids_cannot_split_identical_fit_bytes(history):
         assert row["garmin_id"] == "42" and (await client.get("/api/activities/2")).status_code == 404
 
 
-@pytest.mark.parametrize("temporarily_missing", [False, True])
-async def test_pr9_database_preserves_existing_id_and_archived_member_without_garmin(history, tmp_path, monkeypatch, temporarily_missing):
+def legacy_archive(tmp_path):
     # These are the pre-FIT tables and constraints used by the merged first importer.
     with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
         db.executescript("""
@@ -215,6 +214,12 @@ async def test_pr9_database_preserves_existing_id_and_archived_member_without_ga
         directory.mkdir(mode=0o700)
         (directory / digest(original)).write_bytes(original)
         db.execute("INSERT INTO activity_sources VALUES (731, 'original', ?, 'zip', 'then')", (digest(original),))
+    return data, original, directory
+
+
+@pytest.mark.parametrize("temporarily_missing", [False, True])
+async def test_pr9_database_preserves_existing_id_and_archived_member_without_garmin(history, tmp_path, monkeypatch, temporarily_missing):
+    data, original, directory = legacy_archive(tmp_path)
     monkeypatch.setenv("RUNS_GARMIN_OFFLINE", "1")
     async with server() as client:
         assert (await client.get("/api/imports/5")).json()["source"] == "garmin"
@@ -724,3 +729,50 @@ async def test_pending_day_moves_with_an_in_range_garmin_edit(history):
             scan = (await client.get(report["report_url"])).json()["scans"][0]
             assert scan["earliest_saved"] == scan["latest_saved"] == "2024-03-01"
         assert (await client.get("/api/activities/2")).json()["local_date"] == "2024-03-01"
+
+
+async def test_legacy_primary_keeps_its_original_after_an_alias_supplies_identical_bytes(history, tmp_path):
+    _, original, _ = legacy_archive(tmp_path)
+    history.original = original
+    history.listed = [{**LISTED, "activityId": 51}]
+    history.extra_details["51"] = {**DETAIL, "activityId": 51}
+    async with server() as client:
+        pending = await submit(client)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 731})).status_code == 200
+    async with server() as client:
+        history.original_error = ConnectionProblem("Fixture unavailable.")
+        for gid in (42, 51):
+            history.listed = [{**LISTED, "activityId": gid}]
+            report = await submit(client)
+            scan, = report["scans"]
+            assert scan["saved_garmin_ids"] == [str(gid)] and scan["originals_requested"] == 0
+            assert scan["originals_available"] == 1 and not scan["missing_original_ids"]
+            assert report["activities"][0]["id"] == 731
+        assert (await client.get("/api/activities/731")).json()["laps"][0]["distance_m"] == 324.5
+
+
+async def test_pending_dates_stay_with_separately_owned_versions_of_one_garmin_id(history):
+    starts = [START, START + 86400]
+    fits = [make_fit(serial=gid, start=start, created=start) for gid, start in zip((42, 52), starts)]
+    dates = ["2024-02-29", "2024-03-01"]
+    def select(gid, index):
+        history.listed = [{**LISTED, "activityId": gid, "startTimeLocal": dates[index] + " 00:15:38"}]
+        del history.listed[0]["startTimeGMT"]
+        history.extra_details[str(gid)] = {**DETAIL, "activityId": gid}
+        history.original = zipped(fits[index])
+    async with server() as client:
+        for index, gid in enumerate((42, 52)):
+            select(gid, index)
+            await submit(client, {"from": dates[index], "to": dates[index]})
+        select(51, 0)
+        earlier = await submit(client, {"from": dates[0], "to": dates[1]})
+        select(51, 1)
+        later = await submit(client, {"from": dates[1], "to": dates[1]})
+        assert (await resolve(client, later, {"action": "link", "activity_id": 2})).status_code == 200
+        held = (await client.get(earlier["report_url"])).json()
+        assert held["state"] == "partial" and held["scans"][0]["checked_ranges"] == [{"from": dates[1], "to": dates[1]}]
+        assert (await resolve(client, earlier, {"action": "link", "activity_id": 1})).status_code == 200
+        for index, report in enumerate((earlier, later)):
+            scan = (await client.get(report["report_url"])).json()["scans"][0]
+            assert scan["earliest_saved"] == scan["latest_saved"] == dates[index]
+            assert (await client.get(f"/api/activities/{index + 1}")).json()["local_date"] == dates[index]
