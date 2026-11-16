@@ -252,8 +252,9 @@ async def test_unavailable_original_does_not_discard_unresolved_identity(history
 @pytest.mark.parametrize("target", [1, 2])
 @pytest.mark.parametrize("same_bytes", [True, False])
 async def test_resolve_existing_manual_and_garmin_rows_without_losing_links(history, tmp_path, target, same_bytes):
-    manual = make_fit(laps=[(183.43, 40, 50)])
-    history.listed[0].pop("startTimeGMT")
+    manual = make_fit(laps=[(183.43, 40, 50)], metrics={"total_timer_time": 222, "total_moving_time": 111})
+    for key in ("startTimeGMT", "duration", "movingDuration"):
+        history.listed[0].pop(key)
     history.original_error = ConnectionProblem("Fixture original is offline.")
     async with server() as client:
         early = await upload(client, ("manual.fit", manual))
@@ -267,6 +268,8 @@ async def test_resolve_existing_manual_and_garmin_rows_without_losing_links(hist
         for old in (1, 2):
             row = (await client.get(f"/api/activities/{old}")).json()
             assert row["id"] == target and row["garmin_id"] == "42" and row["laps"][0]["distance_m"] == 183.43
+            assert (row["timer_seconds"], row["moving_seconds"]) == (222, 111)
+            assert row["metric_sources"]["timer_seconds"] == "fit"
         for report in (early, later, conflict):
             assert (await client.get(report["report_url"])).json()["activities"][0]["id"] == target
         assert (await upload(client, ("renamed.fit", manual)))["activities"][0]["id"] == target
@@ -326,3 +329,51 @@ async def test_wire_order_and_timestamp_correlation(history, marker):
         assert report["state"] == "complete" and not report["issues"]
         row = (await client.get("/api/activities/1")).json()
         assert row["local_date"] == "2024-02-29" and [lap["distance_m"] for lap in row["laps"]] == [1000, 751]
+
+
+async def test_garmin_edits_during_pending_match_keep_fresh_headlines_and_previous_fit(history):
+    manual = make_fit()
+    history.original = zipped(make_fit(start=START + 20, serial=None, laps=[(333, 80, 90)]))
+    history.detail["summaryDTO"]["distance"] = 5000
+    old_detail = digest(history.wire(history.detail))
+    async with server() as client:
+        await upload(client, ("manual.fit", manual))
+        first = await submit(client)
+        assert not first["activities"]
+        history.detail["summaryDTO"]["distance"] = 6000
+        new_detail = digest(history.wire(history.detail))
+        history.original_error = ConnectionProblem("Fixture original is offline.")
+        retry = await submit(client)
+        assert not retry["activities"]
+        assert (await resolve(client, retry, {"action": "keep_separate"})).status_code == 200
+        row = (await client.get("/api/activities/2")).json()
+        assert row["distance_m"] == 6000 and row["laps"][0]["distance_m"] == 333
+        assert {s["sha256"] for s in row["sources"] if s["kind"] == "detail"} == {old_detail, new_detail}
+
+
+async def test_weak_retry_preserves_newer_conflicting_original_and_owner(history):
+    def select_garmin(gid, data):
+        history.listed = [{**LISTED, "activityId": gid}]
+        history.extra_details[str(gid)] = {**DETAIL, "activityId": gid}
+        history.original = zipped(data)
+
+    x, y = make_fit(), make_fit(start=START + 600, serial=52, created=START + 600)
+    async with server() as client:
+        select_garmin(42, x)
+        await submit(client)
+        select_garmin(52, y)
+        await submit(client)
+        select_garmin(51, x)
+        first = await submit(client)
+        assert (await resolve(client, first, {"action": "link", "activity_id": 1})).status_code == 200
+        select_garmin(51, y)
+        changed = await submit(client)
+        assert not changed["activities"]
+        history.original_error = ConnectionProblem("Fixture original is offline.")
+        weak = await submit(client)
+        assert not weak["activities"] and weak["state"] == "partial"
+        assert (await resolve(client, weak, {"action": "link", "activity_id": 2})).status_code == 200
+        assert (await submit(client))["activities"][0]["id"] == 2
+        assert (await client.get("/api/activities/1")).json()["garmin_id"] == "42"
+        assert (await client.get("/api/activities/2")).json()["garmin_id"] == "52"
+        assert (await client.get("/api/activities/3")).status_code == 404

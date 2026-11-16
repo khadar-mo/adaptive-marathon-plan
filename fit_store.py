@@ -206,17 +206,34 @@ def ingest(db, import_id, payload, acquired_at):
     key = f"garmin:{gid}" if gid else "fit:" + fit["sha256"]
     target, candidates, hashes = identify(db, payload)
     review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
+    if not fit and gid:
+        # A summary cannot choose between versions of a previously linked original.
+        outstanding = db.execute("""SELECT f.* FROM fit_reviews f JOIN fit_review_issues r ON r.review_key=f.key
+                                    WHERE f.resolution IS NULL AND (f.key=? OR f.key GLOB ?)
+                                    ORDER BY r.issue_id DESC LIMIT 1""", (key, key + ":*")).fetchone()
+        if outstanding:
+            key, review = outstanding["key"], outstanding
+        elif review and review["resolution"] and garmin_owner(db, gid):
+            # The current alias can reflect a later, explicitly resolved original.
+            review = None
     if review and review["resolution"] and hashes and review["activity_id"] not in hashes:
         # The provider changed a previously resolved ID to bytes owned by a different run.
         key += ":" + fit["sha256"]
         review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
     if review and review["resolution"]:
         target, candidates = review["activity_id"], set()
-    elif review and not fit:
-        # A failed download is weaker evidence than an earlier unresolved match.
-        # Keep the original candidate and its source bytes available for resolution.
-        candidates = set(json.loads(review["candidates"]))
-        payload = json.loads(review["payload"])
+    elif review:
+        previous = json.loads(review["payload"])
+        # Keep the latest valid Garmin headlines and all their source versions.
+        # A missing original leaves the earlier FIT and its pending choice intact.
+        prior_sources = [s for s in previous["sources"] if s[0] != "original" or not fit]
+        sources = list(dict.fromkeys(tuple(s) for s in [*prior_sources, *payload["sources"]]))
+        payload = {**payload, "sources": sources}
+        if not fit:
+            candidates = set(json.loads(review["candidates"]))
+            payload["fit"] = previous["fit"]
+            if payload["fit"]:
+                payload["warning"] = None
     if candidates:
         remember_issue(db, import_id, key, "match", payload["item"], payload, candidates)
         return None
@@ -228,6 +245,12 @@ def ingest(db, import_id, payload, acquired_at):
 
 def merge_activity(db, donor, target):
     """Move an explicitly linked existing row and keep its old local URL usable."""
+    existing = db.execute("SELECT * FROM activities WHERE id=?", (target,)).fetchone()
+    old = db.execute("SELECT * FROM activities WHERE id=?", (donor,)).fetchone()
+    merged = merge_fields(existing, old)
+    columns = ("start_utc", "start_local", "local_date", "distance_m", "timer_seconds", "elapsed_seconds",
+               "moving_seconds", "metric_sources")
+    db.execute(f"UPDATE activities SET {', '.join(k+'=:'+k for k in columns)} WHERE id=:id", merged)
     for statement in (
         """INSERT OR IGNORE INTO activity_sources SELECT ?, kind, sha256, format, acquired_at
            FROM activity_sources WHERE activity_id=?""",
@@ -274,9 +297,11 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
         payload = json.loads(row["payload"])
         exact, _, hashes = identify(db, payload)
         if action == "link":
-            known = garmin_owner(db, payload["fields"]["garmin_id"])
-            owners = hashes | ({known[0]} if known else set())
-            if known and not hashes and payload["fit"]:
+            # An earlier alias can point at a separate, already identified Garmin run.
+            # Only a primary row for this incoming ID is a row to consolidate.
+            primary = db.execute("SELECT id FROM activities WHERE garmin_id=?", (payload["fields"]["garmin_id"],)).fetchone()
+            owners = hashes | ({primary[0]} if primary else set())
+            if primary and not hashes and payload["fit"]:
                 tuples = fit_owners(db, "identity", payload["fit"]["identity"])
                 if len(tuples) == 1:
                     owners |= tuples
@@ -285,8 +310,13 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
             if not owners.issubset(choices) or (exact is not None and exact != activity_id):
                 raise ResolutionError("Another activity now owns this input. Retry the import to refresh the choices.")
             target = activity_id
-            for donor in owners - {target}:
+            donors = owners - {target}
+            for donor in donors:
                 merge_activity(db, donor, target)
+            if donors:
+                previous = db.execute("SELECT * FROM activities WHERE id=?", (target,)).fetchone()
+                fields = merge_fields(payload["fields"], payload["fit"]["fields"] if payload["fit"] else None)
+                payload = {**payload, "fields": merge_fields(fields, previous)}
         elif action == "keep_separate":
             if hashes or exact is not None:
                 raise ResolutionError("This input already identifies an activity. Link it or retry the import.")

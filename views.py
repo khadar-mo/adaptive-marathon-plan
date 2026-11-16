@@ -42,7 +42,7 @@ document.addEventListener('submit', async event => {
     button.disabled = true;
     message.textContent = 'Saving…';
     try {
-        const response = await fetch(form.action, {method: 'POST', headers, body});
+        const response = await fetch(form.getAttribute('action'), {method: 'POST', headers, body});
         const result = await response.json();
         if (response.ok) {
             location.assign(result.html_url);
