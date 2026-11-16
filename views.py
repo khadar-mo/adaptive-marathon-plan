@@ -11,7 +11,8 @@ def page(title, content):
 <style>
 body {{font: 1rem/1.5 system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem;
        color: #18241e; overflow-wrap: anywhere}}
-fieldset {{display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; padding: 1rem}}
+fieldset {{display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; padding: 1rem; min-inline-size: 0}}
+fieldset > label {{min-width: 0; max-width: 100%}}
 label, input {{display: block}} input, select {{max-width: 100%; box-sizing: border-box}} button, input, select {{font: inherit; padding: .35rem}}
 dt {{font-weight: bold}} dd {{margin: 0 0 .7rem}} li {{margin: .5rem 0}} a {{color: #17523d}}
 </style></head><body><nav><a href="/imports">Imports</a></nav><main><h1>{escape(title)}</h1>
@@ -154,7 +155,7 @@ def activity(row):
     garmin_link = (f'<p><a href="{escape(row["garmin_url"])}" rel="noreferrer">Garmin Connect activity '
                   f'{escape(row["garmin_id"])}</a></p>' if row["garmin_url"] else "")
     laps = "".join(f'<tr><th scope="row">{lap["sequence"]}</th><td>' +
-                   (f'{lap["distance_m"]:g} m' if lap["distance_m"] is not None else "Not available") +
+                   (f'{lap["distance_m"]:.2f}'.rstrip("0").rstrip(".") + ' m' if lap["distance_m"] is not None else "Not available") +
                    f'</td><td>{duration(lap["timer_seconds"])}</td><td>{duration(lap["elapsed_seconds"])}</td></tr>'
                    for lap in row["laps"])
     lap_table = ('<h2>Recorded laps</h2><table><thead><tr><th>Lap</th><th>Distance</th><th>Watch timer</th>'

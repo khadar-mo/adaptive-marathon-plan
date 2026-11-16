@@ -62,9 +62,13 @@ def decode_fit(data):
         raise FitError("Unsupported sport. Choose a single-session running FIT.")
 
     start = absolute_time(session.get("start_time"))
+    # A timestamp correlation at the start is direct evidence; otherwise use
+    # the offset recorded with the activity summary. Never apply the host zone.
+    correlations = [m for m in messages.get("timestamp_correlation_mesgs", [])
+                    if start and absolute_time(m.get("timestamp")) == start and absolute_time(m.get("local_timestamp"))]
     offsets = set()
-    for activity in activities:
-        utc, local = absolute_time(activity.get("timestamp")), absolute_time(activity.get("local_timestamp"))
+    for sample in correlations or activities:
+        utc, local = absolute_time(sample.get("timestamp")), absolute_time(sample.get("local_timestamp"))
         if utc and local:
             offsets.add(local - utc)
     local_start = None
@@ -83,4 +87,9 @@ def decode_fit(data):
               "start_utc": start.isoformat() if start else None, "start_local": local_start,
               "local_date": local_start[:10] if local_start else None, **measurements(session)}
     fields["metric_sources"] = json.dumps({k: "fit" for k, v in fields.items() if v is not None}, sort_keys=True)
-    return {"identity": identity, "fields": fields, "laps": [measurements(lap) for lap in messages.get("lap_mesgs", [])]}
+    laps = messages.get("lap_mesgs", [])
+    if all(type(lap.get("message_index")) is int for lap in laps):
+        laps = sorted(laps, key=lambda lap: lap["message_index"] & 0x0fff)
+    elif all(absolute_time(lap.get("start_time")) for lap in laps):
+        laps = sorted(laps, key=lambda lap: lap["start_time"])
+    return {"identity": identity, "fields": fields, "laps": [measurements(lap) for lap in laps]}

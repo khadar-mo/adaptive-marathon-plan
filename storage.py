@@ -221,7 +221,7 @@ class Store:
             if self.recovery_pending:
                 with self.history() as db:
                     pending = db and db.execute("SELECT 1 FROM imports WHERE state='running'").fetchone()
-                    upgrade = db and not db.execute("SELECT 1 FROM sqlite_master WHERE name='fit_uploads'").fetchone()
+                    upgrade = db and not db.execute("SELECT 1 FROM sqlite_master WHERE name='garmin_aliases'").fetchone()
                 if upgrade:
                     with self.connect(write=True, create=True):
                         pass
@@ -260,8 +260,10 @@ class Store:
 
     def finish(self, import_id, state):
         try:
-            self.write_report("UPDATE imports SET state=?, finished_at=? WHERE id=? AND state='running'",
-                              (state, now(), import_id))
+            self.write_report(f"""UPDATE imports SET state=CASE
+                              WHEN ?='partial' AND EXISTS (SELECT 1 FROM import_issues i WHERE i.import_id=imports.id
+                                   AND i.severity='review') AND NOT EXISTS ({fit_store.OPEN_ISSUES}) THEN 'complete'
+                              ELSE ? END, finished_at=? WHERE id=? AND state='running'""", (state, state, now(), import_id))
         except (sqlite3.Error, OSError):
             # The worker has exited without a durable outcome. Recover the
             # interrupted report on the next submission if storage comes back.
@@ -297,7 +299,8 @@ class Store:
         rows = db.execute("""SELECT i.id, i.import_id, i.item, f.kind, f.candidates, f.resolution, f.activity_id, f.local_date
                              FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
                              JOIN fit_reviews f ON f.key=r.review_key
-                             WHERE i.import_id=? OR (? IS NULL AND f.resolution IS NULL)
+                             WHERE i.import_id=? OR (? IS NULL AND f.resolution IS NULL AND i.id=(
+                                 SELECT MAX(x.issue_id) FROM fit_review_issues x WHERE x.review_key=r.review_key))
                              ORDER BY i.id DESC""", (import_id, import_id))
         reviews = []
         for row in rows:
@@ -333,17 +336,26 @@ class Store:
 
     def activity(self, activity_id):
         with self.history() as db:
-            row = db and db.execute("SELECT * FROM activities WHERE id=?", (local_id(activity_id),)).fetchone()
+            requested = local_id(activity_id)
+            row = db and db.execute("""SELECT * FROM activities WHERE id=COALESCE(
+                                     (SELECT activity_id FROM activity_redirects WHERE old_id=?), ?)""",
+                                    (requested, requested)).fetchone()
             if not row:
                 return None
+            activity_id = row["id"]
             activity = dict(row)
             warning = activity.pop("original_warning")
             sources = db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
                                     WHERE activity_id=? ORDER BY rowid""", (activity_id,))
             laps = db.execute("""SELECT sequence, 'fit' AS source, distance_m, timer_seconds, elapsed_seconds, moving_seconds
                                  FROM laps WHERE activity_id=? ORDER BY sequence""", (activity_id,))
+            laps = [dict(lap) for lap in laps]
+            warnings = [warning] if warning else []
+            if row["garmin_id"] and row["distance_m"] is not None and laps and all(lap["distance_m"] is not None for lap in laps):
+                if abs(sum(lap["distance_m"] for lap in laps) - row["distance_m"]) > 1:
+                    warnings.append("Recorded lap distances differ from the Garmin activity distance.")
             fits = db.execute("SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity_id,))
-            return {**activity, "laps": [dict(lap) for lap in laps], "fit_sha256": [f[0] for f in fits],
+            return {**activity, "laps": laps, "fit_sha256": [f[0] for f in fits],
                     "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"] if row["garmin_id"] else None,
                     "metric_sources": json.loads(row["metric_sources"]), "sources": [dict(s) for s in sources],
-                    "warnings": [warning] if warning else []}
+                    "warnings": warnings}

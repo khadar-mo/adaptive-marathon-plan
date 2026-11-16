@@ -2,13 +2,17 @@ from contextlib import closing
 from datetime import datetime, timezone
 from io import BytesIO
 import sqlite3
+import threading
+import asyncio
 from zipfile import ZipFile
 
 from garmin_fit_sdk import convert_datetime_to_timestamp
 import pytest
 
 from fit_fixture import START, make_fit
-from test_imports import DAY, DETAIL, HOST, LISTED, digest, history, server, submit
+from test_imports import DETAIL, LISTED, digest, history, server, submit
+from runs import ConnectionProblem
+from storage import Store
 
 
 pytestmark = pytest.mark.anyio
@@ -217,3 +221,108 @@ async def test_pr9_database_preserves_existing_id_and_archived_member_without_ga
         assert (await client.get("/api/activities/732")).status_code == 404
         assert (await client.get("/api/activities/731")).json()["distance_m"] == 4500
         assert history.calls == []
+
+
+async def test_recognize_nearby_garmin_run_using_its_fit_start(history):
+    del history.listed[0]["startTimeGMT"]
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client)
+        assert not pending["activities"] and pending["issues"][0]["kind"] == "match"
+        assert [c["id"] for c in pending["issues"][0]["candidates"]] == [1]
+
+
+async def test_unavailable_original_does_not_discard_unresolved_identity(history):
+    history.original = zipped(make_fit())
+    async with server() as client:
+        await submit(client)
+        history.listed = [{**LISTED, "activityId": 51}]
+        history.extra_details["51"] = {**DETAIL, "activityId": 51}
+        conflict = await submit(client)
+        history.original_error = ConnectionProblem("Fixture unavailable.")
+        retry = await submit(client)
+        assert retry["state"] == "partial" and not retry["activities"]
+        assert {i["step"] for i in retry["issues"]} == {"Original download", "Activity identity"}
+        assert (await client.get("/api/activities/2")).status_code == 404
+        assert (await resolve(client, conflict, {"action": "link", "activity_id": 1})).status_code == 200
+        assert (await client.get(retry["report_url"])).json()["state"] == "complete"
+
+
+@pytest.mark.parametrize("target", [1, 2])
+@pytest.mark.parametrize("same_bytes", [True, False])
+async def test_resolve_existing_manual_and_garmin_rows_without_losing_links(history, tmp_path, target, same_bytes):
+    manual = make_fit(laps=[(183.43, 40, 50)])
+    history.listed[0].pop("startTimeGMT")
+    history.original_error = ConnectionProblem("Fixture original is offline.")
+    async with server() as client:
+        early = await upload(client, ("manual.fit", manual))
+        later = await submit(client)
+        assert early["activities"][0]["id"] == 1 and later["activities"][0]["id"] == 2
+        history.original_error = None
+        history.original = zipped(manual if same_bytes else make_fit(file_number=12, laps=[(183.43, 40, 50)]))
+        conflict = await submit(client)
+        assert {c["id"] for c in conflict["issues"][0]["candidates"]} == {1, 2}
+        assert (await resolve(client, conflict, {"action": "link", "activity_id": target})).status_code == 200
+        for old in (1, 2):
+            row = (await client.get(f"/api/activities/{old}")).json()
+            assert row["id"] == target and row["garmin_id"] == "42" and row["laps"][0]["distance_m"] == 183.43
+        for report in (early, later, conflict):
+            assert (await client.get(report["report_url"])).json()["activities"][0]["id"] == target
+        assert (await upload(client, ("renamed.fit", manual)))["activities"][0]["id"] == target
+        assert (await submit(client))["activities"][0]["id"] == target
+        with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db:
+            assert db.execute("SELECT count(*) FROM activities").fetchone() == (1,)
+            assert not db.execute("PRAGMA foreign_key_check").fetchall()
+        assert (await upload(client, ("distinct.fit", make_fit(start=START + 86400))))["activities"][0]["id"] == 3
+
+
+async def test_confirmed_and_garmin_supplied_dates_reconcile_old_reports(history):
+    async with server() as client:
+        first = await upload(client, ("undated.fit", make_fit(offset=None)))
+        confirmed = {"action": "set_local_date", "local_date": "2024-03-01"}
+        await resolve(client, first, confirmed)
+        await upload(client, ("reencoded.fit", make_fit()))
+        row = (await client.get("/api/activities/1")).json()
+        assert row["local_date"] == "2024-03-01" and row["start_local"] is None
+        other = make_fit(start=START + 400, offset=None)
+        pending = await upload(client, ("later.fit", other))
+        history.original = zipped(other)
+        await submit(client)
+        saved = (await client.get(pending["report_url"])).json()
+        assert saved["state"] == "complete" and saved["issues"][0]["resolution"] == "recorded_date"
+
+
+async def test_resolving_before_worker_finishes_keeps_report_complete(history, monkeypatch):
+    finishing, release = threading.Event(), threading.Event()
+    original = Store.finish
+
+    def pause(store, import_id, state):
+        finishing.set()
+        assert release.wait(5)
+        original(store, import_id, state)
+
+    monkeypatch.setattr(Store, "finish", pause)
+    async with server() as client:
+        request = asyncio.create_task(upload(client, ("no offset.fit", make_fit(offset=None))))
+        try:
+            assert await asyncio.to_thread(finishing.wait, 5)
+            report = (await client.get("/api/imports/1")).json()
+            assert (await resolve(client, report, {"action": "set_local_date", "local_date": "2024-03-01"})).status_code == 200
+        finally:
+            release.set()
+        assert (await request)["state"] == "complete"
+
+
+@pytest.mark.parametrize("marker", ["start_time", "message_index"])
+async def test_wire_order_and_timestamp_correlation(history, marker):
+    def lap(index, distance):
+        return (19, {marker: START + 60 * index if marker == "start_time" else index, "total_distance": distance})
+
+    data = make_fit(offset=None, messages=[lap(1, 751), lap(0, 1000),
+                    (162, {"timestamp": START, "local_timestamp": START + 3600})])
+    async with server() as client:
+        report = await upload(client, ("summary first.fit", data))
+        assert report["state"] == "complete" and not report["issues"]
+        row = (await client.get("/api/activities/1")).json()
+        assert row["local_date"] == "2024-02-29" and [lap["distance_m"] for lap in row["laps"]] == [1000, 751]
