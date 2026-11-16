@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 import app
+from fit_fixture import make_fit
 import garmin_import
 import runs
 from storage import Store
@@ -29,8 +30,7 @@ LISTED = {"activityId": 42, "activityName": "Fixture", "activityType": {"typeKey
           "duration": 1500, "elapsedDuration": 1800, "distance": 4900, "movingDuration": 1475}
 DETAIL = {"activityId": 42, "activityName": "Track <fixture>", "activityTypeDTO": {"typeKey": "track_running"},
           "summaryDTO": {"distance": 5001.25, "elapsedDuration": 1801.1}}
-# A FIT envelope with a six-byte message definition and trailing file CRC.
-FIT = bytes.fromhex("0c 10 00 00 06 00 00 00 2e 46 49 54 40 00 00 00 00 00 6d 33")
+FIT = make_fit()
 
 
 @pytest.fixture
@@ -56,6 +56,7 @@ class FixtureGarmin:
             with ZipFile(output, "w") as original:
                 original.writestr("fixture.fit", FIT)
             self.original = output.getvalue()
+        self.default_original = self.original
         self.original_error = None
         self.detail_error = None
         self.before_detail = lambda: None
@@ -86,6 +87,8 @@ class FixtureGarmin:
         assert path in {f"/download-service/files/activity/{key}" for key in ("42", *self.extra_details)}
         if self.original_error:
             raise self.original_error
+        if path.endswith("/51") and self.original == self.default_original:
+            return BytesIO(make_fit(serial=51))
         return BytesIO(self.original)
 
 

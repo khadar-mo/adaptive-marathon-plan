@@ -1,6 +1,7 @@
 """Private source bytes and the local import, activity and report records."""
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+from io import BytesIO
 import hashlib
 import json
 import os
@@ -12,16 +13,19 @@ import tempfile
 import threading
 import time
 
+import fit_store
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS imports (
-    id INTEGER PRIMARY KEY, requested_from TEXT NOT NULL, requested_to TEXT NOT NULL,
-    started_at TEXT NOT NULL, finished_at TEXT, state TEXT NOT NULL
+    id INTEGER PRIMARY KEY, requested_from TEXT, requested_to TEXT,
+    started_at TEXT NOT NULL, finished_at TEXT, state TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'garmin'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_running_import ON imports(state) WHERE state = 'running';
 CREATE TABLE IF NOT EXISTS activities (
     id INTEGER PRIMARY KEY, garmin_id TEXT UNIQUE, name TEXT, sport TEXT,
-    start_local TEXT NOT NULL, local_date TEXT NOT NULL, start_utc TEXT,
+    start_local TEXT, local_date TEXT, start_utc TEXT,
     distance_m REAL, timer_seconds REAL, elapsed_seconds REAL, moving_seconds REAL,
     metric_sources TEXT NOT NULL, original_warning TEXT
 );
@@ -38,7 +42,37 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-"""
+""" + fit_store.SCHEMA
+
+
+def prepare_schema(db):
+    # Older Garmin-only databases required both dates. Rebuild those two tables
+    # in one transaction, preserving local IDs, dependent rows and indexes.
+    db.execute("PRAGMA foreign_keys=OFF")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        for table, dates in (("activities", ("start_local", "local_date")), ("imports", ("requested_from", "requested_to"))):
+            if not any(c["name"] in dates and c["notnull"] for c in db.execute(f"PRAGMA table_info({table})")):
+                continue
+            definition = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+            indexes = db.execute("""SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger')
+                                    AND sql IS NOT NULL""", (table,)).fetchall()
+            for column in dates:
+                definition = definition.replace(column + " TEXT NOT NULL", column + " TEXT")
+            temporary = table + "_fit_upgrade"
+            db.execute(definition.replace(f"TABLE {table} ", f"TABLE {temporary} ", 1))
+            db.execute(f"INSERT INTO {temporary} SELECT * FROM {table}")
+            db.execute(f"DROP TABLE {table}")
+            db.execute(f"ALTER TABLE {temporary} RENAME TO {table}")
+            for row in indexes:
+                db.execute(row[0])
+        import_columns = {c["name"] for c in db.execute("PRAGMA table_info(imports)")}
+        if import_columns and "source" not in import_columns:
+            db.execute("ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'garmin'")
+        if db.execute("PRAGMA foreign_key_check").fetchone():
+            raise sqlite3.IntegrityError("Cannot migrate inconsistent activity references")
+    db.execute("PRAGMA foreign_keys=ON")
+    db.executescript(SCHEMA)
 
 
 def now():
@@ -96,16 +130,22 @@ class Archive:
             return None
 
     def put(self, data):
-        digest = hashlib.sha256(data).hexdigest()
+        return self.put_file(BytesIO(data))
+
+    def put_file(self, stream):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.directory.stat().st_mode & 0o077:
             raise ArchivePermissionsError("Use a private archive directory with mode 0700, then retry these dates.")
-        target = self.directory / digest
-        if self.read(digest) is not None:
-            return digest
         with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as pending:
             try:
-                pending.write(data)
+                checksum = hashlib.sha256()
+                while chunk := stream.read(1024 * 1024):
+                    checksum.update(chunk)
+                    pending.write(chunk)
+                digest = checksum.hexdigest()
+                target = self.directory / digest
+                if target.exists() and self.read(digest) is not None:
+                    return digest
                 pending.flush()
                 os.fsync(pending.fileno())
                 try:
@@ -158,7 +198,10 @@ class Store:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
             if create:
-                db.executescript(SCHEMA)
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE name='fit_uploads'").fetchone():
+                    prepare_schema(db)
+                else:
+                    db.executescript(SCHEMA)
             with db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 yield db
@@ -178,12 +221,16 @@ class Store:
             if self.recovery_pending:
                 with self.history() as db:
                     pending = db and db.execute("SELECT 1 FROM imports WHERE state='running'").fetchone()
+                    upgrade = db and not db.execute("SELECT 1 FROM sqlite_master WHERE name='fit_uploads'").fetchone()
+                if upgrade:
+                    with self.connect(write=True, create=True):
+                        pass
                 if pending:
                     with self.connect(write=True) as db:
                         db.execute("UPDATE imports SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
                 self.recovery_pending = False
 
-    def start(self, first, last):
+    def start(self, first, last, *, source='garmin'):
         self.interrupt_unfinished()  # Retry startup recovery if storage was unavailable.
         active_query = "SELECT id FROM imports WHERE state='running'"
         with self.history() as db:
@@ -195,8 +242,8 @@ class Store:
             if active:
                 raise ActiveImport(active["id"])
             return db.execute("""
-                INSERT INTO imports(requested_from, requested_to, started_at, state)
-                VALUES (?, ?, ?, 'running')""", (first, last, now())).lastrowid
+                INSERT INTO imports(requested_from, requested_to, started_at, state, source)
+                VALUES (?, ?, ?, 'running', ?)""", (first, last, now(), source)).lastrowid
 
     def write_report(self, statement, parameters):
         # The background worker still owns the running row while another SQLite
@@ -232,40 +279,36 @@ class Store:
                                  WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
             return [tuple(row) for row in rows]
 
-    def save(self, import_id, fields, sources, warning):
-        # Every key is supplied by the normalizer; no upstream field name enters SQL.
-        columns = tuple(fields)
-        bindings = ", ".join(":" + key for key in columns)
-        updates = ", ".join(f"{key}=excluded.{key}" for key in columns if key != "garmin_id")
+    def save(self, import_id, fields, sources, warning, fit=None, item=None):
+        payload = {"fields": fields, "sources": sources, "warning": warning, "fit": fit,
+                   "item": item or fields["garmin_id"]}
         with self.connect(write=True) as db:
-            previous = db.execute("SELECT * FROM activities WHERE garmin_id=?", (fields["garmin_id"],)).fetchone()
-            activity_id = db.execute(f"""
-                INSERT INTO activities({', '.join(columns)}, original_warning) VALUES ({bindings}, :original_warning)
-                ON CONFLICT(garmin_id) DO UPDATE SET {updates}, original_warning=excluded.original_warning
-                RETURNING id""", {**fields, "original_warning": warning}).fetchone()["id"]
-            new_activity_source = False
-            for kind, digest, file_format in sources:
-                if kind == "original_error":
-                    db.execute("""DELETE FROM activity_sources WHERE activity_id=? AND kind='original' AND sha256=?""",
-                               (activity_id, digest))
-                added = db.execute("""
-                    INSERT INTO activity_sources(activity_id, kind, sha256, format, acquired_at)
-                    VALUES (?, ?, ?, ?, ?) ON CONFLICT(activity_id, kind, sha256) DO NOTHING""",
-                    (activity_id, kind, digest, file_format, now())).rowcount
-                # A list page can change because a different run moved or was edited.
-                if added and kind != "list":
-                    new_activity_source = True
-            outcome = "inserted"
-            if previous:
-                changed = (new_activity_source or previous["original_warning"] != warning
-                           or any(previous[k] != fields[k] for k in columns))
-                outcome = "updated" if changed else "unchanged"
-            db.execute("INSERT INTO import_activities(import_id, activity_id, outcome) VALUES (?, ?, ?)",
-                       (import_id, activity_id, outcome))
-            if warning:
-                db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
-                              VALUES (?, 'warning', ?, 'Original download', ?)""",
-                           (import_id, fields["garmin_id"], warning))
+            return fit_store.ingest(db, import_id, payload, now())
+
+    def resolve(self, import_id, issue_id, action, activity_id, date):
+        with self.history() as db:
+            if db is None:
+                raise KeyError
+        with self.connect(write=True) as db:
+            return fit_store.resolve(db, local_id(import_id), local_id(issue_id), action, activity_id, date, now())
+
+    @staticmethod
+    def review_rows(db, import_id=None):
+        rows = db.execute("""SELECT i.id, i.import_id, i.item, f.kind, f.candidates, f.resolution, f.activity_id, f.local_date
+                             FROM fit_review_issues r JOIN import_issues i ON i.id=r.issue_id
+                             JOIN fit_reviews f ON f.key=r.review_key
+                             WHERE i.import_id=? OR (? IS NULL AND f.resolution IS NULL)
+                             ORDER BY i.id DESC""", (import_id, import_id))
+        reviews = []
+        for row in rows:
+            candidates = [dict(c) for c in db.execute("""SELECT id, name, garmin_id, local_date, start_utc, distance_m
+                          FROM activities WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id""", (row["candidates"],))]
+            reviews.append({**dict(row), "candidates": candidates})
+        return reviews
+
+    def pending(self):
+        with self.history() as db:
+            return self.review_rows(db) if db is not None else []
 
     def reports(self):
         with self.history() as db:
@@ -279,9 +322,14 @@ class Store:
             activities = db.execute("""SELECT a.id, a.garmin_id, ia.outcome FROM import_activities ia
                                        JOIN activities a ON a.id=ia.activity_id WHERE ia.import_id=? ORDER BY a.id""",
                                     (import_id,))
-            issues = db.execute("SELECT severity, item, step, message FROM import_issues WHERE import_id=? ORDER BY id",
+            issues = db.execute("SELECT id, severity, item, step, message FROM import_issues WHERE import_id=? ORDER BY id",
                                 (import_id,))
-            return {**dict(row), "activities": [dict(a) for a in activities], "issues": [dict(i) for i in issues]}
+            reviews = {r["id"]: r for r in self.review_rows(db, import_id)}
+            files = db.execute("SELECT filename, sha256, activity_id FROM fit_uploads WHERE import_id=? ORDER BY ordinal",
+                               (import_id,))
+            return {**dict(row), "activities": [dict(a) for a in activities],
+                    "files": [dict(f) for f in files],
+                    "issues": [{**dict(i), **reviews.get(i["id"], {})} for i in issues]}
 
     def activity(self, activity_id):
         with self.history() as db:
@@ -292,6 +340,10 @@ class Store:
             warning = activity.pop("original_warning")
             sources = db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
                                     WHERE activity_id=? ORDER BY rowid""", (activity_id,))
-            return {**activity, "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"],
+            laps = db.execute("""SELECT sequence, 'fit' AS source, distance_m, timer_seconds, elapsed_seconds, moving_seconds
+                                 FROM laps WHERE activity_id=? ORDER BY sequence""", (activity_id,))
+            fits = db.execute("SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity_id,))
+            return {**activity, "laps": [dict(lap) for lap in laps], "fit_sha256": [f[0] for f in fits],
+                    "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"] if row["garmin_id"] else None,
                     "metric_sources": json.loads(row["metric_sources"]), "sources": [dict(s) for s in sources],
                     "warnings": [warning] if warning else []}
