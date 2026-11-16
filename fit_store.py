@@ -285,15 +285,16 @@ def reconcile_scan_edits(db, fields, sources, status, acquired_at):
             db.execute("UPDATE garmin_scan_items SET status=?, local_date=? WHERE scan_id=? AND garmin_id=?",
                        (reason, day, old["scan_id"], gid))
             complete_reviewed_import(db, old["import_id"])
-        elif status != "saved" and day:
-            # A neighboring scan may refresh detail for an earlier in-range decision.
-            previous = json.loads(old["payload"])
-            current = {**previous, "fields": {**fields, "sport": fields["sport"] or previous["fields"]["sport"]},
-                       "sources": sources, "acquired": {sha: acquired_at for _, sha, _ in sources}}
-            payload = combine_evidence(previous, current, old["started_at"])
-            db.execute("UPDATE fit_reviews SET payload=? WHERE key=?", (json.dumps(payload), old["review_key"]))
+        elif day:
             db.execute("UPDATE garmin_scan_items SET local_date=? WHERE scan_id=? AND garmin_id=?",
                        (day, old["scan_id"], gid))
+            if status != "saved":
+                # A neighboring scan may refresh detail for an earlier in-range decision.
+                previous = json.loads(old["payload"])
+                current = {**previous, "fields": {**fields, "sport": fields["sport"] or previous["fields"]["sport"]},
+                           "sources": sources, "acquired": {sha: acquired_at for _, sha, _ in sources}}
+                payload = combine_evidence(previous, current, old["started_at"])
+                db.execute("UPDATE fit_reviews SET payload=? WHERE key=?", (json.dumps(payload), old["review_key"]))
 
 
 def apply_review(db, key, action, target, confirmed_date=None, *, available=None):
@@ -303,22 +304,32 @@ def apply_review(db, key, action, target, confirmed_date=None, *, available=None
                             WHERE r.review_key=?""", (key,)).fetchall()
     gid = key.split(":")[1] if key.startswith("garmin:") else None
     has_original = False
+    warning = "Original unavailable. Recheck these dates to recover the archived Garmin recording."
     if gid and available:
         payload = json.loads(db.execute("SELECT payload FROM fit_reviews WHERE key=?", (key,)).fetchone()[0])
         sha = payload["fit"]["sha256"] if payload["fit"] else None
-        originals = db.execute("""SELECT s.sha256 FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
+        originals = db.execute("""SELECT s.sha256, m.fit_sha FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
                 JOIN garmin_original_versions v ON v.original_sha=s.sha256 WHERE s.activity_id=? AND v.garmin_id=?
-                AND s.kind IN ('original', 'original_unavailable') AND (? IS NULL OR m.fit_sha=?)
-                ORDER BY v.last_import_id DESC""", (target, gid, sha, sha))
-        has_original = any(available(r["sha256"]) for r in originals)
+                AND s.kind IN ('original', 'original_unavailable') ORDER BY v.last_import_id DESC, v.rowid DESC""",
+                               (target, gid)).fetchall()
+        candidates = [r for r in originals if r["fit_sha"] == sha] if sha else originals[:1]
+        has_original = any(available(r["sha256"]) for r in candidates)
+        if not originals or sha is None or originals[0]["fit_sha"] == sha:
+            db.execute("""UPDATE activities SET original_warning=CASE WHEN ? THEN NULL ELSE COALESCE(original_warning, ?) END
+                          WHERE id=? AND garmin_id=?""", (has_original, warning, target, gid))
     for (import_id,) in imports:
         record_activity(db, import_id, target, "unchanged")
         db.execute("""UPDATE fit_uploads SET activity_id=? WHERE import_id=? AND sha256 IN
                       (SELECT sha256 FROM fit_sources WHERE activity_id=?)""", (target, import_id, target))
         if gid:
-            db.execute("""UPDATE garmin_scan_items SET status='saved', original_available=MAX(original_available, ?)
-                          WHERE garmin_id=? AND status='pending_identity' AND scan_id IN
-                          (SELECT id FROM garmin_scans WHERE import_id=?)""", (has_original, gid, import_id))
+            updated = db.execute("""UPDATE garmin_scan_items SET status='saved', original_available=?
+                                    WHERE garmin_id=? AND status='pending_identity' AND scan_id IN
+                                    (SELECT id FROM garmin_scans WHERE import_id=?)""", (has_original, gid, import_id))
+            if updated.rowcount and not has_original:
+                db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
+                    SELECT ?, 'warning', ?, 'Original download', ? WHERE NOT EXISTS
+                    (SELECT 1 FROM import_issues WHERE import_id=? AND item=? AND step='Original download')""",
+                           (import_id, gid, warning, import_id, gid))
         complete_reviewed_import(db, import_id)
 
 

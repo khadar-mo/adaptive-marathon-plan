@@ -657,3 +657,70 @@ async def test_resolution_keeps_acquisition_time_and_retries_only_missing_origin
         original, = [s for s in row["sources"] if s["kind"] == "original"]
         assert original["acquired_at"] == first_seen
         assert len((await submit(client, {}))["scans"]) == (1 if archive_present else 2)
+
+
+async def test_linked_id_without_its_own_original_still_requests_it(history, monkeypatch):
+    history.listed = [{**LISTED, "activityId": 51}]
+    history.extra_details["51"] = {**DETAIL, "activityId": 51}
+    history.original_error = ConnectionProblem("Fixture unavailable.")
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client)
+        history.listed = [LISTED.copy()]
+        history.original_error = None
+        history.original = zipped(make_fit())
+        # The scan also retries the held ID 51 even when it is absent from the search.
+        original_open = history.open
+        def unavailable_alias(request, timeout):
+            if request.full_url.endswith("/download-service/files/activity/51"):
+                raise ConnectionProblem("Fixture unavailable.")
+            return original_open(request, timeout)
+        with monkeypatch.context() as patch:
+            patch.setattr(history, "open", unavailable_alias)
+            await submit(client)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        history.listed = [{**LISTED, "activityId": 51}]
+        history.original_error = ConnectionProblem("Fixture unavailable.")
+        missing = await submit(client)
+        scan, = missing["scans"]
+        assert scan["saved_garmin_ids"] == ["51"] and scan["originals_requested"] == 1 and scan["missing_original_ids"] == ["51"]
+        history.original_error = None
+        history.original = zipped(make_fit(file_number=9), "alternate.fit")
+        repaired = await submit(client)
+        assert repaired["scans"][0]["originals_requested"] == 1 and not repaired["scans"][0]["missing_original_ids"]
+        sources = (await client.get("/api/activities/1")).json()["sources"]
+        assert digest(history.original) in [s["sha256"] for s in sources if s["kind"] == "original"]
+
+
+async def test_resolution_verifies_the_original_when_the_decision_is_made(history, tmp_path):
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        pending = await submit(client)
+        (tmp_path / "archive" / digest(history.original)).unlink()
+        assert (await resolve(client, pending, {"action": "keep_separate"})).json()["activity_id"] == 2
+        reopened = (await client.get(pending["report_url"])).json()
+        assert reopened["scans"][0]["originals_available"] == 0 and reopened["scans"][0]["missing_original_ids"] == ["42"]
+        assert any(i["step"] == "Original download" for i in reopened["issues"])
+        assert (await client.get("/api/activities/2")).json()["warnings"]
+        repaired = await submit(client, {})
+        assert len(repaired["scans"]) == 2 and repaired["scans"][1]["originals_requested"] == 1
+        assert not (await client.get("/api/activities/2")).json()["warnings"]
+
+
+async def test_pending_day_moves_with_an_in_range_garmin_edit(history):
+    history.listed[0].pop("startTimeGMT")
+    history.original = zipped(make_fit(start=START + 15, serial=None))
+    async with server() as client:
+        await upload(client, ("manual.fit", make_fit()))
+        broad = await submit(client, {"from": "2024-02-29", "to": "2024-03-01"})
+        history.detail["summaryDTO"]["startTimeLocal"] = "2024-03-01 00:15:38"
+        narrow = await submit(client, {"from": "2024-03-01", "to": "2024-03-01"})
+        assert narrow["state"] == "partial"
+        held = (await client.get(broad["report_url"])).json()["scans"][0]
+        assert held["checked_ranges"] == [{"from": "2024-02-29", "to": "2024-02-29"}]
+        assert (await resolve(client, broad, {"action": "keep_separate"})).json()["activity_id"] == 2
+        for report in (broad, narrow):
+            scan = (await client.get(report["report_url"])).json()["scans"][0]
+            assert scan["earliest_saved"] == scan["latest_saved"] == "2024-03-01"
+        assert (await client.get("/api/activities/2")).json()["local_date"] == "2024-03-01"

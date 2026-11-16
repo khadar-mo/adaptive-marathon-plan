@@ -370,9 +370,11 @@ class Store:
             version = db.execute("""SELECT original_sha FROM garmin_original_versions WHERE garmin_id=?
                                     ORDER BY last_import_id DESC, rowid DESC LIMIT 1""", (garmin_id,)).fetchone()
             selected = version["original_sha"] if version else None
-            rows = db.execute("""SELECT sha256, format FROM activity_sources WHERE activity_id=?
-                                 AND kind IN ('original', 'original_unavailable') AND (? IS NULL OR sha256=?)
-                                 ORDER BY (kind='original') DESC, rowid DESC""", (owner["id"], selected, selected))
+            rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s JOIN activities a ON a.id=s.activity_id
+                WHERE s.activity_id=:owner AND s.kind IN ('original', 'original_unavailable') AND
+                (s.sha256=:selected OR (:selected IS NULL AND a.garmin_id=:gid AND NOT EXISTS
+                 (SELECT 1 FROM garmin_original_versions v WHERE v.original_sha=s.sha256)))
+                ORDER BY (s.kind='original') DESC, s.rowid DESC""", {"owner": owner["id"], "selected": selected, "gid": garmin_id})
             return [tuple(row) for row in rows]
 
     def save(self, import_id, fields, sources, warning, fit=None, item=None, *,
