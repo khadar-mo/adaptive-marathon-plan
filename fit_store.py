@@ -158,7 +158,9 @@ def save(db, import_id, payload, target, acquired_at):
     if fit:
         fields = merge_fields(fields, fit["fields"])
     if previous:
-        if fields["garmin_id"] is None or (previous["garmin_id"] and previous["garmin_id"] != fields["garmin_id"]):
+        primary = db.execute("SELECT id FROM activities WHERE garmin_id=?", (fields["garmin_id"],)).fetchone()
+        if (fields["garmin_id"] is None or (primary and primary["id"] != target) or
+                (previous["garmin_id"] and previous["garmin_id"] != fields["garmin_id"])):
             # An uploaded file or explicitly linked second Garmin ID cannot erase edited Garmin headlines.
             fields = merge_fields({k: previous[k] for k in fields}, fields)
             warning = previous["original_warning"]
@@ -219,60 +221,74 @@ def apply_review(db, key, action, target, confirmed_date=None):
                    (import_id,))
 
 
+def settle_other_versions(db, key, payload, target, acquired_at):
+    """Attach a compatible earlier original without changing a separately owned recording."""
+    gid, latest = payload["fields"]["garmin_id"], payload["fit"]
+    if not gid:
+        return
+    prefix = f"garmin:{gid}"
+    others = db.execute("""SELECT f.*, MIN(i.import_id) AS import_id FROM fit_reviews f
+                JOIN fit_review_issues r ON r.review_key=f.key JOIN import_issues i ON i.id=r.issue_id
+                WHERE (f.key=? OR f.key GLOB ?) AND f.key!=? AND f.resolution IS NULL GROUP BY f.key""",
+                        (prefix, prefix + ":*", key)).fetchall()
+    for other in others:
+        earlier = json.loads(other["payload"])
+        recording = earlier["fit"]
+        if recording:
+            owners = fit_owners(db, "sha256", recording["sha256"]) or fit_owners(db, "identity", recording["identity"])
+            if owners and owners != {target}:
+                continue
+            if not owners and (not latest or not latest["fields"]["start_utc"] or
+                               latest["fields"]["start_utc"] != recording["fields"]["start_utc"] or
+                               (latest["identity"] and recording["identity"] and latest["identity"] != recording["identity"])):
+                continue
+        # This version supplies additional evidence for the accepted run. Keep
+        # its more recently accepted Garmin headlines and recorded laps.
+        earlier["fields"]["garmin_id"] = None
+        earlier["warning"] = None
+        save(db, other["import_id"], earlier, target, acquired_at)
+        apply_review(db, other["key"], "same_garmin_id", target)
+
+
 def ingest(db, import_id, payload, acquired_at):
     fit, gid = payload["fit"], payload["fields"]["garmin_id"]
     if fit:
-        # At this point the payload contains only this acquisition. Index its exact
-        # member before combining any older versions from a pending review.
         db.executemany("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
                        ((outer, fit["sha256"], fit["identity"]) for kind, outer, _ in payload["sources"] if kind == "original"))
     if payload["warning"]:
         db.execute("""INSERT INTO import_issues(import_id, severity, item, step, message)
                       VALUES (?, 'warning', ?, 'Original download', ?)""", (import_id, payload["item"], payload["warning"]))
-    key = f"garmin:{gid}" if gid else "fit:" + fit["sha256"]
-    target, candidates, hashes = identify(db, payload)
+    prefix = f"garmin:{gid}"
+    key = (f'{prefix}:{fit["sha256"]}' if fit else prefix) if gid else "fit:" + fit["sha256"]
     review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
     if not fit and gid:
-        # A summary cannot choose between versions of a previously linked original.
+        # A summary cannot displace the last unresolved original.
         outstanding = db.execute("""SELECT f.* FROM fit_reviews f JOIN fit_review_issues r ON r.review_key=f.key
                                     WHERE f.resolution IS NULL AND (f.key=? OR f.key GLOB ?)
-                                    ORDER BY r.issue_id DESC LIMIT 1""", (key, key + ":*")).fetchone()
+                                    ORDER BY r.issue_id DESC LIMIT 1""", (prefix, prefix + ":*")).fetchone()
         if outstanding:
             key, review = outstanding["key"], outstanding
-        elif review and review["resolution"] and garmin_owner(db, gid):
-            # The current alias can reflect a later, explicitly resolved original.
-            review = None
-    if review and fit:
+    if review and not review["resolution"]:
         previous = json.loads(review["payload"])
-        previous_files = recordings(db, previous)
-        previous_owners = {owner for sha in previous_files for owner in fit_owners(db, "sha256", sha)}
-        if (review["resolution"] and hashes and review["activity_id"] not in hashes) or (
-                not review["resolution"] and previous_files and fit["sha256"] not in previous_files
-                and previous_owners != hashes):
-            # Two versions that implicate different byte owners need separate decisions.
-            key += ":" + fit["sha256"]
-            review = db.execute("SELECT * FROM fit_reviews WHERE key=?", (key,)).fetchone()
-    if review and review["resolution"]:
-        target, candidates = review["activity_id"], set()
-    elif review:
-        previous = json.loads(review["payload"])
-        # Keep the latest valid Garmin headlines and all their source versions.
-        # A missing original leaves the earlier FIT and its pending choice intact.
         sources = list(dict.fromkeys(tuple(s) for s in [*previous["sources"], *payload["sources"]]))
         payload = {**payload, "sources": sources}
         if not fit:
             payload["fit"] = previous["fit"]
             if payload["fit"]:
                 payload["warning"] = None
-        target, candidates, _ = identify(db, payload)
-        if target is None or not fit:
-            candidates.update(json.loads(review["candidates"]))
+    target, candidates, hashes = identify(db, payload)
+    if review and review["resolution"] and (not hashes or hashes == {review["activity_id"]}):
+        target, candidates = review["activity_id"], set()
+    elif review and not review["resolution"] and (target is None or not fit):
+        candidates.update(json.loads(review["candidates"]))
     if candidates:
         remember_issue(db, import_id, key, "match", payload["item"], payload, candidates)
         return None
     target = save(db, import_id, payload, target, acquired_at)
     if review and not review["resolution"]:
         apply_review(db, key, "exact_match", target)
+    if fit and gid:
+        settle_other_versions(db, key, payload, target, acquired_at)
     return target
 
 
@@ -333,11 +349,23 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
             # An earlier alias can point at a separate, already identified Garmin run.
             # Only a primary row for this incoming ID is a row to consolidate.
             primary = db.execute("SELECT id FROM activities WHERE garmin_id=?", (payload["fields"]["garmin_id"],)).fetchone()
-            owners = hashes | ({primary[0]} if primary else set())
+            owners = set(hashes)
             if primary and not hashes and payload["fit"]:
                 tuples = fit_owners(db, "identity", payload["fit"]["identity"])
                 if len(tuples) == 1:
                     owners |= tuples
+            if primary:
+                already_recorded = db.execute("""SELECT 1 FROM fit_sources WHERE activity_id=? UNION ALL
+                    SELECT 1 FROM activity_sources s JOIN original_members m ON m.original_sha=s.sha256
+                    WHERE s.activity_id=? AND s.kind='original' AND m.fit_sha IS NOT NULL LIMIT 1""",
+                                              (primary[0], primary[0])).fetchone()
+                if owners and primary[0] not in owners and already_recorded:
+                    # Two established recordings can stay separate. A decision about
+                    # this version must not move another recording onto the selected run.
+                    if activity_id not in owners:
+                        raise ResolutionError("Link this original to the activity that owns its recorded FIT.")
+                else:
+                    owners.add(primary[0])
             if activity_id not in choices or (hashes and activity_id not in owners):
                 raise ResolutionError("Choose a listed activity that can own these FIT bytes.")
             if not owners.issubset(choices) or (exact is not None and exact != activity_id):
@@ -363,4 +391,6 @@ def resolve(db, import_id, issue_id, action, activity_id, local_date, acquired_a
         if gid and not db.execute("SELECT 1 FROM activities WHERE garmin_id=?", (gid,)).fetchone():
             db.execute("INSERT OR REPLACE INTO garmin_aliases VALUES (?, ?)", (gid, target))
     apply_review(db, row["key"], action, target, local_date)
+    if row["kind"] == "match":
+        settle_other_versions(db, row["key"], payload, target, acquired_at)
     return target

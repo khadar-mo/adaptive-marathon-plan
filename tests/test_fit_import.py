@@ -424,3 +424,47 @@ async def test_unresolved_versions_with_different_known_owners_need_independent_
         for target, data in ((1, x), (2, y)):
             assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == target
         assert (await client.get("/api/activities/3")).status_code == 404
+
+
+async def test_pending_reencodings_with_distinct_tuple_owners_never_share_a_decision(history):
+    originals = [make_fit(serial=n) for n in (421, 521)]
+    reencoded = [make_fit(serial=n, file_number=11) for n in (421, 521)]
+    async with server() as client:
+        for gid, data in zip((42, 52), originals):
+            history.listed = [{**LISTED, "activityId": gid}]
+            history.extra_details[str(gid)] = {**DETAIL, "activityId": gid}
+            history.original = zipped(data)
+            await submit(client)
+        history.listed = [{**LISTED, "activityId": 51}]
+        history.extra_details["51"] = {**DETAIL, "activityId": 51}
+        history.original = zipped(reencoded[0])
+        a = await submit(client)
+        history.original = zipped(reencoded[1])
+        b = await submit(client)
+        assert (await resolve(client, b, {"action": "link", "activity_id": 2})).status_code == 200
+        assert (await client.get(a["report_url"])).json()["issues"][0]["resolution"] is None
+        assert (await resolve(client, a, {"action": "link", "activity_id": 1})).status_code == 200
+        for target, data in enumerate(reencoded, 1):
+            assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == target
+
+
+async def test_resolving_changed_originals_honours_choices_made_while_they_were_pending(history):
+    files = [make_fit(start=START + 20, serial=None, file_number=i) for i in (11, 12)]
+    async with server() as client:
+        await upload(client, ("seed.fit", make_fit()))
+        reports = []
+        for data in files:
+            history.original = zipped(data)
+            reports.append(await submit(client))
+        for target, data in enumerate(files, 2):
+            pending = await upload(client, ("manual.fit", data))
+            assert (await resolve(client, pending, {"action": "keep_separate"})).json()["activity_id"] == target
+        first, second = reports
+        assert (await resolve(client, first, {"action": "link", "activity_id": 2})).status_code == 200
+        assert (await client.get(second["report_url"])).json()["issues"][0]["resolution"] is None
+        assert (await resolve(client, second, {"action": "link", "activity_id": 3})).status_code == 200
+        assert (await submit(client))["activities"][0]["id"] == 3
+        for target, data in enumerate(files, 2):
+            assert (await client.get(f"/api/activities/{target}")).json()["id"] == target
+            assert (await upload(client, ("renamed.fit", data)))["activities"][0]["id"] == target
+        assert (await client.get("/api/activities/4")).status_code == 404

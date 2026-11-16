@@ -276,6 +276,12 @@ class Store:
 
     def originals(self, garmin_id):
         with self.connect() as db:
+            # Separately resolved versions of one Garmin ID can belong to different
+            # local runs. Fetch the current bytes when the cached owner is ambiguous.
+            owners = db.execute("""SELECT DISTINCT activity_id FROM fit_reviews WHERE key GLOB ?
+                                   AND resolution IS NOT NULL LIMIT 2""", (f"garmin:{garmin_id}:*",)).fetchall()
+            if len(owners) > 1:
+                return []
             rows = db.execute("""SELECT s.sha256, s.format FROM activity_sources s
                                  JOIN activities a ON a.id=s.activity_id
                                  WHERE a.garmin_id=? AND s.kind='original' ORDER BY s.rowid DESC""", (garmin_id,))
