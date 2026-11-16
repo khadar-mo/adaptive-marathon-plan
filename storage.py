@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 
+import activity_sensors
 import fit_store
 import garmin_coverage
 
@@ -488,8 +489,9 @@ class Store:
             activity_id = row["id"]
             activity = dict(row)
             warning = activity.pop("original_warning")
-            sources = db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
-                                    WHERE activity_id=? ORDER BY rowid""", (activity_id,))
+            sources = [dict(s) for s in db.execute("""SELECT kind, sha256, format, acquired_at FROM activity_sources
+                                    WHERE activity_id=? ORDER BY rowid""", (activity_id,))]
+            sensors, origins = activity_sensors.read(db, self.archive, activity, sources)
             laps = db.execute("""SELECT sequence, 'fit' AS source, distance_m, timer_seconds, elapsed_seconds, moving_seconds
                                  FROM laps WHERE activity_id=? ORDER BY sequence""", (activity_id,))
             laps = [dict(lap) for lap in laps]
@@ -498,7 +500,7 @@ class Store:
                 if abs(sum(lap["distance_m"] for lap in laps) - row["distance_m"]) > 1:
                     warnings.append("Recorded lap distances differ from the Garmin activity distance.")
             fits = db.execute("SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity_id,))
-            return {**activity, "laps": laps, "fit_sha256": [f[0] for f in fits],
+            return {**activity, **sensors, "laps": laps, "fit_sha256": [f[0] for f in fits],
                     "garmin_url": "https://connect.garmin.com/modern/activity/" + row["garmin_id"] if row["garmin_id"] else None,
-                    "metric_sources": json.loads(row["metric_sources"]), "sources": [dict(s) for s in sources],
+                    "metric_sources": {**json.loads(row["metric_sources"]), **origins}, "sources": sources,
                     "warnings": warnings}

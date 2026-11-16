@@ -138,19 +138,25 @@ def item_range(item):
     return bounds(item["first"], item["last"])
 
 
-def plan(db, first, last):
-    if first is not None:
-        return [("range", first, last)]
+def coverage_ranges(db):
+    """Replay scan evidence in order. A recheck supersedes the dates it observed."""
     verified, pending = [], []
     scans = db.execute("""SELECT s.*, i.state, i.started_at FROM garmin_scans s JOIN imports i ON s.import_id=i.id
                           ORDER BY s.id""")
     for scan in scans:
-        window = observed_window(scan)
         if scan["mode"] == "legacy" and scan["state"] == "complete":
             continue
+        window = observed_window(scan)
         checked = checked_ranges(db, scan)
         verified = merged(difference(verified, window) + checked)
         pending = merged(difference(pending, window) + difference(window, checked))
+    return verified, pending
+
+
+def plan(db, first, last):
+    if first is not None:
+        return [("range", first, last)]
+    verified, pending = coverage_ranges(db)
 
     end = today().toordinal()
     start = BACKFILL

@@ -18,6 +18,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fit_import import index_originals, run_fit_import, stage_uploads
 from fit_store import ResolutionError
 from garmin_import import run_import
+import garmin_coverage
+import history
 from storage import ActiveImport, Archive, Store
 import views
 
@@ -184,12 +186,56 @@ def activity(activity_id: str):
     row = app.state.store.activity(activity_id)
     if row is None:
         raise HTTPException(404, "Activity not found.")
-    return row
+    return {**row, **history.measurements(row),
+            "laps": [{**lap, **history.measurements(lap)} for lap in row["laps"]]}
+
+
+def history_dates(request):
+    query = request.query_params
+    if len(query.multi_items()) != len(query):
+        raise ValueError("Supply each history parameter once.")
+    if "from" in query or "to" in query:
+        try:
+            dates = DateRange.model_validate(dict(query))
+        except ValueError:
+            raise ValueError("Enter From and To as YYYY-MM-DD, with From on or before To.") from None
+        return dates.first, dates.last
+    unit = query.get("period", "month")
+    if set(query) - {"period", "date"} or unit not in ("week", "month"):
+        raise ValueError("Choose a week or month and a calendar date.")
+    anchor = garmin_coverage.today()
+    if "date" in query:
+        try:
+            anchor = date.fromisoformat(query["date"])
+            if anchor.isoformat() != query["date"]:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Enter a calendar date as YYYY-MM-DD.") from None
+    first, last = history.calendar_period(anchor, unit)
+    return first.isoformat(), last.isoformat()
+
+
+@app.get("/api/history")
+def history_json(request: Request):
+    try:
+        first, last = history_dates(request)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return history.read(app.state.store, first, last)
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page(request: Request):
+    try:
+        first, last = history_dates(request)
+    except ValueError as exc:
+        return HTMLResponse(views.history_error(str(exc)), status_code=422)
+    return views.history_page(history.read(app.state.store, first, last))
 
 
 @app.get("/", include_in_schema=False)
 def home():
-    return RedirectResponse("/imports")
+    return RedirectResponse("/history")
 
 
 @app.get("/imports", response_class=HTMLResponse)

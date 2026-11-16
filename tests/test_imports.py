@@ -174,9 +174,11 @@ async def test_saved_bytes_identity_detail_and_cold_offline_reads(history, tmp_p
             assert (await client.get(detail_path)).json() == detail
             html = (await client.get(f"/activities/{local_id}")).text
             assert all(value in html for value in ("Track &lt;fixture&gt;", detail["garmin_url"], detail_path))
-            assert dict(re.findall(r"<dt>(.*?)</dt>\s*<dd>(.*?)</dd>", html)) == {
+            assert dict(re.findall(r"<dt>(.*?)</dt>\s*<dd><span>(.*?)</span>", html)) == {
                 "Recorded local start": detail["start_local"], "Distance": "5.00 km",
                 "Watch timer": "25:00", "Elapsed time": "30:01", "Moving time": "24:35",
+                "Timer pace": "5:00/km", "Moving pace": "4:55/km",
+                "Average heart rate": "Not available", "GPS": "Not available",
             }
         assert history.calls == calls
 
@@ -246,7 +248,9 @@ async def test_optional_measurements_do_not_inherit_other_durations(history):
         activity = (await client.get(f"/api/activities/{local_id}")).json()
         assert activity["timer_seconds"] is None and activity["moving_seconds"] is None
         assert activity["distance_m"] == 4900 and activity["elapsed_seconds"] == 1801.1
-        assert (await client.get(f"/activities/{local_id}")).text.count("Not available") == 2
+        html = (await client.get(f"/activities/{local_id}")).text
+        for label in ("Watch timer", "Moving time", "Timer pace", "Moving pace"):
+            assert f"<dt>{label}</dt><dd><span>Not available</span>" in html
 
 
 async def test_concurrent_submission_returns_the_active_report(history):
@@ -432,7 +436,7 @@ async def test_page_reorder_preserves_activity_outcomes_and_recorded_precision(h
         detail = (await client.get(f"/api/activities/{local_id}")).json()
         assert detail["start_local"] == "2024-02-29 12:11"
         assert [s["kind"] for s in detail["sources"]].count("list") == 2
-        assert "<dd>2024-02-29 12:11</dd>" in (await client.get(f"/activities/{local_id}")).text
+        assert "<dt>Recorded local start</dt><dd><span>2024-02-29 12:11</span>" in (await client.get(f"/activities/{local_id}")).text
 
 
 async def test_final_report_waits_for_temporary_sqlite_lock(history, tmp_path, monkeypatch):
