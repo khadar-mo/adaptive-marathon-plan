@@ -40,7 +40,7 @@ def test_effort_verification_review_context_and_mobile_keyboard(tmp_path):
             page.get_by_label('Review note', exact=True).fill('Checked both raw endpoint brackets and elapsed subtraction.')
             page.get_by_role('button', name='Accept', exact=True).press('Enter')
             expect(page.get_by_text('Reviewer verdict:', exact=False)).to_contain_text('accept')
-            page.get_by_label('Effort category', exact=True).select_option('RACE')
+            page.get_by_role('combobox', name='Effort category', exact=True).select_option('RACE')
             page.get_by_label('Recorded by', exact=True).fill('Synthetic athlete')
             page.get_by_label('Context note', exact=True).fill('Synthetic race label; maximality not confirmed.')
             page.get_by_role('button', name='Save effort context').press('Enter')

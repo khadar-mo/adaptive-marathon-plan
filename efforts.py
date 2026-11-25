@@ -113,8 +113,8 @@ def identify(candidate, version, sha):
         flag.setdefault("raw_references", [{"sha256": sha, "message_group": "record_mesgs", "index": i}
                                             for i in flag.get("sample_indices", ())])
     candidate["id"] = canonical.fingerprint({"version": version, "sha256": sha,
-        "candidate": {k: candidate[k] for k in ("distance_m", "start_distance_m", "end_distance_m", "start_utc", "end_utc",
-                     "elapsed_seconds", "block_index", "kind", "attainment")}})
+        "interval": effort_math.interval_key(candidate), "block_index": candidate["block_index"],
+        "attainment": candidate["attainment"]})
     return candidate
 
 
@@ -419,12 +419,16 @@ def bests(store, cutoff=None, days=None):
                 canonical_payload = json.loads(db.execute("SELECT payload FROM canonical_activity_versions WHERE id=?", (result["canonical_version_id"],)).fetchone()[0])
                 selected_result = effort_math.extract(data["trace"], qc, result["qc_config"], result["config"]["distances_m"],
                     whole_tolerance=result["config"]["whole_activity_tolerance_m"], global_flags=global_flags(canonical_payload, source, data["trace"]), rejected=rejections)
-                for r in selected_result["distances"]:
-                    if r["state"] == "REVIEW_REJECTION_LIMIT":
-                        diagnostic = {"activity_id": aid, "distance_m": r["distance_m"], "reason": "REJECTED_OPTIMUM_NOT_REPLACED",
-                                      "limit": r["unattained_limit"], "attained_candidate": r["attained_candidate"]}
-                        report["excluded"].append(diagnostic)
-                        pools[r["distance_m"]]["limits"].append(diagnostic)
+            activity_limits = {}
+            for r in selected_result["distances"]:
+                if r.get("unattained_limit"):
+                    diagnostic = {"activity_id": aid, "distance_m": r["distance_m"], "state": r["state"],
+                                  "version_id": result["version_id"], "source_sha256": source["fit_sha256"],
+                                  "reason": "REJECTED_OPTIMUM_NOT_REPLACED" if r["state"] == "REVIEW_REJECTION_LIMIT" else "QC_INFIMUM_NOT_ATTAINED",
+                                  "limit": r["unattained_limit"], "attained_candidate": r["attained_candidate"]}
+                    activity_limits[r["distance_m"]] = diagnostic
+                    report["excluded"].append(diagnostic)
+                    pools[r["distance_m"]]["limits"].append(diagnostic)
 
             def contribute(rows, window=None):
                 for r in rows:
@@ -448,6 +452,9 @@ def bests(store, cutoff=None, days=None):
                         elif field == "best" and effort_math.stamp(c["end_utc"]) >= cutoff_dt - timedelta(days=window):
                             pool["recent"][window].append(entry)
             contribute(selected_result["distances"])
+            for r in selected_result["distances"]:
+                if r.get("attained_candidate"):
+                    contribute([{"distance_m": r["distance_m"], "best": r["attained_candidate"]}])
             for window in windows:
                 lower = cutoff_dt - timedelta(days=window)
                 if end < lower:
@@ -455,9 +462,10 @@ def bests(store, cutoff=None, days=None):
                 start = source["header"].get("start_utc")
                 if start and effort_math.stamp(start) >= lower:
                     contribute(selected_result["distances"], window)
-                    for r in selected_result["distances"]:
-                        if r["state"] == "REVIEW_REJECTION_LIMIT":
-                            pools[r["distance_m"]]["recent_limits"][window].extend(pools[r["distance_m"]]["limits"][-1:])
+                    for target, diagnostic in activity_limits.items():
+                        pools[target]["recent_limits"][window].append(diagnostic)
+                        if diagnostic["attained_candidate"]:
+                            contribute([{"distance_m": target, "best": diagnostic["attained_candidate"]}], window)
                 else:
                     if result["code_sha256"] != CODE_SHA256:
                         report["excluded"].append({"activity_id": aid, "window_days": window, "reason": "BOUNDARY_REBUILD_REQUIRED",
@@ -483,6 +491,9 @@ def bests(store, cutoff=None, days=None):
     for distance, pool in sorted(pools.items()):
         best = choose(pool["all_time"])
         blocking_all = [d for d in pool["limits"] if best is None or round(d["limit"]["elapsed_seconds"], 9) < round(best["elapsed_seconds"], 9)]
+        internal = choose(pool["internal"])
+        blocking_internal = [d for d in pool["limits"] if internal is None or
+                             round(d["limit"]["elapsed_seconds"], 9) < round(internal["elapsed_seconds"], 9)]
         recent = []
         for window, values in sorted(pool["recent"].items()):
             winner = choose(values)
@@ -492,9 +503,12 @@ def bests(store, cutoff=None, days=None):
             recent.append({"days": window, "state": "REVIEW_RECENCY_LIMIT" if blocking else "VALID" if winner else "MISSING_RECENT",
                            "best": None if blocking else winner, "attained_candidate": winner if blocking else None,
                            "unattained_limits": diagnostics, "lower_inclusive_utc": (cutoff_dt - timedelta(days=window)).isoformat()})
-        report["distances"].append({"distance_m": distance, "state": "REVIEW_REJECTION_LIMIT" if blocking_all else "VALID" if best else "NOT_CALCULABLE", "all_time": None if blocking_all else best,
+        limit_state = "REVIEW_ELIGIBILITY_LIMIT" if any(d["state"] == "REVIEW_ELIGIBILITY_LIMIT" for d in blocking_all) else "REVIEW_REJECTION_LIMIT"
+        report["distances"].append({"distance_m": distance, "state": limit_state if blocking_all else "VALID" if best else "NOT_CALCULABLE", "all_time": None if blocking_all else best,
             "attained_candidate": best if blocking_all else None, "unattained_limits": pool["limits"],
-            "best_whole_activity": choose(pool["whole"]), "best_internal_segment": choose(pool["internal"]),
+            "best_whole_activity": choose(pool["whole"]), "best_internal_segment": None if blocking_internal else internal,
+            "internal_attained_candidate": internal if blocking_internal else None,
+            "internal_unattained_limits": blocking_internal,
             "flagged_candidate": choose(pool["flagged"]), "recent": recent})
     report["selection_id"] = canonical.fingerprint(report)
     return report

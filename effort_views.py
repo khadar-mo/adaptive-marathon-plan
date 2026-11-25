@@ -76,13 +76,13 @@ def bests(row):
     content += 'The 112-day default and 56/84/168-day comparisons are provisional. All-time PBs are retained when recent evidence is missing.</p>'
     content += '<p>This is an event-time reconstruction using current selected source versions, not a frozen prospective prediction.</p>'
     content += table("Observed best efforts", ("Distance (m)", "All time", "Whole activity", "Internal segment", "Recent windows", "Flagged evidence"), (
-        (show(r["distance_m"]), inspect_form(r["all_time"]), inspect_form(r["best_whole_activity"]), inspect_form(r["best_internal_segment"]),
+        (show(r["distance_m"]), f'<p>{show(r["state"])}</p>' + inspect_form(r["all_time"]), inspect_form(r["best_whole_activity"]), inspect_form(r["best_internal_segment"]),
          ''.join(f'<p>{recent["days"]} days · {show(recent["state"])}</p>' + inspect_form(recent["best"]) for recent in r["recent"]),
          inspect_form(r["flagged_candidate"])) for r in row["distances"]))
     if not row["distances"]:
         content += '<p>No extracted evidence. Import an original FIT or run explicit offline recompute for saved history.</p>'
     content += '<form data-json method="post" action="/api/efforts/recompute"><button>Recompute saved history offline</button></form>'
-    content += details(row["excluded"], "Excluded activities and unresolved recent limits")
+    content += details(row["excluded"], "Excluded activities and unresolved selection limits")
     content += details({k: row[k] for k in ("selection_id", "inputs", "time_basis", "eligibility") if k in row}, "Selection provenance")
     content += '<p><a href="' + escape('/api/efforts?' + urlencode({"cutoff": row["cutoff_utc"], "days": row["requested_recent_days"]})) + '">Best efforts JSON</a></p>'
     return views.page("Best continuous efforts", content + '<p id="effort-status" role="status"></p>' + SCRIPT)
@@ -126,6 +126,9 @@ def inspection(row):
     content += f'<p>{show(c["start_utc"])} → {show(c["end_utc"])} UTC. Cumulative distance: {show(c["start_distance_m"])} → {show(c["end_distance_m"])} m.</p>'
     content += f'<p>Kind: {show(c["kind"])}. Provenance: {show(c["provenance"]["category"])}. Confirmed maximal: {"Explicit user attestation; protocol below" if c["provenance"]["verified_maximal"] else "NO"}. Timer coverage: {show(c["timer_event_coverage"])}.</p>'
     content += '<p>Extracted elapsed is end crossing minus start crossing. The separately reported device-header elapsed below is not substituted for sample precision.</p>'
+    if c.get("selection", {}).get("basis") == "FLAT_OPEN_CELL_MIDPOINT":
+        content += '<p>This interval is the deterministic midpoint of an open range with constant elapsed time. It attains that elapsed time; the eligible open range has no earliest start.</p>'
+        content += details(c["selection"], "Attained representative selection")
     content += table("Exact endpoint brackets", ("Endpoint", "Raw indices", "Timestamp and distance pairs", "Fraction", "Crossing UTC", "Bracket gap"), (
         (label, show(c[endpoint]["sample_indices"]), '<br>'.join(show(s["timestamp_utc"]) + ' · ' + show(s["distance_m"]) + ' m' for s in c[endpoint]["samples"]),
          show(c[endpoint]["fraction"]), show(c[endpoint]["timestamp_utc"]), show(c[endpoint]["bracket_gap_s"])) for label, endpoint in (("Start / last departure", "start"), ("End / first arrival", "end"))))

@@ -21,8 +21,8 @@ Explicit offline recompute backfills saved sources. GET requests do not write.
 ## 3. Delivered behavior
 
 `effort_math.py` searches each G1 running block with first arrival A and last
-departure L. It tests observed distances, shifted endpoints, domain bounds and
-one-sided limits. Confirmed interruptions are never bridged, including when GPS
+departure L. It tests observed distances, shifted endpoints, domain bounds,
+one-sided limits and deterministic representatives of flat open cells. Confirmed interruptions are never bridged, including when GPS
 distance rises. Interior elapsed stationarity/jogging remains in the result.
 Source-wide flags and candidate-local interior/bracket checks stay separate.
 
@@ -44,11 +44,24 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
   greater than max(100 m, 1% of the device-header total), four original records
   overlapping/bounding a candidate. Missing event coverage alone is informational;
   partial history and unresolved applicable anomalies withhold VALID.
-- Binary64 relative elapsed seconds avoid subtracting large epoch timestamps.
-  Source values remain unchanged. Crossings within four ulps of an observed value
-  retain both requested/evaluated distance; elapsed ranking rounds to nine decimal
-  places and UTC rendering to microseconds. Ties use elapsed, activity ID, start,
-  then deterministic candidate identity. Limits are identified as non-attained.
+  A record without a usable timestamp retains its raw index and QC flag. Its
+  uncertain support applies when the original interval/brackets span that index;
+  intervals entirely before or after it stay independently eligible. No clock is invented.
+- Distance coordinates are exact rationals of the persisted decimal SI values.
+  Observed `10.02` and shifted `5010.02−5000` therefore have one identity, retaining
+  the original plateau sides; no arbitrary epsilon snap is used. The original
+  source values remain unchanged. Binary64 relative elapsed seconds avoid large
+  epoch subtraction; elapsed ranking rounds to nine decimal places, UTC to microseconds.
+  Ties use elapsed, activity ID, absolute UTC start (across timer blocks), then
+  deterministic candidate identity. Limits are identified as non-attained.
+- On a flat open cell, QC can admit four original records while both endpoint
+  candidates have only three. The exact coordinate midpoint is an attained
+  representative of that constant elapsed optimum. Selection records its open
+  domain and distinguishes elapsed attainment from the absence of an earliest
+  eligible start. Start tie-breaks compare the finite enumerated representatives;
+  they do not invent a first point of an open domain. A nonflat QC domain whose
+  infimum is faster than every attained candidate returns `REVIEW_ELIGIBILITY_LIMIT`,
+  including across activities. An attained tie may win normally.
 - Segment-end recency uses inclusive `[T−W,T]`; complete recorded activity end and
   every source sample must be at or before T. Missing recorded end excludes as-of
   authority. Comparisons include provisional 56/84/112/168-day windows. All activities
@@ -60,7 +73,10 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
   evidence remains separate. No epsilon endpoint or delayed achievement is invented.
 - Rejected exact intervals are excluded during read-only selection. A tied attained
   alternative may replace them. An unattained post-rejection optimum remains a review
-  diagnostic. Stored computed QC and extraction payloads never change.
+  diagnostic. Identity/rejection uses the reported target, UTC interval and kind,
+  scoped by source/version (candidate IDs also include block and attainment).
+  Sub-microsecond coordinate variations cannot acquire a new reviewer identity
+  for the same reported interval. Stored computed QC and extraction payloads never change.
 - Boundary/review re-evaluation requires the same code checksum as the stored
   extraction. Otherwise a rebuild-required reason is exposed. Historical saved
   candidates remain inspectable; explicit recompute creates new code lineage.
@@ -77,8 +93,9 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
 | Same verification URL + `/review` POST | `action` accept/reject/annotate, `actor`, `note`; append-only previous-review linkage. |
 | Same verification URL + `/context` POST | `category`, tags, actor, note, optional protocol and explicit `maximal_confirmed`; append-only context ID and previous-context linkage. |
 
-Effort identity hashes extraction version, source checksum and exact geometry/timing
-including attainment convention. Annotation does not change identity. Context
+Effort identity hashes extraction version, source checksum and the reported interval
+including block and attainment convention. Exact rational crossing coordinates and
+original endpoint samples remain separate audit evidence. Annotation does not change identity. Context
 records are the G2 effort-level provenance authority for later #30 consumption;
 they do not implement activity/workout classification. Categories are VERIFIED_TEST,
 RACE, TRAINING_FAST, FATIGUED_BLOCK and EASY_OR_UNKNOWN. Computed provenance,
@@ -104,8 +121,10 @@ malformed-order and complete-trace tests in `tests/test_efforts.py`.
 **AC-2:** Use the exact versioned QC defaults, endpoint-bracket limit, minimum original-sample resolution and quality states from G1. Confirmed breaks cannot be crossed. Candidate-interior unresolved gaps/plateaus/jumps withhold VALID. Missing events alone are informational for an otherwise dense clean trace. Return the best VALID result using stable tie-break (elapsed, activity ID, start); if none, expose a flagged candidate or NOT_CALCULABLE, never publish a suspect candidate as a PB.
 
 Pass: endpoint 15/16-second and three/four-record boundaries; local QC versus an
-unrelated later gap; partial timer history; T19/T20/T23; rejected tied-interval
-replacement; no-authoritative sparse/malformed/summary-only evidence.
+unrelated later gap or missing timestamp; partial timer history; T19/T20/T23;
+absolute start ties across timer blocks; rejected decimal-plateau identity;
+attained flat-cell representative and non-attained QC infimum;
+no-authoritative sparse/malformed/summary-only evidence.
 
 **AC-3:** Configured target distances: 400/800/1000/1500/1609.344/3000/5000/10000/15000/21097.5/30000/42195 metres. Keep target precision. Store best whole-activity and internal-segment evidence, all-time and recent scopes separately; recent default112days and 56/84/168 comparisons are provisional. As-of filtering uses effort end [T−W,T] and never includes future input. No recent winner ⇒ MISSING_RECENT, old PB remains. Store effort provenance (VERIFIED_TEST/RACE/TRAINING_FAST/FATIGUED_BLOCK/EASY_OR_UNKNOWN), source/context/correction separately; no inferred maximality.
 
@@ -135,9 +154,11 @@ remains UNVERIFIED.
 
 ## 7. Commands and observed checks
 
-From `tests/`, use `PYTHONPATH=.. ../.venv/bin/python -m pytest --rootdir=. -q` so
-pytest does not traverse the private ordinary-checkout `.env`. Development dependencies
-are isolated in this worktree's `.venv`; only synthetic temporary stores are used.
+From the isolated worktree root, use `PYTHONPATH=. .venv/bin/python -m pytest tests -q`.
+The worktree has no private `.env`; the ordinary checkout is not used for tests.
+Development dependencies are isolated in this worktree's `.venv`; only synthetic
+temporary stores are used. CLI subprocess tests anchor their script path to the
+repository, independent of pytest's working directory.
 
 - G2 targeted suite: **24 passed** before final broad verification.
 - Final broad local pass: **311 passed, five browser tests skipped** because native
@@ -146,6 +167,13 @@ are isolated in this worktree's `.venv`; only synthetic temporary stores are use
 - Removing the import extraction hook made the public T01/T05/T22/T23 test fail.
   Replacing last departure with first arrival made the normative plateau test fail.
   Source was restored after each mutation.
+- The independent review's four math/QC defects each have new public regressions.
+  All four failed on the reviewed implementation before the fixes. An additional
+  nonflat open-QC test failed before adding the explicit limiting state; a global
+  regression failed before propagating that limit across slower activities.
+  The decimal-plateau regression rejects the actual saved optimum and verifies it
+  cannot return under another ID. The browser replay uses the real combobox's
+  accessible role/name, retaining the saved context and Accept form assertions.
 - Real HTTP multipart upload into a separate loopback demo store completed. Its
   winning 5K is exactly 1,440 seconds, 09:15–09:39 UTC on 10 January 2026, original
   records 180–468, cumulative 3000→8000 m. A separate full 5K is 1,500 seconds.

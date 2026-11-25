@@ -162,6 +162,14 @@ boundary creates an unattained limiting optimum, the response reports
 shifted to make it recent. These are event-time reconstructions using currently
 selected source versions, not frozen knowledge-time predictions or present capability.
 
+Flat ranges can have eligible interior intervals even when their endpoints lack
+four original records. The extractor uses a documented midpoint representative
+and does not claim an earliest start in an open range. An unattained QC infimum
+reports `REVIEW_ELIGIBILITY_LIMIT`; an unresolved rejected optimum reports
+`REVIEW_REJECTION_LIMIT`. These diagnostics also prevent a slower activity from
+being presented as the exact global best. Original records with missing timestamps
+retain their QC flags wherever an interval's raw support spans them.
+
 For existing archives, explicitly backfill offline:
 
 ```sh

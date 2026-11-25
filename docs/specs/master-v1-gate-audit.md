@@ -87,7 +87,10 @@ raw endpoint verification and auditable review/context entry. See the
 [ten-item G2 report](g2-acceptance.md) for normative tests, independent arithmetic,
 real HTTP/browser evidence and final review/CI requirements. Whole-activity evidence
 uses original samples, never silently substituted summary elapsed. Non-attained
-recency optima remain explicit review states with separate attained evidence.
+recency, rejection and open-QC optima remain explicit review states with separate
+attained evidence. Review regressions cover untimed original-record support,
+decimal plateau identity after rejection, absolute-start ties across timer blocks,
+and attained representatives in flat open cells without an earliest-start claim.
 
 **Human/scientific validation for G0/G1/G2 remains UNVERIFIED.** Software merge is
 not a claim that those validation gates passed. G3 workload, G4 candidate estimators

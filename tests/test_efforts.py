@@ -1,6 +1,7 @@
 """G2 tests: independently derived arithmetic and public import/inspection/review paths."""
 from datetime import timedelta
 from fractions import Fraction
+from pathlib import Path
 import json
 import random
 import subprocess
@@ -438,7 +439,8 @@ async def test_invalid_inputs_ownership_summary_only_and_offline_cli(history, tm
         assert (await client.post('/api/efforts/recompute', json={}, headers={"Origin": "https://elsewhere.invalid"})).status_code == 403
         ties = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
         assert next(r for r in ties["distances"] if r["distance_m"] == 400)["all_time"]["activity_id"] == 1
-    output = subprocess.run([sys.executable, '../efforts.py', '--database', str(tmp_path / 'runs.sqlite3'), '--archive', str(tmp_path / 'archive')], capture_output=True, text=True)
+    script = Path(__file__).resolve().parents[1] / 'efforts.py'
+    output = subprocess.run([sys.executable, str(script), '--database', str(tmp_path / 'runs.sqlite3'), '--archive', str(tmp_path / 'archive')], capture_output=True, text=True)
     assert output.returncode == 0, output.stderr
     assert len(json.loads(output.stdout)["activities"]) == 2
 
@@ -450,8 +452,144 @@ async def test_rejected_tied_interval_selects_next_attained_valid_interval(histo
         row = (await client.get('/api/activities/1/efforts')).json()
         c = distance(row, 400)["best"]
         assert c["start_distance_m"] == 0 and c["elapsed_seconds"] == 100
+        # An explicitly entered sub-microsecond difference is the same reported
+        # interval, so it must not acquire an independent reviewer identity.
+        same = (await client.post('/api/activities/1/efforts/inspect', json={
+            "version": row["version_id"], "source": row["selected_fit_sha256"],
+            "start_distance_m": 1e-10, "distance_m": 400})).json()["candidate"]
+        assert same["start_utc"] == c["start_utc"] and same["end_utc"] == c["end_utc"]
+        assert same["id"] == c["id"]
         await client.post(f'/api/activities/1/efforts/{row["version_id"]}/{c["id"]}/review', json={"action": "reject", "actor": "Synthetic reviewer", "note": "Reject the first interval only"})
         report = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
         replacement = next(r for r in report["distances"] if r["distance_m"] == 400)["all_time"]
-        assert replacement["elapsed_seconds"] == 100 and replacement["start_distance_m"] == 4
+        assert replacement["elapsed_seconds"] == 100 and replacement["start_distance_m"] == 2
+        assert replacement["selection"]["basis"] == 'FLAT_OPEN_CELL_MIDPOINT'
+        assert replacement["selection"]["earliest_start_attained"] is False
         assert replacement["id"] != c["id"]
+
+
+@pytest.mark.anyio
+async def test_missing_timestamp_uses_raw_support_without_poisoning_unaffected_intervals(history):
+    async with server() as client:
+        points = [(None if i == 10 else i * 5, i * 20) for i in range(21)]
+        await upload(client, ('missing-time.fit', trace_fit(points)))
+        row = (await client.get('/api/activities/1/efforts')).json()
+        c = distance(row, 400)
+        assert row["inspected_source"]["qc"]["state"] == "SUSPECT"
+        assert c["best"] is None
+        flag = next(f for f in c["flagged_candidate"]["flags"] if f["code"] == 'missing_sample_timestamp')
+        assert flag["sample_indices"] == [10] and flag["sample_times_utc"] == [None]
+        global_row = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
+        assert next(r for r in global_row["distances"] if r["distance_m"] == 400)["all_time"] is None
+
+        points = [(None if i == 30 else i * 5, i * 20) for i in range(61)]
+        await upload(client, ('local-missing-time.fit', trace_fit(points, start=START + 86400)))
+        row = (await client.get('/api/activities/2/efforts')).json()
+        for start, state in ((100, 'VALID'), (700, 'VALID'), (400, 'SUSPECT')):
+            selected = await client.post('/api/activities/2/efforts/inspect', json={
+                "version": row["version_id"], "source": row["selected_fit_sha256"],
+                "start_distance_m": start, "distance_m": 400})
+            assert selected.status_code == 200
+            c = selected.json()["candidate"]
+            assert c["computed_quality_state"] == state
+            assert any(f["code"] == 'missing_sample_timestamp' for f in c["flags"]) == (state == 'SUSPECT')
+            inspected = (await client.get(selected.json()["html_url"].replace('/activities', '/api/activities'))).json()
+            if state == 'SUSPECT':
+                assert any(s["record_index"] == 30 and s["timestamp_utc"] is None for s in inspected["samples"]["rows"])
+
+
+@pytest.mark.anyio
+async def test_shifted_decimal_plateau_keeps_sides_and_cannot_evade_rejection(history):
+    points = dense([(0, 0), (5, 10.02), (10, 10.02), (1510, 5010.02), (1515, 5010.02), (1520, 5020.04)])
+    # Independent decimal-rational geometry: left arrival is 5, departure is 10;
+    # the exact interval is 1500 seconds, either one-sided limit is 1505.
+    trace = inspect(trace_fit(points), 0, 2**31 - 1)
+    block = effort_math.prepare(trace, assess(trace, 'a' * 64, DEFAULT_CONFIG), DEFAULT_CONFIG)[0][0]
+    shifted_points = [x for x in block.starts(5000) if abs(float(x) - 10.02) < 1e-9]
+    assert len(shifted_points) == 1  # one coordinate, observed and shifted-end origins
+    shifted = shifted_points[0]
+    left = block.candidate(shifted, 5000, -1)
+    assert left["start_elapsed_seconds"] == 5
+    assert left["end_elapsed_seconds"] == 1510
+    assert left["elapsed_seconds"] == 1505
+    async with server() as client:
+        await upload(client, ('decimal-plateaus.fit', trace_fit(points)))
+        row = (await client.get('/api/activities/1/efforts')).json()
+        c = distance(row, 5000)["best"]
+        assert (c["start_distance_m"], c["end_distance_m"], c["elapsed_seconds"]) == (10.02, 5010.02, 1500)
+        explicit = (await client.post('/api/activities/1/efforts/inspect', json={
+            "version": row["version_id"], "source": row["selected_fit_sha256"],
+            "start_distance_m": 10.02, "distance_m": 5000})).json()["candidate"]
+        assert explicit["id"] == c["id"]
+        target = f'/api/activities/1/efforts/{row["version_id"]}/{c["id"]}'
+        assert (await client.post(target + '/review', json={"action": "reject", "actor": "Synthetic reviewer", "note": "Reject this exact UTC interval."})).status_code == 200
+        report = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
+        five = next(r for r in report["distances"] if r["distance_m"] == 5000)
+        assert five["all_time"] is None and five["state"] == 'REVIEW_REJECTION_LIMIT'
+        assert five["unattained_limits"][0]["limit"]["elapsed_seconds"] == 1505
+        assert (await client.get(target)).json()["candidate"]["effective_quality_state"] == 'INVALID'
+
+
+@pytest.mark.anyio
+async def test_equal_elapsed_across_timer_blocks_chooses_earlier_absolute_start(history):
+    points = dense([(0, 0), (50, 100), (150, 500), (200, 500), (300, 900)])
+    async with server() as client:
+        await upload(client, ('two-blocks.fit', trace_fit(points, events=[(0, 0), (150, 4), (200, 0), (300, 4)])))
+        row = (await client.get('/api/activities/1/efforts')).json()
+        c = distance(row, 400)["best"]
+        assert c["elapsed_seconds"] == 100
+        assert c["start_utc"] == absolute_time(START + 50).isoformat()
+        assert c["block_index"] == 0
+        report = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
+        assert next(r for r in report["distances"] if r["distance_m"] == 400)["all_time"]["id"] == c["id"]
+
+
+@pytest.mark.anyio
+async def test_flat_open_cell_has_attained_elapsed_optimum_but_no_earliest_start(history):
+    async with server() as client:
+        await upload(client, ('four-records.fit', trace_fit([(0, 0), (2, 10), (4, 20), (6, 30)])))
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [15]}
+        assert (await client.post('/api/activities/1/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})).status_code == 200
+        row = (await client.get('/api/activities/1/efforts')).json()
+        c = distance(row, 15)["best"]
+        # Exact independent equation A(x+15)-L(x) = (x+15)/5-x/5 = 3.
+        # QC is eligible only for 5 < x < 10: neither endpoint has four records.
+        assert c is not None and c["elapsed_seconds"] == 3
+        assert (c["start_distance_m"], c["end_distance_m"], c["original_sample_count"]) == (7.5, 22.5, 4)
+        assert c["selection"]["basis"] == 'FLAT_OPEN_CELL_MIDPOINT'
+        assert c["selection"]["earliest_start_attained"] is False
+        assert c["selection"]["open_start_domain_m"] == [5, 10]
+        explicit = (await client.post('/api/activities/1/efforts/inspect', json={
+            "version": row["version_id"], "source": row["selected_fit_sha256"],
+            "start_distance_m": 7.5, "distance_m": 15})).json()["candidate"]
+        assert explicit["id"] == c["id"]
+        report = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
+        assert report["distances"][0]["all_time"]["id"] == c["id"]
+
+
+def test_nonflat_open_qc_domain_does_not_publish_an_unattained_infimum():
+    # In 5 < x < 10 the duration is 3.5-x/10, approaching 2.5 s from above.
+    # The x=10 endpoint has only three original records and is ineligible.
+    result = pure([(0, 0), (2, 10), (4, 20), (6, 40)], [15])["distances"][0]
+    assert result["best"] is None and result["state"] == 'REVIEW_ELIGIBILITY_LIMIT'
+    assert result["unattained_limit"]["elapsed_seconds"] == 2.5
+
+
+@pytest.mark.anyio
+async def test_open_qc_infimum_blocks_a_slower_other_activity_but_an_attained_tie_wins(history):
+    async with server() as client:
+        await upload(client, ('open-domain.fit', trace_fit([(0, 0), (2, 10), (4, 20), (6, 40)])))
+        await upload(client, ('slower.fit', trace_fit([(i, i * 5) for i in range(9)], start=START + 86400)))
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [15]}
+        assert (await client.post('/api/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})).status_code == 200
+        result = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()["distances"][0]
+        assert result["all_time"] is None and result["state"] == 'REVIEW_ELIGIBILITY_LIMIT'
+        assert result["attained_candidate"]["elapsed_seconds"] == 3
+        assert result["best_internal_segment"] is None
+        assert result["unattained_limits"][0]["limit"]["elapsed_seconds"] == 2.5
+        # A real 2.5-second effort in another trace attains the limiting value.
+        await upload(client, ('attained-tie.fit', trace_fit([(i, i * 6) for i in range(9)], start=START + 172800)))
+        await client.post('/api/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})
+        result = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()["distances"][0]
+        assert result["state"] == 'VALID' and result["all_time"]["elapsed_seconds"] == 2.5
+        assert result["all_time"]["activity_id"] == 3
