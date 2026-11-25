@@ -296,6 +296,7 @@ def activity(row):
     return page(row["name"] or "Activity detail", f"""
 {garmin_link}<dl class="detail-metrics">{''.join(values)}</dl>{warnings}<h2>Recorded laps</h2>{lap_table}
 <p><a href="/activities/{row["id"]}/recording">Inspect recorded samples and events</a></p>
+<p><a href="/activities/{row["id"]}/canonical">Inspect canonical trace and quality</a></p>
 <p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
 
 
@@ -404,3 +405,95 @@ def recording_page(row):
     else:
         content += '<p>No sample records supplied. This file provides summary data only.</p>'
     return page("Recorded samples and events", content + pager)
+
+
+def canonical_page(row):
+    aid = row["activity_id"]
+    base = f"/activities/{aid}/canonical"
+
+    def show(value):
+        return escape(str(value)) if value is not None else "Not provided"
+
+    def details(value, title="Evidence and calculations"):
+        return '<details><summary>' + title + '</summary><pre style="white-space:pre-wrap">' + escape(
+            json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True)) + '</pre></details>'
+
+    def table(caption, headers, rows):
+        return f'<div class="table-wrap" tabindex="0" role="region" aria-label="{caption}"><table class="recording-table"><caption>{caption}</caption><thead><tr>' + ''.join(
+            f'<th scope="col">{h}</th>' for h in headers) + '</tr></thead><tbody>' + ''.join(
+            '<tr>' + ''.join(f'<td>{value}</td>' for value in cells) + '</tr>' for cells in rows) + '</tbody></table></div>'
+
+    content = f'<p><a href="/activities/{aid}">Back to activity {aid}</a></p>'
+    content += '<p>Engineering quality checks preserve recorded UTC timestamps, cumulative metres and elapsed time. '
+    content += 'Thresholds are provisional. Human comparison and scientific validation remain unverified. No fastest efforts are calculated.</p>'
+    content += f'<button id="recompute" data-url="/api/activities/{aid}/canonical/recompute">Recompute offline with default QC</button><p id="result" role="status"></p>'
+    content += """<script>
+document.getElementById('recompute').addEventListener('click', async event => {
+ const button = event.currentTarget; button.disabled = true;
+ try {
+   const response = await fetch(button.dataset.url, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+   const result = await response.json();
+   if (!response.ok) throw new Error(result.detail || 'Recompute failed.');
+   location.assign(location.pathname);
+ } catch (error) { document.getElementById('result').textContent = error.message; button.disabled = false; }
+});
+</script>"""
+    if row["state"] == "NOT_PROCESSED":
+        return page("Canonical trace and quality", content + '<p>' + escape(row["message"]) + '</p>')
+    query = {"version": row["version_id"]}
+    if row["inspected_fit_sha256"]:
+        query["source"] = row["inspected_fit_sha256"]
+    content += f'<p>Canonical quality: <strong>{row["canonical_quality_state"]}</strong> · Inspected source quality: <strong>{row["source_qc_state"]}</strong> · Timer-event coverage: <strong>{row["qc"]["timer_event_coverage"]}</strong></p>'
+    content += '<p>Missing events are not proof of uninterrupted movement. Recorded events can omit stops.</p>'
+    if row["version_id"] != row["current_version_id"]:
+        content += '<p><strong>Historical version</strong> · <a href="' + base + '">Open current version</a></p>'
+    if row["archive_status_now"] != "VERIFIED":
+        content += '<p>Original archive unavailable or checksum failed. Persisted evidence is historical; restore the original before downstream use.</p>'
+    versions = ''.join(f'<option value="{v["id"]}"' + (' selected' if v["id"] == row["version_id"] else '') +
+                       f'>{show(v["config_version"])} · {v["id"][:16]}… · activity {v["activity_id_at_creation"]}</option>' for v in row["versions"])
+    content += f'<form method="get" action="{base}"><fieldset><legend>Saved versions</legend><label>Canonical version<select name="version">{versions}</select></label><button>Show version</button></fieldset></form>'
+    if row["sources"]:
+        options = ''.join(f'<option value="{s["fit_sha256"]}"' + (' selected' if s["fit_sha256"] == row["inspected_fit_sha256"] else '') +
+                          f'>{s["fit_sha256"][:16]}…</option>' for s in row["sources"])
+        content += f'<form method="get" action="{base}"><fieldset><legend>Source-specific trace</legend><input type="hidden" name="version" value="{row["version_id"]}"><label>Original FIT<select name="source">{options}</select></label><button>Show source</button></fieldset></form>'
+    content += '<p>Canonical selected FIT: ' + show(row["selected_fit_sha256"]) + '</p>'
+    if row["inspected_fit_sha256"] != row["selected_fit_sha256"]:
+        content += '<p>This is an alternate owned source, not the selected canonical trace.</p>'
+    content += '<h2>Activity summary</h2>' + details(row["summary"], "Summary values and sources")
+    if row["summary_comparisons"]:
+        content += '<p>The activity summary differs from the selected original. Review the recorded differences.</p>'
+        content += details(row["summary_comparisons"], "Summary discrepancies")
+    if not row["running_sport"]:
+        content += '<p>This activity is not classified as running and is excluded from running-performance use.</p>'
+    provenance = {k: row[k] for k in ("version_id", "canonical_activity_id", "activity_id_at_creation", "provider_ids",
+        "merged_activity_ids", "raw_sources", "selected_source_version_id", "canonical_algorithm_version", "qc_algorithm_version",
+        "qc_config_version", "qc_config", "selection_policy", "sources", "created_at", "selection_history")}
+    content += details(provenance, "Canonical provenance and QC settings")
+    content += '<h2>Quality flags</h2>'
+    content += table("Reviewable quality flags", ("Condition", "Effect", "Record indices", "Details"), (
+        (show(f["code"]), show(f["effect"]), show(f["sample_indices"]), details(f)) for f in row["qc"]["flags"]))
+    content += '<h2>Timer-separated blocks</h2><p>Only confirmed timer boundaries split these ranges. Ambiguous stationary spans stay flagged; no stop is invented.</p>'
+    content += details(row["qc"]["blocks"], "Block indices and boundary evidence")
+    trace = row["trace"]
+    if trace:
+        content += '<h2>Selected source header</h2>' + details(trace["header"], "Recorded header and device-time evidence")
+        content += details(row["parser"], "Parser version and settings")
+        content += '<h2>Separate HR streams</h2><p>Separate HR messages are retained without invented alignment to samples.</p>'
+        content += details(trace["heart_rate_messages"], "Separate HR messages")
+        content += details(trace["events"], "Timer and other raw events")
+        samples = trace["samples"]
+        query.update(offset=samples["offset"], limit=samples["limit"])
+        content += f'<h2 id="samples">Canonical samples</h2><p>{samples["total"]} original records; indices and values retain file order.</p>'
+        content += table("Canonical records in file order", ("Index", "UTC timestamp", "Distance (m)", "Decoded values"), (
+            (str(s["record_index"]), show(s["timestamp_utc"]), show(s["distance_m"]), details(s["fields"])) for s in samples["rows"]))
+        links = []
+        if samples["offset"]:
+            previous = min(max(0, samples["offset"] - samples["limit"]), max(0, ((samples["total"] - 1) // samples["limit"]) * samples["limit"]))
+            links.append('<a href="' + escape(base + '?' + urlencode({**query, "offset": previous})) + '#samples">Previous samples</a>')
+        if samples["offset"] + samples["limit"] < samples["total"]:
+            links.append('<a href="' + escape(base + '?' + urlencode({**query, "offset": samples["offset"] + samples["limit"]})) + '#samples">Next samples</a>')
+        content += '<p>' + ' · '.join(links) + '</p>'
+    elif row["message"]:
+        content += '<p>' + escape(row["message"]) + '</p>'
+    content += '<p><a href="' + escape(f'/api/activities/{aid}/canonical?' + urlencode(query)) + '">Canonical JSON</a></p>'
+    return page("Canonical trace and quality", content)

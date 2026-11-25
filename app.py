@@ -20,6 +20,7 @@ from fit_store import ResolutionError
 from garmin_import import run_import
 import garmin_coverage
 import history
+import canonical
 import recording
 from storage import ActiveImport, Archive, Store
 import views
@@ -210,6 +211,59 @@ def recording_json(activity_id: str, source: str | None = Query(None, pattern=r"
 def recording_page(activity_id: str, source: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
                    offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(200, ge=1, le=500)):
     return views.recording_page(read_recording(activity_id, source, offset, limit))
+
+
+class Recompute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config_version: str = Field(default=canonical.DEFAULT_CONFIG_VERSION, pattern=r"^[A-Za-z0-9._-]{1,80}$")
+    config: dict | None = None
+
+
+@app.post("/api/canonical/recompute")
+def recompute_all(choice: Recompute):
+    try:
+        return {"activities": canonical.recompute(app.state.store, config_version=choice.config_version, config=choice.config)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@app.post("/api/activities/{activity_id}/canonical/recompute")
+def recompute_activity(activity_id: str, choice: Recompute):
+    from storage import local_id
+
+    if local_id(activity_id) is None:
+        raise HTTPException(404, "Activity not found.")
+    try:
+        return {"activities": canonical.recompute(app.state.store, [int(activity_id)],
+                                                  config_version=choice.config_version, config=choice.config)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except KeyError:
+        raise HTTPException(404, "Activity not found.") from None
+
+
+def read_canonical(activity_id, version, source, offset, limit):
+    try:
+        row = canonical.read(app.state.store, activity_id, version, source, offset=offset, limit=limit)
+    except canonical.UnknownVersion as exc:
+        raise HTTPException(404, str(exc)) from None
+    if row is None:
+        raise HTTPException(404, "Activity not found.")
+    return row
+
+
+@app.get("/api/activities/{activity_id}/canonical")
+def canonical_json(activity_id: str, version: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   source: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(200, ge=1, le=500)):
+    return read_canonical(activity_id, version, source, offset, limit)
+
+
+@app.get("/activities/{activity_id}/canonical", response_class=HTMLResponse)
+def canonical_page(activity_id: str, version: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   source: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(200, ge=1, le=500)):
+    return views.canonical_page(read_canonical(activity_id, version, source, offset, limit))
 
 
 def history_dates(request):

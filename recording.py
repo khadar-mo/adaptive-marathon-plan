@@ -115,17 +115,22 @@ def inspect(data, offset, limit):
 def sources(store, activity):
     """Only return recordings owned by this activity, including older linked versions."""
     with store.history() as db:
-        entries = {row[0]: {"fit_sha256": row[0], "sources": []} for row in db.execute(
-            "SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity["id"],))}
-        for source in activity["sources"]:
-            sha = source["sha256"] if source["kind"] == "fit" else None
-            if source["kind"] in ("original", "original_unavailable"):
-                member = db.execute("SELECT fit_sha FROM original_members WHERE original_sha=?",
-                                    (source["sha256"],)).fetchone()
-                sha = member[0] if member else None
-            if sha:
-                entries.setdefault(sha, {"fit_sha256": sha, "sources": []})["sources"].append(source)
-        preferred = original_fit(db, activity["garmin_id"], activity["id"]) if activity["garmin_id"] else None
+        return sources_in_db(db, activity)
+
+
+def sources_in_db(db, activity):
+    """Shared ownership lookup, also usable inside the import transaction."""
+    entries = {row[0]: {"fit_sha256": row[0], "sources": []} for row in db.execute(
+        "SELECT sha256 FROM fit_sources WHERE activity_id=? ORDER BY sha256", (activity["id"],))}
+    for source in activity["sources"]:
+        sha = source["sha256"] if source["kind"] == "fit" else None
+        if source["kind"] in ("original", "original_unavailable"):
+            member = db.execute("SELECT fit_sha FROM original_members WHERE original_sha=?",
+                                (source["sha256"],)).fetchone()
+            sha = member[0] if member else None
+        if sha:
+            entries.setdefault(sha, {"fit_sha256": sha, "sources": []})["sources"].append(source)
+    preferred = original_fit(db, activity["garmin_id"], activity["id"]) if activity["garmin_id"] else None
     return sorted(entries.values(), key=lambda r: (r["fit_sha256"] != (preferred[0] if preferred else None),
                                                   r["fit_sha256"]))
 
