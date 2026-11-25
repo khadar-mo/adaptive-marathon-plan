@@ -115,6 +115,11 @@ feedback targets. S&C is isolated from running totals; pain/illness reports only
 attention signals. See [the contract](context-inputs.md) and
 [ten-item software acceptance record](context-ingestion-acceptance.md).
 
+PR #35's initial CI passed all 328 tests including five browser flows. Independent
+review found browser decimal rounding and two malformed-input 500 paths. Targeted
+regressions reproduced them; the fixes pass 336 local tests with five browser skips.
+Latest-head CI and changed-diff approval are required before serialized merge.
+
 This is ingestion software, not G5 recovery interpretation, G6 prospective validation,
 or P5 approved recovery adaptation. Missing sources remain missing. Real Garmin
 wellness mapping/manual comparison and physiological validation remain UNVERIFIED;

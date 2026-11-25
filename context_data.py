@@ -17,6 +17,7 @@ from typing import Literal
 
 PARSER_VERSION = "context-export-v1"
 ALGORITHM_VERSION = "context-ingestion-v1"
+MAX_SQLITE_INTEGER = 2**63 - 1
 DEFAULT_POLICY = "context-policy-v1"
 DEFAULT_SETTINGS = {"daily_aggregation": "retain_all", "expected_wellness_metrics": ["resting_hr", "hrv", "sleep_duration"]}
 KINDS = ("wellness", "post_run", "preweek", "strength", "coverage")
@@ -413,9 +414,10 @@ def target_state(db, activity_id):
 
 
 def normalize(db, raw, known_at):
-    if not isinstance(raw, dict) or raw.get("kind") not in MODELS:
+    kind = raw.get("kind") if isinstance(raw, dict) else None
+    if not isinstance(kind, str) or kind not in MODELS:
         raise ValueError("Each record needs a supported kind.")
-    record = MODELS[raw["kind"]].model_validate(raw)
+    record = MODELS[kind].model_validate(raw)
     value = record.model_dump(exclude={"supersedes", "correction_reason"})
     policy = definition(db, "policy", record.policy_version)
     value.update(algorithm_version=ALGORITHM_VERSION, parser_version=PARSER_VERSION, policy=policy)
@@ -665,8 +667,8 @@ def read(store, *, as_of=None, first=None, last=None, policy_version=DEFAULT_POL
 
 
 def event_log(store, *, after=0, limit=200, as_of=None):
-    if not isinstance(after, int) or after < 0 or not isinstance(limit, int) or not 1 <= limit <= 1000:
-        raise ValueError("Use a nonnegative after cursor and a limit from 1 to 1000.")
+    if type(after) is not int or not 0 <= after <= MAX_SQLITE_INTEGER or type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError(f"Use an after cursor from 0 to {MAX_SQLITE_INTEGER} and a limit from 1 to 1000.")
     cutoff = moment(as_of) if as_of else now()
     events = []
     with store.history() as db:
@@ -695,6 +697,8 @@ def history(store, record_id, *, as_of=None):
 def target_feedback(store, *, activity_id=None, week=None, as_of=None):
     if (activity_id is None) == (week is None):
         raise ValueError("Choose exactly one activity or week target.")
+    if activity_id is not None and (type(activity_id) is not int or not 1 <= activity_id <= MAX_SQLITE_INTEGER):
+        raise ValueError(f"Use an activity ID from 1 to {MAX_SQLITE_INTEGER}.")
     if week is not None and date.fromisoformat(day(week)).weekday() != 0:
         raise ValueError("Week must be a Monday.")
     data = read(store, as_of=as_of)

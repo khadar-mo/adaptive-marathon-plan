@@ -55,8 +55,8 @@ API/CLI tests cover the following acceptance clauses:
 
 ## 5. Test results and regression strength
 
-Repository check: from `tests/`, run
-`PYTHONPATH=.. ../.venv/bin/python -m pytest --rootdir=.. -q`.
+Repository check: from the worktree root, run
+`PYTHONPATH=. .venv/bin/python -m pytest tests -q`.
 The local environment has its own `.venv`. No shared checkout or package environment
 is modified. Five browser flows are skipped locally because Chrome is not on the
 worktree test PATH; CI requires Chrome and executes them. There is no separate
@@ -72,8 +72,18 @@ Two temporary production-code mutations were run and restored:
   value assertion: `48.12345678901234567890` became `48.123456789012344`
   (one failed test, 0.41 s).
 
-Restored final local suite: **323 passed, 5 skipped** (the five browser replays),
-19.96 s. CI and independent review are recorded in item 10.
+Independent review added regression cases for unquoted browser exercise decimals,
+non-string record kinds in JSON/multipart batches, and SQLite integer query bounds.
+Before the fixes these produced **8 failures** (5 already-correct boundary cases
+passed). The rendered production form script now executes in a bounded Node harness
+against a real loopback HTTP server; both stored values and archived request bytes
+retain the numeric lexemes, including exponent notation. The mandatory browser
+replay also enters an unquoted `20.12345678901234567890` exercise load and checks the
+persisted value. Node is optional locally; CI's browser replay covers the actual DOM.
+
+After the fixes, the targeted context suite passed **49 tests**. The full suite from
+the worktree root passed **336 tests, 5 skipped** (the five browser replays), 22.16 s.
+`git diff --check` passed. CI and independent review are recorded in item 10.
 
 ## 6. Actual API and CLI inspection
 
@@ -139,7 +149,16 @@ Exercise choice and actual load remain runner-owned. No deployment/release occur
 
 ## 10. Final independent review and CI
 
-Final local-suite, PR, independent-review verdict and CI evidence will be attached
-here after the final code is frozen. Merge remains gated on independent approval,
-passing latest-head CI and root's serialized integration with current main. The user
-has already authorized development/merge; runtime athlete approvals are unchanged.
+[PR #35](https://github.com/khadar-mo/adaptive-marathon-plan/pull/35) targets main
+from the G1 base above. Initial commit `414ed0f` passed
+[CI run 45714001742](https://github.com/khadar-mo/adaptive-marathon-plan/actions/runs/45714001742),
+including all five browser flows (**328 passed**). Independent review reproduced
+**323 passed, 5 skipped** locally, then requested changes for three real defects:
+browser exercise-number rounding, non-string kind 500 responses, and integer-query
+overflow 500 responses. These are fixed with the failing-before/passing-after
+regressions in item 5. That initial green CI does not replace latest-head validation.
+
+Changed-diff re-review and latest-head CI are pending on the review-fix commit.
+Merge remains gated on independent approval, passing latest-head CI and root's
+serialized integration with current main. The user has already authorized
+development/merge; runtime athlete approvals are unchanged.

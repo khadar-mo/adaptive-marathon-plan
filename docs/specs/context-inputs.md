@@ -76,6 +76,9 @@ receipt. Precision changes are retained as changes, even if numeric values compa
 Wellness `value` uses exact decimal text, or a category with `value_type=category`.
 Raw JSON numeric lexemes are also parsed without binary-float rounding. Values are
 bounded to 100 significant digits and exponent magnitude 100 to bound input size.
+The strength form preserves unquoted exercise JSON numbers through submission;
+quoting a numeric load is optional, including for decimals beyond JavaScript's
+binary-float precision. Its original submitted representation remains in the archive.
 Units remain source units; no implicit conversions occur. SI sources retain their
 SI precision, and incompatible units are kept separately. A missing value requires
 `validity=MISSING` and a reason. Invalid/suspect observations remain visible but do
@@ -161,6 +164,10 @@ They are configurable expectations, not claims of device support.
 | `GET /api/context/definitions` | Immutable policy and scale definitions |
 | `POST /api/context/definitions/policy/{version}` | Register `daily_aggregation` and `expected_wellness_metrics` |
 | `POST /api/context/definitions/scale/{version}` | Register a scale definition |
+
+Activity IDs must be positive signed-64-bit integers (1–9223372036854775807).
+Event cursors accept 0–9223372036854775807. Invalid types or out-of-range query
+values return HTTP 422; an in-range activity ID must still refer to a saved activity.
 
 Date-range filters use observation local dates, pre-week target weeks, or feedback
 report dates as appropriate. Coverage intervals are selected by overlap. Explicit

@@ -3,7 +3,7 @@ from html import escape
 import json
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
@@ -64,7 +64,8 @@ def data(request: Request, as_of: str | None = None, first: str | None = None, l
 
 
 @router.get("/api/context/events")
-def event_log(request: Request, after: int = 0, limit: int = 200, as_of: str | None = None):
+def event_log(request: Request, after: int = Query(0, ge=0, le=context.MAX_SQLITE_INTEGER),
+              limit: int = Query(200, ge=1, le=1000), as_of: str | None = None):
     try:
         return context.event_log(store(request), after=after, limit=limit, as_of=as_of)
     except ValueError as exc:
@@ -83,7 +84,8 @@ def history(request: Request, record_id: str, as_of: str | None = None):
 
 
 @router.get("/api/context/feedback")
-def feedback(request: Request, activity_id: int | None = None, week: str | None = None, as_of: str | None = None):
+def feedback(request: Request, activity_id: int | None = Query(None, ge=1, le=context.MAX_SQLITE_INTEGER),
+             week: str | None = None, as_of: str | None = None):
     try:
         return context.target_feedback(store(request), activity_id=activity_id, week=week, as_of=as_of)
     except ValueError as exc:
@@ -194,6 +196,7 @@ document.querySelectorAll('form.context-entry, form.context-definition, form.con
    if(form.classList.contains('context-import')) { url += '?format='+encodeURIComponent(data.get('format')); data.delete('format'); body=data; }
    else {
     const fields=Object.fromEntries([...data].filter(([k,v]) => v !== ''));
+    const rawJSON={};
     if(form.classList.contains('context-definition')) {
      url='/api/context/definitions/'+encodeURIComponent(fields.kind)+'/'+encodeURIComponent(fields.version);
      const kind=fields.kind; delete fields.kind; delete fields.version;
@@ -201,8 +204,15 @@ document.querySelectorAll('form.context-entry, form.context-definition, form.con
      else fields.anchors=JSON.parse(fields.anchors||'{}');
     } else {
      fields.kind=form.dataset.kind;
-     if(fields.activity_id) fields.activity_id=Number(fields.activity_id);
-     if(fields.exercises) fields.exercises=JSON.parse(fields.exercises);
+     if(fields.activity_id) {
+      if(!/^[1-9][0-9]*$/.test(fields.activity_id)) throw new Error('Use a positive whole activity ID.');
+      rawJSON.activity_id=fields.activity_id;
+     }
+     if(fields.exercises) {
+      // Parse only to validate syntax; serialize the original numeric lexemes.
+      // The server validates structure and parses decimals without float rounding.
+      JSON.parse(fields.exercises); rawJSON.exercises=fields.exercises;
+     }
      const ratings={};
      for(const name of ['rpe','fatigue','soreness','pain','readiness']) {
       if(fields[name] !== undefined) ratings[name]={value:fields[name],scale_version:fields[name+'_scale']||''};
@@ -211,7 +221,9 @@ document.querySelectorAll('form.context-entry, form.context-definition, form.con
      if(['post_run','preweek','strength'].includes(fields.kind)) fields.ratings=ratings;
      if(['post_run','preweek'].includes(fields.kind)) fields.attention=data.getAll('attention');
     }
-    body=JSON.stringify(fields); headers={'Content-Type':'application/json'};
+    body='{'+Object.entries(fields).map(([key,value])=>JSON.stringify(key)+':'+
+     (Object.hasOwn(rawJSON,key)?rawJSON[key]:JSON.stringify(value))).join(',')+'}';
+    headers={'Content-Type':'application/json'};
    }
    button.disabled=true; message.textContent='Saving…';
    const response=await fetch(url,{method:'POST',body,headers}); const result=await response.json();
@@ -297,7 +309,8 @@ def record_page(request: Request, record_id: str, as_of: str | None = None):
 
 
 @router.get("/context/feedback", response_class=HTMLResponse)
-def feedback_page(request: Request, activity_id: int | None = None, week: str | None = None, as_of: str | None = None):
+def feedback_page(request: Request, activity_id: int | None = Query(None, ge=1, le=context.MAX_SQLITE_INTEGER),
+                  week: str | None = None, as_of: str | None = None):
     result = feedback(request, activity_id, week, as_of)
     body = '<p><a href="/context">Enter or correct a check-in</a></p>'
     body += '<p>Report state: ' + e(result["state"]) + '</p><p>' + e(result["missing_reason"] or 'Supplied reports retain individual scale and source definitions.') + '</p>'

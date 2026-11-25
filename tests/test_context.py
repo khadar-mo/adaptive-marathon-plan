@@ -333,3 +333,45 @@ async def test_coverage_intersects_selected_observation_days_and_csv_nested_fiel
         row,=[r for r in (await view(client))['records'] if r['kind']=='strength']
         assert row['duration_s']=='3600.1234567890123456789' and row['exercises'][0]['sets']==3
         assert row['ratings']['rpe']['value']=='4.5'
+
+@pytest.mark.parametrize('kind',[[],{},None,True])
+@pytest.mark.parametrize('delivery',['json','multipart'])
+async def test_unsupported_kind_rejected_and_invalid_batch_is_atomic(history,kind,delivery):
+    async with server() as client:
+        await enter(client,wellness())
+        for payload in ({'kind':kind},[wellness(source_id='must-not-commit'),{'kind':kind}]):
+            raw=context.encoded(payload).encode()
+            if delivery=='json':
+                response=await client.post('/api/context/records',content=raw)
+            else:
+                response=await client.post('/api/context/import',files={'file':('invalid.json',raw)})
+            assert response.status_code==422,response.text
+            assert 'supported kind' in response.json()['detail']
+            data=await view(client)
+            assert len(data['records'])==1 and data['records'][0]['source_id']=='rhr-1'
+            assert len((await client.get('/api/context/events')).json()['events'])==1
+
+@pytest.mark.parametrize('value',[-1,9223372036854775808,-9223372036854775809])
+async def test_sqlite_integer_query_bounds_reject_outside_range(history,value):
+    async with server() as client:
+        await enter(client,wellness())
+        for path,param in (('/api/context/events','after'),('/api/context/feedback','activity_id'),('/context/feedback','activity_id')):
+            response=await client.get(path,params={param:str(value)})
+            assert response.status_code==422,response.text
+
+async def test_sqlite_integer_query_boundaries_and_domain_validation(history,tmp_path):
+    async with server() as client:
+        await upload(client,('boundary-run.fit',trace_fit()))
+        await enter(client,wellness())
+        for after in (0,9223372036854775806,9223372036854775807):
+            response=await client.get('/api/context/events',params={'after':str(after)})
+            assert response.status_code==200,response.text
+            assert response.json()['after']==after
+        assert (await client.get('/api/context/feedback?activity_id=1')).status_code==200
+        assert (await client.get('/api/context/feedback?activity_id=0')).status_code==422
+        high=await client.get('/api/context/feedback?activity_id=9223372036854775807')
+        assert high.status_code==422 and high.json()['detail']=='Activity not found.'
+    saved=Store(tmp_path/'runs.sqlite3')
+    for invalid in (-1,9223372036854775808,True):
+        with pytest.raises(ValueError): context.event_log(saved,after=invalid)
+        with pytest.raises(ValueError): context.target_feedback(saved,activity_id=invalid)

@@ -60,7 +60,7 @@ def test_context_desktop_mobile_keyboard_import_and_corrections(tmp_path):
             expect(page.get_by_role('heading',name='preweek · self-report / browser-week · revision 1')).to_be_visible()
             page.get_by_text('Strength session',exact=True).first.click()
             form=page.locator('form[data-kind=strength]')
-            for label,value in [('Source record ID','browser-gym'),('Local date','2026-10-25'),('Duration in seconds','3600.25'),('Exercises (JSON)','[{"name":"Squat","sets":3,"load":"20.25","load_unit":"kg"}]')]:
+            for label,value in [('Source record ID','browser-gym'),('Local date','2026-10-25'),('Duration in seconds','3600.25'),('Exercises (JSON)','[{"name":"Squat","sets":3,"load":20.12345678901234567890,"load_unit":"kg"}]')]:
                 form.get_by_label(label,exact=True).fill(value)
             form.get_by_label('Completion status',exact=True).select_option('completed')
             form.get_by_label('Lower-body emphasis',exact=True).select_option('yes')
@@ -95,4 +95,6 @@ def test_context_desktop_mobile_keyboard_import_and_corrections(tmp_path):
             data=response.json()
             assert data['report_counts']=={'wellness':2,'post_run':1,'preweek':1,'strength':1,'coverage':1}
             assert data['strength_running_distance_m']=='0'
+            strength,=[row for row in data['records'] if row['kind']=='strength']
+            assert strength['exercises'][0]['load']=='20.12345678901234567890'
             assert errors==[]
