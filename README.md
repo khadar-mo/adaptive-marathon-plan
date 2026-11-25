@@ -132,6 +132,31 @@ Generate six made-up examples with `python3 demo_canonical.py /tmp/marathon-g1-e
 See the [G1 acceptance report](docs/specs/g1-acceptance.md) for the separate demo
 database, exact thresholds, software checks and outstanding human comparisons.
 
+## Record wellness, feedback and strength
+
+Open **Context** to enter wellness observations, post-run check-ins, pre-week
+readiness and separate strength sessions. Sources, units, explicit rating scales,
+missingness and corrections remain inspectable. Date-only observations keep their
+unknown measurement time. Use **Correct this record** to retain each revision.
+The forms also register new immutable input policies and rating-scale definitions.
+
+Import owned or self-reported UTF-8 JSON/CSV in the documented
+[context-export-v1 format](docs/specs/context-inputs.md), or use the offline CLI:
+
+```sh
+.venv/bin/python context_data.py --database /path/to/runs.sqlite3 import /path/to/export.json
+.venv/bin/python context_data.py --database /path/to/runs.sqlite3 show
+```
+
+The same contract is available at `POST /api/context/records` and multipart
+`POST /api/context/import?format=json|csv`. `GET /api/context` accepts an explicit
+`as_of` timestamp; the dashboard links correction histories, source definitions and
+the append-only event feed. HRV/sleep can remain missing while running calculations
+continue. Strength contributes no running kilometres. No medical assessment,
+recovery threshold or mileage change is performed by these input interfaces.
+See the [acceptance record](docs/specs/context-ingestion-acceptance.md) for tests,
+actual interface checks and unverified scientific/manual evidence.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.

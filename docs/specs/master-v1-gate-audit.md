@@ -103,3 +103,19 @@ recommended option consistent with the specification. This authorization does no
 fabricate manual comparisons, scientific validation, or runtime athlete approvals.
 Unverified outputs must not become downstream coaching authority merely because
 their software is merged.
+
+## Optional contextual inputs — issue #29
+
+The independent ingestion prerequisite for G5 now has additive append-only wellness,
+versioned post-run/pre-week feedback, strength and explicit coverage records. JSON/CSV
+imports, entry/correction forms, CLI, event feed and versioned scale/policy controls
+retain raw source bytes, exact decimal units, missingness and separate event/known-at
+times. Activity donor redirects and canonical source reclassification do not erase
+feedback targets. S&C is isolated from running totals; pain/illness reports only emit
+attention signals. See [the contract](context-inputs.md) and
+[ten-item software acceptance record](context-ingestion-acceptance.md).
+
+This is ingestion software, not G5 recovery interpretation, G6 prospective validation,
+or P5 approved recovery adaptation. Missing sources remain missing. Real Garmin
+wellness mapping/manual comparison and physiological validation remain UNVERIFIED;
+the generic owned-export/self-report schema does not claim a vendor-specific adapter.
