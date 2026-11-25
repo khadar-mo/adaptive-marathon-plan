@@ -8,6 +8,9 @@ Issue #17 depends on merged G1 #16 / PR #34. This branch started from main
 `8562073c94131ff70e6848a507d8655e399bd00d42d6c6910d6f41da20ad8d87`.
 Engineering conventions are recorded in parent #15 and issue #17. Software evidence
 does not establish manual Garmin agreement or physiological/predictive validity.
+After review fixes, main `e7b05cd834914daa9226750b605a867444d60948`
+(context ingestion #29 / PR #35) was merged in `4c4461d`. Both additive schemas,
+route groups, navigation entries and acceptance reports were retained.
 
 ## 2. Existing implementation preserved
 
@@ -160,9 +163,11 @@ Development dependencies are isolated in this worktree's `.venv`; only synthetic
 temporary stores are used. CLI subprocess tests anchor their script path to the
 repository, independent of pytest's working directory.
 
-- G2 targeted suite: **24 passed** before final broad verification.
-- Final broad local pass: **311 passed, five browser tests skipped** because native
-  Chrome was not on PATH. Linux CI requires all five browser replays; its final
+- G2 targeted suite after review: **30 passed**.
+- Final broad local pass from the integrated worktree root: **366 passed, six
+  browser tests skipped** in 46.74 seconds because native Chrome was not on PATH.
+  A separate native Chrome replay with an explicit executable stalled and was
+  terminated at its 55-second bound. Linux CI requires all six browser replays; its final
   result is recorded in the linked PR before merge.
 - Removing the import extraction hook made the public T01/T05/T22/T23 test fail.
   Replacing last departure with first arrival made the normative plateau test fail.
@@ -174,6 +179,10 @@ repository, independent of pytest's working directory.
   The decimal-plateau regression rejects the actual saved optimum and verifies it
   cannot return under another ID. The browser replay uses the real combobox's
   accessible role/name, retaining the saved context and Accept form assertions.
+- Final mutation checks removed raw-index uncertainty overlap, then replaced the
+  rational coordinate conversion with binary64. Each corresponding new public
+  regression failed as expected. Both mutations were restored byte-for-byte;
+  all 30 G2 tests passed again.
 - Real HTTP multipart upload into a separate loopback demo store completed. Its
   winning 5K is exactly 1,440 seconds, 09:15–09:39 UTC on 10 January 2026, original
   records 180–468, cumulative 3000→8000 m. A separate full 5K is 1,500 seconds.
@@ -185,6 +194,17 @@ repository, independent of pytest's working directory.
   button. The handler now uses `getAttribute('action')`; the replay submits Accept
   through that button and checks the saved verdict. Native replay host limitations
   from G1 are not claimed as passing; CUA and required Linux CI supply browser proof.
+- Final integrated real HTTP proof imported five synthetic traces into a separate
+  store. Missing clock at 200 m withholds the 400 m PB. In the 1200 m companion,
+  100→500 and 700→1100 m remain VALID; 400→800 m is SUSPECT with original record 30.
+  The 15 m flat-cell result is 7.5→22.5 m, 3 s, with four original records.
+- Final CUA proof at 1280/375 px used keyboard Reject on the exact decimal plateau
+  interval (10.02→5010.02 m, 1500 s). It stayed INVALID; global 5K displayed
+  `REVIEW_REJECTION_LIMIT` with no PB and a 1505 s unattained limit. The combobox
+  stored RACE with maximality NO. The flat-cell verification explained its attained
+  midpoint and lack of an earliest start. All four merged navigation links fit
+  mobile; Context opened correctly. Page width equaled viewport width, console
+  warnings/errors were empty, and the temporary viewport was reset.
 
 ## 8. Reproduce the synthetic walkthrough
 
