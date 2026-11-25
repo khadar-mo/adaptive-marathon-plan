@@ -62,6 +62,35 @@ A renamed FIT and the identical member of a downloaded ZIP keep the same local a
 
 The multipart endpoint is `POST /api/imports/fit` with one or more `files` fields. The 202 response links to the saved report. To resolve a reported issue, send JSON to `POST /api/imports/{id}/issues/{issue_id}/resolve` with `{"action":"link","activity_id":1}`, `{"action":"keep_separate"}` or `{"action":"set_local_date","local_date":"2026-11-01"}`. Before upgrading a database from the first Garmin importer, stop the server and back up the database and archive together. On startup the app indexes its archived originals locally.
 
+## Inspect an original recording
+
+Open an activity and choose **Inspect recorded samples and events**. The view reads
+its archived FIT offline and shows UTC timestamps, cumulative metres, recorded HR,
+timer events and lap markers. Coverage tables identify missing fields. Choose an
+original file to distinguish linked recordings or older versions, and expand
+**Source and decoder provenance** for checksums and decoding settings.
+
+Some FITs carry HR in separate messages. These have their own section and source
+indices; their timing fields remain inspectable without merging readings into the
+sample stream. Sample HR coverage describes only the record messages.
+
+Sample indices start at zero in the FIT's record order. **Next samples** and
+**Previous samples** preserve that order and the selected original. **Decoded
+fields** exposes the SDK-decoded source values; **Recording JSON** opens the same
+page of data at `GET /api/activities/{id}/recording`. The `source` query selects an
+owned FIT checksum, `offset` selects the first record, and `limit` accepts 1–500
+(default 200). On narrow screens, scroll tables sideways.
+
+Missing timer events mean unknown pause history. This view does not repair traces,
+assess PB eligibility or calculate fastest efforts. Session fields can differ from
+the activity's Garmin summary because this view describes the selected original.
+
+The [gate audit](docs/specs/master-v1-gate-audit.md) and
+[G0 acceptance walkthrough](docs/specs/g0-acceptance.md) describe scope and checks.
+Generate three made-up example files with
+`python3 demo_recordings.py /tmp/marathon-g0-examples`; upload these only into a
+separate demo database, as explained in the walkthrough.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.

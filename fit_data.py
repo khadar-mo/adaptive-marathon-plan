@@ -12,6 +12,14 @@ class FitError(ValueError):
     pass
 
 
+DECODE_OPTIONS = {
+    "convert_datetimes_to_dates": False,
+    "convert_types_to_strings": False,
+    "expand_sub_fields": False,
+    "merge_heart_rates": False,
+}
+
+
 def fit_member(data):
     if data[8:12] == b".FIT":
         return "fit", data
@@ -46,8 +54,7 @@ def measurements(message):
 
 def read_messages(data):
     decoder = Decoder(Stream.from_byte_array(data))
-    messages, errors = decoder.read(convert_datetimes_to_dates=False, convert_types_to_strings=False,
-                                   expand_sub_fields=False, merge_heart_rates=False)
+    messages, errors = decoder.read(**DECODE_OPTIONS)
     if errors:
         raise FitError("Damaged FIT. Export the original file again and retry.")
     return messages

@@ -8,7 +8,7 @@ import stat
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -20,6 +20,7 @@ from fit_store import ResolutionError
 from garmin_import import run_import
 import garmin_coverage
 import history
+import recording
 from storage import ActiveImport, Archive, Store
 import views
 
@@ -187,6 +188,28 @@ def activity(activity_id: str):
         raise HTTPException(404, "Activity not found.")
     return {**row, **history.measurements(row),
             "laps": [{**lap, **history.measurements(lap)} for lap in row["laps"]]}
+
+
+def read_recording(activity_id, source, offset, limit):
+    try:
+        row = recording.read(app.state.store, activity_id, source, offset=offset, limit=limit)
+    except recording.UnknownRecording as exc:
+        raise HTTPException(404, str(exc)) from None
+    if row is None:
+        raise HTTPException(404, "Activity not found.")
+    return row
+
+
+@app.get("/api/activities/{activity_id}/recording")
+def recording_json(activity_id: str, source: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(200, ge=1, le=500)):
+    return read_recording(activity_id, source, offset, limit)
+
+
+@app.get("/activities/{activity_id}/recording", response_class=HTMLResponse)
+def recording_page(activity_id: str, source: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"),
+                   offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(200, ge=1, le=500)):
+    return views.recording_page(read_recording(activity_id, source, offset, limit))
 
 
 def history_dates(request):

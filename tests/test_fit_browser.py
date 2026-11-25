@@ -7,6 +7,7 @@ import pytest
 from fit_fixture import START, make_fit
 from test_health import serve_database
 from garmin_fit_sdk import convert_datetime_to_timestamp
+from demo_recordings import examples
 
 
 def chrome_executable():
@@ -15,6 +16,55 @@ def chrome_executable():
         pytest.skip("Install Chrome or Chromium on PATH to run the browser replay")
     assert chrome, "The browser replay requires Chrome on the runner"
     return chrome
+
+
+def test_recording_inspection_pagination_missing_data_and_keyboard(tmp_path):
+    chrome = chrome_executable()
+    from playwright.sync_api import expect, sync_playwright
+
+    with serve_database(tmp_path / "runs.sqlite3") as port, sync_playwright() as driver:
+        base = f"http://127.0.0.1:{port}"
+        with driver.chromium.launch(executable_path=chrome) as browser:
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            errors, requests = [], []
+            page.on("pageerror", lambda exc: errors.append(str(exc)))
+            page.on("console", lambda msg: errors.append(msg.text) if msg.type in ("warning", "error") else None)
+            page.on("requestfailed", lambda req: errors.append(req.url))
+            page.on("response", lambda res: errors.append(res.url) if res.status >= 400 else None)
+            page.on("request", lambda req: requests.append(req.url))
+            page.goto(base + "/imports")
+            page.get_by_label("FIT files", exact=True).set_input_files([
+                {"name": name, "mimeType": "application/octet-stream", "buffer": data} for name, data in examples().items()] + [
+                {"name": "separate-hr.fit", "mimeType": "application/octet-stream", "buffer": make_fit(messages=[
+                    (20, {"timestamp": START, "distance": 0}),
+                    (132, {"timestamp": START, "filtered_bpm": [150, 151], "event_timestamp": [100, 101]})])}])
+            page.get_by_role("button", name="Upload FIT files").click()
+            expect(page.get_by_text("Complete", exact=True)).to_be_visible()
+            page.get_by_role("link", name="Activity 1", exact=True).first.click()
+            page.get_by_role("link", name="Inspect recorded samples and events").click()
+            expect(page.get_by_text("401 records in total.", exact=False)).to_be_visible()
+            expect(page.get_by_role("table", name="Events in file order").get_by_role("row")).to_have_count(5)
+            page.get_by_role("link", name="Next samples", exact=True).first.press("Enter")
+            for width in (1280, 375):
+                page.set_viewport_size({"width": width, "height": 812})
+                records = page.get_by_role("table", name="Records 200–399", exact=True)
+                expect(records.get_by_role("row").nth(1)).to_contain_text("540.0")
+                records.locator("summary").first.press("Enter")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                with page.expect_response(lambda res: "/api/activities/1/recording?" in res.url) as response:
+                    page.get_by_role("link", name="Recording JSON").click()
+                assert response.value.json()["samples"]["rows"][0]["record_index"] == 200
+                page.go_back()
+            page.goto(base + "/activities/2/recording")
+            expect(page.get_by_text("Pause and resume history is unknown.", exact=False)).to_be_visible()
+            expect(page.get_by_role("table", name="Sample field coverage").get_by_role("row").filter(
+                has_text="Heart rate")).to_contain_text("Not provided")
+            page.goto(base + "/activities/3/recording")
+            expect(page.get_by_text("This file provides summary data only.", exact=False)).to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            page.goto(base + "/activities/4/recording")
+            expect(page.get_by_role("table", name="Separate HR messages in file order")).to_contain_text("[150, 151]")
+            assert errors == [] and all(url.startswith(base + "/") for url in requests)
 
 
 def test_upload_and_resolution_in_chrome(tmp_path):
