@@ -18,6 +18,63 @@ def chrome_executable():
     return chrome
 
 
+def test_source_modes_saved_configuration_blocked_fallback_and_mobile_keyboard(tmp_path):
+    chrome = chrome_executable()
+    from playwright.sync_api import expect, sync_playwright
+
+    with serve_database(tmp_path / "runs.sqlite3") as port, sync_playwright() as driver:
+        base = f"http://127.0.0.1:{port}"
+        with driver.chromium.launch(executable_path=chrome) as browser:
+            page = browser.new_page(viewport={"width": 1280, "height": 850})
+            errors, requests = [], []
+            page.on("pageerror", lambda exc: errors.append(str(exc)))
+            page.on("console", lambda msg: errors.append(msg.text) if msg.type in ("warning", "error") else None)
+            page.on("requestfailed", lambda req: errors.append(req.url))
+            page.on("response", lambda res: errors.append(res.url) if res.status >= 400 else None)
+            page.on("request", lambda req: requests.append(req.url))
+            page.goto(base + "/providers")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Running data sources")
+            page.get_by_role("link", name="Context", exact=True).press("Enter")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Context inputs and history")
+            page.get_by_role("link", name="Sources", exact=True).press("Enter")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Running data sources")
+            for width, mode in ((1280, "STRAVA_ONLY"), (375, "GARMIN_PRIMARY_FALLBACK")):
+                page.set_viewport_size({"width": width, "height": 850})
+                page.get_by_role("combobox", name="Source mode", exact=True).select_option(mode)
+                page.get_by_role("button", name="Save source mode").focus()
+                with page.expect_navigation(wait_until="domcontentloaded"), page.expect_response(base + "/api/providers/config") as saved:
+                    page.keyboard.press("Enter")
+                assert saved.value.status == 200
+                expect(page.get_by_role("combobox", name="Source mode", exact=True)).to_have_value(mode)
+                page.reload()
+                expect(page.get_by_role("combobox", name="Source mode", exact=True)).to_have_value(mode)
+                page.get_by_label("From", exact=True).fill("2024-02-29")
+                page.get_by_label("To", exact=True).fill("2024-02-29")
+                button = page.get_by_role("button", name="Import selected sources", exact=True)
+                button.focus()
+                page.keyboard.press("Enter")
+                result = page.get_by_role("region", name="Selected import result")
+                expect(result.get_by_text("Unavailable under current Strava policy", exact=True).last).to_be_visible()
+                if mode == "GARMIN_PRIMARY_FALLBACK":
+                    expect(result.get_by_text("Fallback reason:", exact=False)).to_contain_text("Garmin is offline")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            # Explicit offline FIT still works even with Strava-only selected.
+            page.get_by_role("combobox", name="Source mode", exact=True).select_option("STRAVA_ONLY")
+            with page.expect_navigation(wait_until="domcontentloaded"), page.expect_response(base + "/api/providers/config") as saved:
+                page.get_by_role("button", name="Save source mode").click()
+            assert saved.value.status == 200
+            page.get_by_role("link", name="Imports", exact=True).click()
+            page.get_by_label("FIT files", exact=True).set_input_files({"name": "synthetic.fit", "mimeType": "application/octet-stream", "buffer": make_fit()})
+            page.get_by_role("button", name="Upload FIT files").click()
+            expect(page.get_by_text("Complete", exact=True)).to_be_visible()
+            page.get_by_role("link", name="Sources", exact=True).click()
+            expect(page.get_by_text("Tier A", exact=False).last).to_be_visible()
+            with page.expect_response(base + "/api/providers") as response:
+                page.get_by_role("link", name="Source status JSON").click()
+            assert response.value.json()["activities"][0]["capability"]["continuous_efforts"] == "INSUFFICIENT"
+            assert not errors and all(url.startswith(base + "/") for url in requests)
+
+
 def test_canonical_qc_versions_flags_pagination_and_keyboard(tmp_path):
     chrome = chrome_executable()
     from playwright.sync_api import expect, sync_playwright

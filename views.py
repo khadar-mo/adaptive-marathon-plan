@@ -19,7 +19,7 @@ fieldset {{display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; padding:
 fieldset > label {{min-width: 0; max-width: 100%}}
 label, input {{display: block}} input, select {{max-width: 100%; box-sizing: border-box}} button, input, select {{font: inherit; padding: .35rem}}
 dt {{font-weight: bold}} dd {{margin: 0 0 .7rem}} li {{margin: .5rem 0}} a {{color: #17523d}}
-nav {{display:flex; gap:1.5rem; padding-bottom:.65rem; border-bottom:1px solid #bccbc2}}
+nav {{display:flex; flex-wrap:wrap; gap:1.5rem; padding-bottom:.65rem; border-bottom:1px solid #bccbc2}}
 h1, h2, h3 {{line-height:1.2}} h2 {{margin:1.75rem 0 .75rem}}
 .totals, .detail-metrics {{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(12rem,100%),1fr)); gap:.7rem 1rem}}
 .totals {{padding:1rem; background:#eff5f0; border-top:2px solid #31654c}}
@@ -31,7 +31,7 @@ th, td {{padding:.35rem .65rem; text-align:left; border-bottom:1px solid #d9e1db
 .recording-table {{min-width:42rem; width:100%}} .recording-table td {{vertical-align:top}}
 .recording-table pre {{max-width:28rem; white-space:pre-wrap}}
 :focus-visible {{outline:3px solid #1a704e; outline-offset:2px}}
-</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a><a href="/context">Context</a></nav><main><h1>{escape(title)}</h1>
+</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a><a href="/providers">Sources</a><a href="/context">Context</a></nav><main><h1>{escape(title)}</h1>
 {content}</main></body></html>"""
 
 
