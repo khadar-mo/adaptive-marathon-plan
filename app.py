@@ -25,6 +25,7 @@ import effort_api
 import recording
 from storage import ActiveImport, Archive, Store
 import views
+from context_web import router as context_router
 
 
 @asynccontextmanager
@@ -42,6 +43,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(context_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 effort_api.register(app)
 
