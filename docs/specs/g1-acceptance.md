@@ -95,7 +95,8 @@ Pass: `test_import_persists_canonical_precision_raw_provenance_and_read_only_pag
 
 **AC-2:** Keep source-specific sample/event versions, existing duplicate links and historical versions; record which source version supplies a canonical view. New config/source version creates new derived provenance without overwriting raw data or historical derived output. Repeated processing of identical inputs/config is idempotent. No migrations or data loss for existing users; GET inspection should not mutate storage. Integrate canonicalization into imports and provide explicit offline backfill/recompute for already archived history.
 
-Pass: config/parser/recompute, linked-old-source/restart, explicit-merge,
+Pass: config/parser/recompute, linked-old-source/restart, alias sport/date edits,
+alias reassignment with both owners refreshed, explicit-merge,
 existing-imported-database and first-importer backfill tests. Existing tables are
 not rebuilt by G1; the importer's pre-existing legacy migration is reused when needed.
 
@@ -117,7 +118,7 @@ and separate-HR assertions. G2 candidate eligibility is not claimed.
 
 **AC-6:** Tests through real import/recompute/API entry points: missing and relative timestamps; timestamp/distance anomalies; 29/30/31s gaps; 10/30s plateau boundaries; 12/12.1m/s; tolerance boundary; confirmed stops; absent/partial events; unchanged raw checksums; repeated processing; config/source changes; duplicate and older source versions; restart/concurrency; existing imported DB migration. Map to Part A T04/T15/T18–T21/T23 prerequisites honestly; leave G2 candidate/extraction assertions to G2.
 
-Pass for G1 software prerequisites: 52 new API/QC/CLI cases plus browser replay.
+Pass for G1 software prerequisites: 55 new API/QC/CLI cases plus browser replay.
 T04 autopause/missing timer state, T15 updated distance with new provenance,
 T18 confirmed pause, T19 absent events with ambiguous stationarity,
 T20 31-second gaps/12.1 m/s jumps, T21 distinct QC configuration versions, and
@@ -131,10 +132,16 @@ Pass: this report, `demo_canonical.py`, inspection UI and updated audit.
 ## 7. Commands and observed verification
 
 - From `tests/`: `PYTHONPATH=.. ../.venv/bin/python -m pytest --rootdir=. -q`:
-  **284 passed, 4 browser tests skipped** without Chrome on PATH.
-- `test_canonical.py`: **52 passed** through synthetic import/recompute/API and CLI.
+  **287 passed, 4 browser tests skipped** without Chrome on PATH.
+- `test_canonical.py`: **55 cases passed** within that suite through synthetic import/recompute/API and CLI.
+  The CLI is invoked by absolute path from an unrelated temporary working directory.
 - Deliberately suppressing the 31-second gap flag and removing confirmed stop
   recognition each caused their public-interface tests to fail; source was restored.
+- Independent review found stale canonical heads after linked Garmin sport/date
+  edits or reassignment, and missing raw references for an excluded observation.
+  The fixes refresh every affected owner within the transaction and retain the new
+  observation. All three public regression cases failed with the previous storage
+  implementation and passed with the fix; historical versions remain unchanged.
 - Native Chrome launch succeeded in an isolated 15-second probe, but its replay
   stalled during page creation before app assertions. The replay was terminated
   at an explicit 110-second host timeout. No lingering replay is relied on as proof.

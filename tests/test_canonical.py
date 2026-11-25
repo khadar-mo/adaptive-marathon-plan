@@ -3,6 +3,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+from pathlib import Path
 import subprocess
 import sys
 
@@ -15,7 +16,7 @@ from fit_fixture import START, make_fit
 from recording import inspect
 from storage import Archive, Store
 from test_fit_import import upload, zipped, resolve, legacy_archive
-from test_imports import digest, history, server, submit
+from test_imports import DETAIL, LISTED, add_run, digest, history, server, submit
 from runs import ConnectionProblem
 
 
@@ -256,6 +257,87 @@ async def test_garmin_distance_correction_creates_new_audit_version_without_raw_
         assert (tmp_path / "archive" / digest(raw)).read_bytes() == raw
 
 
+@pytest.mark.parametrize("edit", ["sport", "date"])
+async def test_linked_alias_edit_refreshes_headline_and_retains_observation(history, tmp_path, edit):
+    week = {"from": "2026-10-19", "to": "2026-10-25"}
+    history.listed = []
+    add_run(history, 91, "2026-10-20")
+    history.original = zipped(trace_fit())
+    async with server() as client:
+        await submit(client, week)
+        history.listed = []
+        add_run(history, 92, "2026-10-21")
+        history.original = zipped(trace_fit(file_number=2))
+        pending = await submit(client, week)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        history.listed = []
+        add_run(history, 91, "2026-10-20", sport="cycling")
+        await submit(client, week)
+        initial = (await client.get('/api/activities/1/canonical')).json()
+        assert initial["running_sport"] and initial["summary"]["local_date"] == "2026-10-21"
+        history.listed = []
+        add_run(history, 92, "2026-10-21", sport="cycling" if edit == "sport" else "running")
+        if edit == "date":
+            history.extra_details["92"]["summaryDTO"]["startTimeLocal"] = "2026-10-29 00:15:00"
+        await submit(client, week)
+        current = (await client.get('/api/activities/1/canonical')).json()
+        detail = (await client.get('/api/activities/1')).json()
+        assert current["version_id"] != initial["version_id"]
+        assert current["running_sport"] == (edit == "date")
+        assert current["summary"]["sport"] == detail["sport"]
+        assert current["summary"]["local_date"] == detail["local_date"]
+        if edit == "date":
+            assert current["summary"]["local_date"] == "2026-10-29"
+        raw_detail = history.wire(history.extra_details["92"])
+        assert digest(raw_detail) in {s["sha256"] for s in current["raw_sources"]}
+        assert (tmp_path / "archive" / digest(raw_detail)).read_bytes() == raw_detail
+        old = (await client.get('/api/activities/1/canonical?version=' + initial["version_id"])).json()
+        assert old["summary"] == initial["summary"] and old["raw_sources"] == initial["raw_sources"]
+        await client.post('/api/activities/1/canonical/recompute', json={})
+        assert (await client.get('/api/activities/1/canonical')).json()["version_id"] == current["version_id"]
+
+
+async def test_alias_reassignment_refreshes_both_owners_and_preserves_history(history, tmp_path):
+    def select(gid, data, sport="running"):
+        history.listed = [{**LISTED, "activityId": gid, "activityType": {"typeKey": sport}}]
+        history.extra_details[str(gid)] = {**DETAIL, "activityId": gid, "activityTypeDTO": {"typeKey": sport}}
+        history.original = zipped(data)
+
+    x, y = trace_fit(), trace_fit(start=START + 600, serial=52, created=START + 600)
+    async with server() as client:
+        select(42, x)
+        await submit(client)
+        select(52, y)
+        await submit(client)
+        select(51, x)
+        pending = await submit(client)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 1})).status_code == 200
+        select(42, x, sport="cycling")
+        await submit(client)
+        initial = [(await client.get(f'/api/activities/{aid}/canonical')).json() for aid in (1, 2)]
+        assert initial[0]["running_sport"]
+        # Remove only the synthetic outer ZIP so the importer fetches changed alias bytes.
+        (tmp_path / "archive" / digest(history.original)).unlink()
+        select(51, y)
+        pending = await submit(client)
+        assert (await resolve(client, pending, {"action": "link", "activity_id": 2})).status_code == 200
+        former = (await client.get('/api/activities/1/canonical')).json()
+        destination = (await client.get('/api/activities/2/canonical')).json()
+        assert not former["running_sport"]
+        assert former["summary"]["sport"] == (await client.get('/api/activities/1')).json()["sport"] == "cycling"
+        assert former["provider_ids"] == [{"provider": "garmin", "id": "42"}]
+        assert destination["provider_ids"] == [{"provider": "garmin", "id": "51"}, {"provider": "garmin", "id": "52"}]
+        assert former["version_id"] != initial[0]["version_id"]
+        assert destination["version_id"] != initial[1]["version_id"]
+        for aid, prior in zip((1, 2), initial):
+            old = (await client.get(f'/api/activities/{aid}/canonical?version=' + prior["version_id"])).json()
+            assert old["summary"] == prior["summary"] and old["provider_ids"] == prior["provider_ids"]
+            assert old["raw_sources"] == prior["raw_sources"]
+        await client.post('/api/canonical/recompute', json={})
+        assert (await client.get('/api/activities/1/canonical')).json()["version_id"] == former["version_id"]
+        assert (await client.get('/api/activities/2/canonical')).json()["version_id"] == destination["version_id"]
+
+
 async def test_explicit_merge_preserves_donor_versions_and_redirects(history):
     history.original_error = ConnectionProblem("Synthetic offline original.")
     async with server() as client:
@@ -371,8 +453,9 @@ async def test_offline_cli_and_concurrent_recompute_read_keep_one_version(histor
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: canonical.recompute(store), range(8)))
     assert all(r == [{"activity_id": 1, "version_id": initial["version_id"]}] for r in results)
-    output = subprocess.run([sys.executable, '../canonical.py', '--database', str(store.path), '--archive', str(store.archive.directory)],
-                            capture_output=True, text=True, check=True)
+    script = Path(__file__).resolve().parents[1] / 'canonical.py'
+    output = subprocess.run([sys.executable, str(script), '--database', str(store.path), '--archive', str(store.archive.directory)],
+                            capture_output=True, text=True, check=True, cwd=tmp_path)
     assert json.loads(output.stdout)["activities"] == results[0]
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM canonical_activity_versions").fetchone()[0] == 1

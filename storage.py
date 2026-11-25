@@ -439,8 +439,12 @@ class Store:
                     fields = fit_store.retain_fit_fields(fields, previous)
                     db.execute(f"UPDATE activities SET {', '.join(k+'=:'+k for k in fields)} WHERE id=:id",
                                {**fields, "id": previous["id"]})
-                    fit_store.save_sources(db, previous["id"], sources, now())
-                    canonical.persist(db, self.archive, previous["id"])
+                # A linked ID can supply the running headline even when it is not
+                # the primary row. Keep its latest observation and derived head.
+                owner = fit_store.garmin_owner(db, gid)
+                if owner:
+                    fit_store.save_sources(db, owner["id"], sources, now())
+                    canonical.persist(db, self.archive, owner["id"])
                 return None
             payload = {"fields": fields, "sources": sources, "warning": warning, "fit": fit,
                        "item": item or gid, "detail_changed": detail_changed}
@@ -458,9 +462,19 @@ class Store:
             if db is None:
                 raise KeyError
         with self.connect(write=True, create=True) as db:
-            target = fit_store.resolve(db, local_id(import_id), local_id(issue_id), action, activity_id, date,
+            import_id, issue_id = local_id(import_id), local_id(issue_id)
+            review = db.execute("""SELECT json_extract(f.payload, '$.fields.garmin_id') AS garmin_id
+                FROM import_issues i JOIN fit_review_issues r ON r.issue_id=i.id
+                JOIN fit_reviews f ON f.key=r.review_key WHERE i.import_id=? AND i.id=?""",
+                                (import_id, issue_id)).fetchone()
+            previous = fit_store.garmin_owner(db, review["garmin_id"]) if review else None
+            target = fit_store.resolve(db, import_id, issue_id, action, activity_id, date,
                                        now(), self.archive.available)
             canonical.persist(db, self.archive, target)
+            # Reassigning an alias also changes the former owner's provider IDs
+            # and possibly its headline. Deleted merge donors retain old versions.
+            if previous and previous["id"] != target:
+                canonical.persist(db, self.archive, previous["id"])
             return target
 
     @staticmethod
