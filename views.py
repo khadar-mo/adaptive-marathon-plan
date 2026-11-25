@@ -1,6 +1,7 @@
 """HTML views of the same local records returned by the API."""
 from datetime import date
 from html import escape
+import json
 from urllib.parse import urlencode
 
 from history import calendar_period, kilometres, UNAVAILABLE
@@ -27,6 +28,8 @@ h1, h2, h3 {{line-height:1.2}} h2 {{margin:1.75rem 0 .75rem}}
 .run-list strong {{display:inline-block; margin-right:.65rem}}
 .table-wrap {{max-width:100%; overflow:auto}} table {{border-collapse:collapse}}
 th, td {{padding:.35rem .65rem; text-align:left; border-bottom:1px solid #d9e1db}}
+.recording-table {{min-width:42rem; width:100%}} .recording-table td {{vertical-align:top}}
+.recording-table pre {{max-width:28rem; white-space:pre-wrap}}
 :focus-visible {{outline:3px solid #1a704e; outline-offset:2px}}
 </style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a></nav><main><h1>{escape(title)}</h1>
 {content}</main></body></html>"""
@@ -292,4 +295,100 @@ def activity(row):
                  '</tbody></table></div>') if laps else '<p>Not available</p>'
     return page(row["name"] or "Activity detail", f"""
 {garmin_link}<dl class="detail-metrics">{''.join(values)}</dl>{warnings}<h2>Recorded laps</h2>{lap_table}
+<p><a href="/activities/{row["id"]}/recording">Inspect recorded samples and events</a></p>
 <p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
+
+
+def recording_page(row):
+    def value(item, unit=""):
+        return "Not provided" if item is None else escape(f"{item}{unit}")
+
+    def raw(fields, title="Decoded fields"):
+        return f'<details><summary>{title}</summary><pre style="white-space:pre-wrap">' + escape(
+            json.dumps(fields, indent=2, ensure_ascii=False, sort_keys=True)) + '</pre></details>'
+
+    def table(caption, headings, rows):
+        return '<div class="table-wrap" tabindex="0" role="region" aria-label="' + caption + '"><table class="recording-table"><caption>' + caption + '</caption><thead><tr>' + ''.join(
+            f'<th scope="col">{h}</th>' for h in headings) + '</tr></thead><tbody>' + ''.join(
+            '<tr>' + ''.join(f'<td>{cell}</td>' for cell in cells) + '</tr>' for cells in rows) + '</tbody></table></div>'
+
+    aid = row["activity_id"]
+    base = f'/activities/{aid}/recording'
+    source = row["selected_fit_sha256"]
+    samples = row["samples"]
+    query = {"source": source, "limit": samples["limit"]} if source else {"limit": samples["limit"]}
+    json_link = f'/api/activities/{aid}/recording?' + urlencode({**query, "offset": samples["offset"]})
+    content = f'<p><a href="/activities/{aid}">Back to activity {aid}</a> · <a href="{escape(json_link)}">Recording JSON</a></p>'
+    content += '<p>Inspect the original watch recording. All timestamps below are UTC; distances are cumulative metres. '
+    content += 'On narrow screens, scroll tables sideways to see every column.</p>'
+    content += '<h2>Original file</h2>'
+    if row["recordings"]:
+        options = ''.join(f'<option value="{r["fit_sha256"]}"' + (' selected' if r["fit_sha256"] == source else '') +
+                          f'>{i + 1} · {r["fit_sha256"][:16]}…</option>' for i, r in enumerate(row["recordings"]))
+        content += f'<form method="get" action="{base}"><fieldset><legend>Choose a recording</legend>' + (
+            '<label>Original FIT<select name="source">' + options + '</select></label>' +
+            f'<input type="hidden" name="limit" value="{samples["limit"]}"><button>Show recording</button></fieldset></form>')
+        content += '<p>Linked files and older versions remain separate here. These values come from the selected file; '
+        content += 'the activity summary may use a different source.</p>'
+        content += f'<dl><dt>FIT SHA-256</dt><dd>{source}</dd></dl>'
+        selected = next(r for r in row["recordings"] if r["fit_sha256"] == source)
+        content += raw({**row["provenance"], "archive_sources": selected["sources"]}, "Source and decoder provenance")
+    content += '<h2>Coverage and limitations</h2><ul>' + ''.join(f'<li>{escape(t)}</li>' for t in row["limitations"]) + '</ul>'
+    if row["state"] != "AVAILABLE":
+        content += '<p><a href="/imports">Open Imports</a> to restore an original file.</p>'
+        return page("Recorded samples and events", content)
+    header = row["header"]
+    content += '<h2>Recorded session</h2><dl class="detail-metrics">' + ''.join(
+        f'<div><dt>{title}</dt><dd>{value(header[key], unit)}</dd></div>' for title, key, unit in (
+            ("Start (UTC)", "start_utc", ""), ("End (UTC)", "end_utc", ""), ("Sport", "sport", ""),
+            ("Distance", "distance_m", " m"), ("Elapsed time", "elapsed_seconds", " s"),
+            ("Watch timer", "timer_seconds", " s"), ("Moving time", "moving_seconds", " s"))) + '</dl>'
+    content += raw(header, "Session, device and recorded time fields")
+    channels = row["coverage"]
+    names = {"timestamp_utc": "Timestamp (UTC)", "distance_m": "Cumulative distance (m)",
+             "heart_rate_bpm": "Heart rate (bpm)", "elevation_m": "Elevation (m)", "speed_m_per_s": "Speed (m/s)",
+             "cadence_rpm": "Cadence (recorded rpm)", "temperature_c": "Temperature (°C)", "gps": "GPS coordinates"}
+    statuses = {"RECORDED": "Recorded", "PARTIAL": "Partial", "NOT_PROVIDED": "Not provided"}
+    content += table("Sample field coverage", ("Field", "Coverage", "Present / total", "Missing"), (
+        (names[key], statuses[c["status"]], f'{c["present"]} / {c["total"]}', str(c["missing"]))
+        for key, c in channels["samples"].items()))
+    content += '<p>Counts include readable values only. Decoded fields retain the original SDK values, including '
+    content += 'unusable timestamps. GPS uses FIT semicircles; cadence is shown in the file’s recorded rpm.</p>'
+    content += '<h2>Timer and other events</h2><p>Timer-event coverage: <strong>' + statuses[channels["timer_events"]] + '</strong>. '
+    content += f'{channels["timer_event_count"]} timer events; {channels["event_count"]} events in total.</p>'
+    if row["events"]:
+        content += table("Events in file order", ("Event index", "Timestamp (UTC)", "Event", "Type", "Source fields"), (
+            (str(e["event_index"]), value(e["timestamp_utc"]), escape(e["event"].replace("_", " ")),
+             escape(e["event_type"].replace("_", " ")), raw(e["fields"])) for e in row["events"]))
+    else:
+        content += '<p>No event messages supplied. Pause and resume history is unknown.</p>'
+    content += '<h2>Lap markers</h2>'
+    if row["laps"]:
+        content += '<p>Start timestamp coverage: ' + statuses[channels["lap_start_utc"]["status"]] + '; end timestamp coverage: '
+        content += statuses[channels["lap_end_utc"]["status"]] + '. Lap indices start at zero and retain file order.</p>'
+        content += table("Laps in file order", ("Lap index", "Start (UTC)", "End (UTC)", "Distance", "Elapsed", "Timer", "Source fields"), (
+            (str(lap["lap_index"]), value(lap["start_utc"]), value(lap["end_utc"]), value(lap["distance_m"], " m"),
+             value(lap["elapsed_seconds"], " s"), value(lap["timer_seconds"], " s"), raw(lap["fields"])) for lap in row["laps"]))
+    else:
+        content += '<p>Lap markers not provided.</p>'
+    content += '<h2 id="samples">Recorded samples</h2>'
+    total, offset, limit = samples["total"], samples["offset"], samples["limit"]
+    content += f'<p>{total} records in total. Indices start at zero and are stable within this original file.</p>'
+    links = []
+    if offset > 0:
+        previous = min(max(0, offset - limit), max(0, ((total - 1) // limit) * limit))
+        links.append('<a href="' + escape(base + '?' + urlencode({**query, "offset": previous})) + '#samples">Previous samples</a>')
+    if offset + limit < total:
+        links.append('<a href="' + escape(base + '?' + urlencode({**query, "offset": offset + limit})) + '#samples">Next samples</a>')
+    pager = '<p>' + ' · '.join(links) + '</p>' if links else ''
+    content += pager
+    if samples["rows"]:
+        content += table(f'Records {offset}–{offset + len(samples["rows"]) - 1}',
+                         ("Record index", "Timestamp (UTC)", "Distance (m)", "Heart rate (bpm)", "Source fields"), (
+            (str(s["record_index"]), value(s["timestamp_utc"]), value(s["distance_m"]), value(s["heart_rate_bpm"]), raw(s["fields"]))
+            for s in samples["rows"]))
+    elif total:
+        content += '<p>No records on this page. Use Previous samples to return to the recording.</p>'
+    else:
+        content += '<p>No sample records supplied. This file provides summary data only.</p>'
+    return page("Recorded samples and events", content + pager)
