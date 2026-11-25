@@ -115,6 +115,40 @@ fabricate manual comparisons, scientific validation, or runtime athlete approval
 Unverified outputs must not become downstream coaching authority merely because
 their software is merged.
 
+## Provider-mode software — issue #28
+
+Supported provider orchestration adds persisted mode revisions, explicit attempt
+outcomes, source/capability/coverage UI and API, and a loopback configuration CLI.
+Garmin/FIT imports continue through G1 canonical identities and immutable source
+versions; modes never remove saved actuals. Empty relevant data, outage, offline,
+authorization, forbidden, rate-limit and unsupported response states remain
+distinct. Fallback records its cause and the unavailable secondary branch.
+See the [ten-item provider acceptance report](provider-modes-acceptance.md) for
+synthetic contracts, duplicate/correction evidence, API/CLI/UI checks and limits.
+
+**Live persistent Strava analytics remains EXTERNALLY BLOCKED by #33.** Official
+terms effective 1 June 2026, verified 25 November 2026, conflict with the requested
+combined analytical archive. #28 denies that branch with `POLICY_BLOCKED` before
+fetch or raw persistence. Strava-only analytics is unavailable; Both retains
+supported Garmin output with the limitation; Garmin-primary fallback exposes the
+block. Synthetic eligible-secondary decisions are not live-mode verification.
+The original full four-mode requirement remains visible and unfulfilled in part.
+
+#33 does not block G2–G6 or planner software: G6 consumes supported ingress and
+explicit unavailable states. A23/M08 downstream planner acceptance, manual
+Garmin comparisons and prospective scientific evidence remain separate. No
+provider policy or runtime athlete approval is waived by software merge.
+
+The provider branch incorporates merged contextual-input main `e7b05cd` and
+preserves both schema sets, navigation entries and runtime forms. Integration
+checks passed 368 local tests (six browser replays require final CI) and a fresh
+Chrome source/context save-and-return walkthrough retained exact context decimals.
+An independent-review correction retains live provider-attempt ownership until
+the outer result commits, preventing false interrupted pages after Garmin ends.
+Barrier, worker-failure and fresh-process regressions preserve read-only GETs and
+genuine interruption recovery; the corrected local suite passes 371 tests with
+six browser skips pending final-head CI.
+
 ## Optional contextual inputs — issue #29
 
 The independent ingestion prerequisite for G5 now has additive append-only wellness,

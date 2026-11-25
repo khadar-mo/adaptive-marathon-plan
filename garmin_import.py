@@ -17,11 +17,11 @@ PAGE_SIZE = 20
 
 def open_garmin():
     if os.environ.get("RUNS_GARMIN_OFFLINE") == "1":
-        raise runs.ConnectionProblem("Garmin is offline. Restart with Garmin enabled and retry these dates.")
+        raise runs.ConnectionProblem("Garmin is offline. Restart with Garmin enabled and retry these dates.", code="OFFLINE")
     try:
         settings = runs.load_settings()
     except (OSError, ValueError):
-        raise runs.ConnectionProblem("Garmin credential setup failed. Check your settings and retry.") from None
+        raise runs.ConnectionProblem("Garmin credential setup failed. Check your settings and retry.", code="AUTH_REQUIRED") from None
     return runs.GarminClient(settings)
 
 
@@ -32,7 +32,7 @@ def decode(data, kind, expected):
             raise ValueError
         return parsed
     except (ValueError, RecursionError):
-        raise runs.ConnectionProblem(f"Unexpected Garmin {kind} JSON. Check Garmin availability and retry.") from None
+        raise runs.ConnectionProblem(f"Unexpected Garmin {kind} JSON. Check Garmin availability and retry.", code="UNSUPPORTED") from None
 
 
 def cached_source(archive, digest):
@@ -136,7 +136,7 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, ver
                detail_changed=detail_changed, status=status)
 
 
-def process_item(client, store, archive, scan, garmin_id, listed, page_digest, pending, from_search=True):
+def process_item(client, store, archive, scan, garmin_id, listed, page_digest, pending, from_search=True, problems=None):
     # If recording the discovery itself fails, the range cannot claim enumeration.
     local = local_timestamp(listed.get("startTimeLocal"))
     versions, reusable = store.observe(scan["id"], garmin_id, local[:10] if local else None, page_digest,
@@ -144,6 +144,8 @@ def process_item(client, store, archive, scan, garmin_id, listed, page_digest, p
     try:
         import_one(client, store, archive, scan, garmin_id, listed, page_digest, versions, reusable, pending)
     except runs.ConnectionProblem as err:
+        if problems is not None:
+            problems.append(err.code)
         store.issue(scan["import_id"], garmin_id, "Activity detail", str(err))
     except (UnicodeError, OverflowError):
         store.issue(scan["import_id"], garmin_id, "Activity detail", "Invalid activity fields. Check Garmin and retry.")
@@ -156,7 +158,7 @@ def valid_id(item):
     return value if re.fullmatch(r"[1-9][0-9]*", value) else None
 
 
-def scan_range(client, store, archive, scan):
+def scan_range(client, store, archive, scan, problems=None):
     import_id, scan_id = scan["import_id"], scan["id"]
     first, last = scan["first"], scan["last"]
     label = f"{first} to {last}"
@@ -171,6 +173,8 @@ def scan_range(client, store, archive, scan):
             page_digest = archive.put(data)
             page = decode(data, "activity list", list)
         except runs.ConnectionProblem as err:
+            if problems is not None:
+                problems.append(err.code)
             store.issue(import_id, label, "Activity search", f"Offset {offset}. {err}")
             return
         store.write_report("UPDATE garmin_scans SET pages=pages+1 WHERE id=?", (scan_id,))
@@ -189,7 +193,7 @@ def scan_range(client, store, archive, scan):
             elif garmin_id not in seen:
                 seen.add(garmin_id)
                 progress = True
-                process_item(client, store, archive, scan, garmin_id, listed, page_digest, pending.get(garmin_id))
+                process_item(client, store, archive, scan, garmin_id, listed, page_digest, pending.get(garmin_id), problems=problems)
         if not progress:
             store.issue(import_id, label, "Activity search", f"Offset {offset} repeated previously returned records. Recheck these dates.")
             return
@@ -207,12 +211,15 @@ def scan_range(client, store, archive, scan):
                 listed = next((row for row in decode(raw, "archived list", list) if valid_id(row) == garmin_id), listed)
             else:
                 page_digest = None
-        process_item(client, store, archive, scan, garmin_id, listed, page_digest, item, from_search=False)
+        process_item(client, store, archive, scan, garmin_id, listed, page_digest, item, from_search=False, problems=problems)
     store.write_report("UPDATE garmin_scans SET enumerated=1 WHERE id=?", (scan_id,))
 
 
-def run_import(store, archive, import_id):
+def run_import(store, archive, import_id, *, observation=False):
     state = "failed"
+    problems = []
+    report = None
+    canonical_versions = []
     label = f"Import {import_id}"
     operation = "Index archived originals"
     try:
@@ -224,7 +231,7 @@ def run_import(store, archive, import_id):
         for scan in scans:
             label = f'{scan["first"]} to {scan["last"]}'
             operation = "Scan date range"
-            scan_range(client, store, archive, scan)
+            scan_range(client, store, archive, scan, problems)
         operation = "Read import report"
         report = store.report(str(import_id))
         if all(s["coverage"] in ("checked", "checked_empty") for s in report["scans"]):
@@ -232,6 +239,7 @@ def run_import(store, archive, import_id):
         elif any(s["pages_read"] for s in report["scans"]):
             state = "partial"
     except runs.ConnectionProblem as err:
+        problems.append(err.code)
         store.issue(import_id, label, "Activity search", str(err))
     except ArchivePermissionsError as err:
         store.issue(import_id, label, "Private archive", str(err))
@@ -240,4 +248,23 @@ def run_import(store, archive, import_id):
     except Exception:
         store.issue(import_id, label, "Import", "Unexpected import error. Check the saved activities and retry these dates.")
     finally:
-        store.finish(import_id, state)
+        try:
+            if observation:
+                # Capture exact canonical heads while this worker still owns the
+                # import guard; a later correction cannot change this attempt.
+                report = store.report(str(import_id))
+                ids = [a["id"] for a in report["activities"]]
+                with store.connect() as db:
+                    canonical_versions = [dict(r) for r in db.execute("""SELECT activity_id, version_id
+                        FROM canonical_activity_heads WHERE activity_id IN (SELECT value FROM json_each(?))
+                        ORDER BY activity_id""", (json.dumps(ids),))]
+        finally:
+            store.finish(import_id, state)
+    if not observation:
+        return
+    ids = [a["id"] for a in report["activities"]]
+    complete = state == "complete"
+    status = "AVAILABLE" if complete and ids else "EMPTY_RELEVANT" if complete else problems[0] if problems else "INCOMPLETE"
+    return {"state": status, "activity_ids": ids, "problem_codes": list(dict.fromkeys(problems)),
+            "coverage": "CHECKED" if complete else "INCOMPLETE", "scans": report["scans"], "import_id": import_id,
+            "canonical_versions": canonical_versions}

@@ -23,6 +23,8 @@ import history
 import canonical
 import effort_api
 import recording
+import provider_modes
+import provider_views
 from storage import ActiveImport, Archive, Store
 import views
 from context_web import router as context_router
@@ -116,6 +118,56 @@ class DateRange(BaseModel):
 
 def report_links(import_id):
     return {"id": import_id, "report_url": f"/api/imports/{import_id}", "html_url": f"/imports/{import_id}"}
+
+
+class ProviderConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["GARMIN_ONLY", "STRAVA_ONLY", "BOTH", "GARMIN_PRIMARY_FALLBACK"]
+    expected_revision: int = Field(ge=0, le=2**63 - 1, strict=True)
+
+
+@app.get("/api/providers")
+def provider_status():
+    return provider_modes.status(app.state.store)
+
+
+@app.post("/api/providers/config")
+def provider_configuration(choice: ProviderConfiguration):
+    try:
+        config = provider_modes.configure(app.state.store, choice.mode, choice.expected_revision)
+    except provider_modes.StaleConfiguration as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"config": config, "html_url": "/providers"}
+
+
+@app.post("/api/providers/import", status_code=202)
+def provider_import(dates: DateRange, background: BackgroundTasks):
+    try:
+        attempt_id, import_id = provider_modes.start(app.state.store, dates.first, dates.last)
+    except ActiveImport as active:
+        return JSONResponse({"detail": "An import is already running.", **report_links(active.import_id)}, status_code=409)
+    if import_id is not None:
+        background.add_task(provider_modes.run, app.state.store, app.state.archive, attempt_id, import_id)
+    return {"id": attempt_id, "attempt_url": f"/api/provider-attempts/{attempt_id}",
+            "html_url": f"/providers?attempt={attempt_id}"}
+
+
+@app.post("/api/imports/strava")
+def strava_import(dates: DateRange):
+    return JSONResponse({"detail": provider_modes.POLICY["reason"], **provider_modes.strava_analytics()}, status_code=403)
+
+
+@app.get("/api/provider-attempts/{attempt_id}")
+def provider_attempt(attempt_id: str):
+    result = provider_modes.read_attempt(app.state.store, attempt_id)
+    if result is None:
+        raise HTTPException(404, "Source import attempt not found.")
+    return result
+
+
+@app.get("/providers", response_class=HTMLResponse)
+def providers_page(attempt: str | None = None):
+    return provider_views.page(provider_status(), provider_attempt(attempt) if attempt is not None else None)
 
 
 @app.post("/api/imports/garmin", status_code=202)

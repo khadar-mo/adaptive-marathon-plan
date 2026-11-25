@@ -30,13 +30,24 @@ STRAVA_RECONNECT = "Check your Strava app settings and run python3 runs.py strav
 
 
 class ConnectionProblem(Exception):
-    pass
+    def __init__(self, message, *, code="UNAVAILABLE"):
+        self.code = code
+        super().__init__(message)
 
 
 class ProviderError(ConnectionProblem):
     def __init__(self, status, message):
         self.status = status
-        super().__init__(message)
+        super().__init__(message, code={401: "AUTH_REQUIRED", 403: "FORBIDDEN", 404: "NOT_FOUND",
+                                       429: "RATE_LIMITED"}.get(status, "UNAVAILABLE" if status >= 500 else "UNSUPPORTED"))
+
+
+class AuthorizationCode(str):
+    """Keep accepted scopes alongside the existing string-compatible OAuth code."""
+    def __new__(cls, value, scopes):
+        result = super().__new__(cls, value)
+        result.scopes = scopes
+        return result
 
 
 def load_settings():
@@ -60,7 +71,7 @@ def load_settings():
 def required(settings, name):
     value = settings.get(name)
     if not value:
-        raise ConnectionProblem(f"Credential setup failed. Set {name} in .env and retry.")
+        raise ConnectionProblem(f"Credential setup failed. Set {name} in .env and retry.", code="AUTH_REQUIRED")
     return value
 
 
@@ -85,7 +96,7 @@ def retry_advice(header):
     return "Wait for the rate limit to reset and retry."
 
 
-def request(url, *, step, reconnect, headers=None, form=None, method=None, plain=False, raw=False):
+def request(url, *, step, reconnect, headers=None, form=None, method=None, plain=False, raw=False, response_metadata=None):
     body = urlencode(form).encode() if form is not None else None
     headers = {"Accept": "*/*" if plain or raw else "application/json", **(headers or {})}
     if any(not value.isascii() or not value.isprintable() for value in headers.values()):
@@ -93,11 +104,17 @@ def request(url, *, step, reconnect, headers=None, form=None, method=None, plain
     req = Request(url, data=body, headers=headers, method=method)
     try:
         with build_opener(NoRedirect()).open(req, timeout=PROVIDER_TIMEOUT) as response:
+            if response_metadata is not None:
+                response_metadata.update({name: response.headers.get(name) for name in
+                    ("X-RateLimit-Limit", "X-RateLimit-Usage", "X-ReadRateLimit-Limit", "X-ReadRateLimit-Usage", "Retry-After")})
             if raw:
                 return response.read()
             return response.read().decode().strip() if plain else json.load(response)
     except HTTPError as err:
         with err:
+            if response_metadata is not None:
+                response_metadata.update({name: err.headers.get(name) for name in
+                    ("X-RateLimit-Limit", "X-RateLimit-Usage", "X-ReadRateLimit-Limit", "X-ReadRateLimit-Usage", "Retry-After")})
             if err.code == 429:
                 reason = "Rate limit reached. " + retry_advice(err.headers.get("Retry-After"))
             elif err.code in (400, 401, 403):
@@ -112,7 +129,7 @@ def request(url, *, step, reconnect, headers=None, form=None, method=None, plain
             raise ConnectionProblem(f"{step} timed out. Check your connection and retry.") from None
         raise ConnectionProblem(f"{step} failed. Check your network connection and retry.") from None
     except (ValueError, RecursionError):
-        raise ConnectionProblem(f"{step}: unexpected response. Check provider availability and retry.") from None
+        raise ConnectionProblem(f"{step}: unexpected response. Check provider availability and retry.", code="UNSUPPORTED") from None
 
 
 def activity_page(url, token, params, *, step, reconnect, id_field):
@@ -143,9 +160,9 @@ def garmin_token(settings):
         advice = f"Set {name} in {source} and retry."
         if from_shell:
             advice += " Unset the empty shell value to use .env."
-        raise ConnectionProblem(f"Garmin credential setup failed. {advice}")
+        raise ConnectionProblem(f"Garmin credential setup failed. {advice}", code="AUTH_REQUIRED")
     if re.match(r"^(?:Authorization:|ApiKey\s|Bearer\s)", key, re.IGNORECASE):
-        raise ConnectionProblem(f"Garmin credential setup: set {name} in {source} to the raw Personal API key.")
+        raise ConnectionProblem(f"Garmin credential setup: set {name} in {source} to the raw Personal API key.", code="AUTH_REQUIRED")
     credential_help = f"Check the raw {name} from {source} and its active status in Garmin Connect."
     if from_shell:
         credential_help += " The shell value overrides .env."
@@ -174,7 +191,7 @@ class GarminClient:
                     raise
                 self.token = None
                 if attempt == 1:
-                    raise ConnectionProblem(f"{step}: HTTP 401 after a new bearer token. {GARMIN_RECONNECT}") from None
+                    raise ConnectionProblem(f"{step}: HTTP 401 after a new bearer token. {GARMIN_RECONNECT}", code="AUTH_REQUIRED") from None
 
     def search(self, params, *, raw=False):
         path = "/activitylist-service/activities/search/activities?" + urlencode(params)
@@ -219,6 +236,7 @@ def strava_code(client_id, redirect):
                 result["error"] = "Strava sign-in: allow activity read access and retry --connect."
             else:
                 result["code"] = params["code"][0]
+                result["scopes"] = sorted(set(params.get("scope", [""])[0].replace(",", " ").split()))
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -243,7 +261,7 @@ def strava_code(client_id, redirect):
             server.handle_request()
     if "code" not in result:
         raise ConnectionProblem(result.get("error", "Strava sign-in timed out. Run the command again."))
-    return result["code"]
+    return AuthorizationCode(result["code"], result["scopes"])
 
 
 def read_grant(path):
@@ -290,6 +308,7 @@ def strava_token(settings, connect=False, rejected=None):
     fingerprint = hashlib.sha256(seed.encode()).hexdigest() if seed else None
     with (directory / f"strava-{client_id}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        grant = {}
         if not connect:
             grant = read_grant(path)
             # New .env credentials select a new grant. Otherwise keep Strava's latest rotation.
@@ -319,6 +338,11 @@ def strava_token(settings, connect=False, rejected=None):
                 or type(reply.get("expires_at")) is not int):
             raise ConnectionProblem(f"{step}: unexpected token response. {STRAVA_RECONNECT}")
         saved = {key: reply[key] for key in ("access_token", "refresh_token", "expires_at")}
+        # Preserve only the authenticated athlete ID and accepted scopes, never
+        # the token reply's profile. Old grants honestly retain unknown scope.
+        saved["scopes"] = list(code.scopes) if connect and isinstance(code, AuthorizationCode) else grant.get("scopes")
+        athlete = reply.get("athlete")
+        saved["athlete_id"] = athlete["id"] if isinstance(athlete, dict) and type(athlete.get("id")) is int else grant.get("athlete_id")
         save_grant(path, {**saved, "seed": fingerprint})
         return saved["access_token"]
 
