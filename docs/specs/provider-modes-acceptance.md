@@ -127,3 +127,33 @@ unfulfilled under [external blocker #33](https://github.com/khadar-mo/adaptive-m
     CI run and any base-integration fixes. The coordinator owns the merge and
     records final proof in parent #15. External #33 remains open regardless of
     supported-source software completion.
+
+### Independent-review correction: outer import finalization
+
+Review of `4521ead` found a live-state race: Garmin finished its inner import
+before the provider attempt persisted its final result. A GET in that interval
+showed `INTERRUPTED`, which disabled HTML refresh despite the active outer worker.
+The synchronized public regression
+`test_finished_inner_import_keeps_live_outer_attempt_refreshing` reproduced the
+failure on the reviewed code before the fix.
+
+The Store now owns active provider workers through final result commit and clears
+ownership in `finally`. Read-only APIs inspect that ownership and queued import
+ownership at the same locked read boundary, using recovery-lock-before-SQLite
+ordering. A worker failure clears ownership; a fresh process has no inherited
+ownership. `test_outer_worker_failure_does_not_leave_attempt_running` and
+`test_real_restart_marks_abandoned_outer_attempt_interrupted` verify those cases,
+including a fresh Uvicorn subprocess and unchanged database bytes across GETs.
+No schema migration or production test switch was introduced.
+
+An actual Chrome CUA demonstration used a temporary synthetic launch wrapper to
+hold the worker after inner completion. API evidence showed the inner import was
+`failed` while the outer remained `RUNNING`; the page showed “Import in progress”
+with its refresh script. Releasing the barrier automatically updated the same tab
+to `OFFLINE`, cause `GARMIN_OFFLINE`, and fallback `POLICY_BLOCKED`; refresh stopped
+only at that terminal result. Console warning/error logs were empty. The wrapper
+was not committed, its server was stopped, and browser viewport was unchanged.
+
+The fix passes 371 local tests with six browser skips; final-head CI and
+changed-diff independent review remain required. This corrects lifecycle
+reporting only and does not change source availability or external #33.

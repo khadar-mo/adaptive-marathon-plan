@@ -222,6 +222,9 @@ class Store:
         self.recovery_pending = True
         self.finish_failure = None
         self.active_import = None
+        # Provider workers outlive the inner Garmin import while committing their
+        # final outcome. Process-local ownership deliberately disappears on restart.
+        self.active_provider_attempts = set()
 
     @contextmanager
     def connect(self, *, write=False, create=False, timeout=5):

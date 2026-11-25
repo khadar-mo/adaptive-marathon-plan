@@ -1,14 +1,18 @@
 """Synthetic provider contracts and real local API/CLI paths; no private calls."""
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
+import httpx
 import pytest
 
 import app
 import canonical
+import garmin_import
 import provider_modes
 import runs
 from storage import Archive, Store
@@ -248,6 +252,86 @@ async def test_config_concurrency_and_interrupted_attempt(history):
         result = (await client.get(f"/api/provider-attempts/{attempt_id}")).json()
         assert result["result"]["providers"]["garmin"]["state"] == "INTERRUPTED"
         assert result["result"]["providers"]["garmin"]["coverage"] == "INCOMPLETE"
+
+
+async def test_finished_inner_import_keeps_live_outer_attempt_refreshing(history, tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNS_GARMIN_OFFLINE", "1")
+    inner_finished, release_outer = threading.Event(), threading.Event()
+    original = garmin_import.run_import
+
+    def held_worker(*args, **kwargs):
+        observation = original(*args, **kwargs)
+        inner_finished.set()
+        assert release_outer.wait(10), "Test did not release the provider worker"
+        return observation
+
+    monkeypatch.setattr(garmin_import, "run_import", held_worker)
+    async with server() as client:
+        await choose(client, "GARMIN_PRIMARY_FALLBACK")
+        submitted = asyncio.create_task(client.post("/api/providers/import", json=DAY))
+        try:
+            assert await asyncio.to_thread(inner_finished.wait, 5)
+            # The inner importer has committed its terminal state and released
+            # its guard, but this public request's provider worker is still alive.
+            assert (await client.get("/api/imports/1")).json()["state"] == "failed"
+            before = (tmp_path / "runs.sqlite3").read_bytes()
+            pending = (await client.get("/api/provider-attempts/1")).json()
+            assert pending["result"]["state"] == "RUNNING"
+            assert (await client.get("/api/providers")).json()["attempts"][0]["result"]["state"] == "RUNNING"
+            html = (await client.get("/providers?attempt=1")).text
+            assert "Import in progress" in html and "setTimeout" in html
+            assert (tmp_path / "runs.sqlite3").read_bytes() == before
+        finally:
+            release_outer.set()
+            response = await submitted
+        assert response.status_code == 202
+        result = (await client.get(response.json()["attempt_url"])).json()["result"]
+        assert result["state"] == "OFFLINE"
+        assert result["fallback_reason"] == "GARMIN_OFFLINE"
+        assert result["fallback_state"] == "POLICY_BLOCKED"
+        assert "setTimeout" not in (await client.get("/providers?attempt=1")).text
+
+
+async def test_outer_worker_failure_does_not_leave_attempt_running(history, monkeypatch):
+    monkeypatch.setenv("RUNS_GARMIN_OFFLINE", "1")
+    original = garmin_import.run_import
+
+    def abandoned_worker(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("Synthetic failure before outer result persistence")
+
+    monkeypatch.setattr(garmin_import, "run_import", abandoned_worker)
+    async with server() as client:
+        await choose(client, "GARMIN_PRIMARY_FALLBACK")
+        with pytest.raises(RuntimeError, match="Synthetic failure"):
+            await client.post("/api/providers/import", json=DAY)
+        result = (await client.get("/api/provider-attempts/1")).json()["result"]
+        assert result["state"] == "INTERRUPTED"
+        assert result["fallback_reason"] == "GARMIN_INTERRUPTED"
+        assert result["fallback_state"] == "POLICY_BLOCKED"
+        assert "setTimeout" not in (await client.get("/providers?attempt=1")).text
+
+
+async def test_real_restart_marks_abandoned_outer_attempt_interrupted(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNS_GARMIN_OFFLINE", "1")
+    path = tmp_path / "runs.sqlite3"
+    store = Store(path)
+    provider_modes.configure(store, "GARMIN_PRIMARY_FALLBACK", 0)
+    attempt_id, import_id = provider_modes.start(store, DAY["from"], DAY["to"])
+    # Durable state at a process death after the inner import ended, before the
+    # provider result committed. No outer worker survives into the new process.
+    garmin_import.run_import(store, store.archive, import_id, observation=True)
+    with serve_database(path) as port:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
+            before = path.read_bytes()
+            response = client.get(f"/api/provider-attempts/{attempt_id}")
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert result["state"] == "INTERRUPTED"
+            assert result["providers"]["garmin"]["coverage"] == "INCOMPLETE"
+            assert result["fallback_reason"] == "GARMIN_INTERRUPTED" and result["fallback_state"] == "POLICY_BLOCKED"
+            assert "setTimeout" not in client.get(f"/providers?attempt={attempt_id}").text
+            assert path.read_bytes() == before
 
 
 async def test_actual_cli_config_status_and_import_with_loopback_server(tmp_path):

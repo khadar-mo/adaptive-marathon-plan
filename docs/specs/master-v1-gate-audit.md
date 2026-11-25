@@ -132,6 +132,11 @@ The provider branch incorporates merged contextual-input main `e7b05cd` and
 preserves both schema sets, navigation entries and runtime forms. Integration
 checks passed 368 local tests (six browser replays require final CI) and a fresh
 Chrome source/context save-and-return walkthrough retained exact context decimals.
+An independent-review correction retains live provider-attempt ownership until
+the outer result commits, preventing false interrupted pages after Garmin ends.
+Barrier, worker-failure and fresh-process regressions preserve read-only GETs and
+genuine interruption recovery; the corrected local suite passes 371 tests with
+six browser skips pending final-head CI.
 
 ## Optional contextual inputs — issue #29
 

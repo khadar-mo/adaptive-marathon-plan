@@ -128,24 +128,31 @@ def start(store, first, last):
 def run(store, archive, attempt_id, import_id):
     from garmin_import import run_import
 
-    observation = run_import(store, archive, import_id, observation=True)
-    with store.connect(write=True) as db:
-        mode = db.execute("SELECT mode FROM provider_attempts WHERE id=?", (attempt_id,)).fetchone()[0]
-        # Policy is checked independently of Garmin's outcome, never via OAuth.
-        result = decide(mode, observation, strava_analytics())
-        db.execute("UPDATE provider_attempts SET result=?, finished_at=? WHERE id=? AND result IS NULL",
-                   (canonical.encoded(result), canonical.knowledge_time(), attempt_id))
+    with store.recovery_lock:
+        store.active_provider_attempts.add(attempt_id)
+    try:
+        observation = run_import(store, archive, import_id, observation=True)
+        with store.connect(write=True) as db:
+            mode = db.execute("SELECT mode FROM provider_attempts WHERE id=?", (attempt_id,)).fetchone()[0]
+            # Policy is checked independently of Garmin's outcome, never via OAuth.
+            result = decide(mode, observation, strava_analytics())
+            db.execute("UPDATE provider_attempts SET result=?, finished_at=? WHERE id=? AND result IS NULL",
+                       (canonical.encoded(result), canonical.knowledge_time(), attempt_id))
+    finally:
+        with store.recovery_lock:
+            store.active_provider_attempts.discard(attempt_id)
 
 
-def attempt_row(db, row):
+def attempt_row(row, active_attempts, active_import):
     result = dict(row)
     if row["result"] is not None:
         result["result"] = json.loads(row["result"])
     else:
-        imported = db.execute("SELECT state FROM imports WHERE id=?", (row["import_id"],)).fetchone()
-        # A stopped worker must never appear to be running forever or certify
-        # empty history. Existing import recovery owns the durable import state.
-        state = "RUNNING" if imported and imported[0] == "running" else "INTERRUPTED"
+        # The import guard covers queued work; explicit outer ownership covers
+        # result persistence after Garmin finishes. Failed workers clear ownership,
+        # and a restarted Store owns neither, even if the inner row was terminal.
+        live = row["id"] in active_attempts or row["import_id"] is not None and row["import_id"] == active_import
+        state = "RUNNING" if live else "INTERRUPTED"
         result["result"] = decide(row["mode"], {"state": state, "activity_ids": [], "coverage": "INCOMPLETE"},
                                   strava_analytics())
     result.update(html_url=f'/providers?attempt={row["id"]}', attempt_url=f'/api/provider-attempts/{row["id"]}')
@@ -158,11 +165,14 @@ def attempt_row(db, row):
 def read_attempt(store, attempt_id):
     from storage import local_id
 
-    with store.history() as db:
+    # Match ownership to the same read boundary as row visibility. Keep the
+    # importer's recovery-lock-before-SQLite order so starts cannot race this read.
+    with store.recovery_lock, store.history() as db:
+        ownership = frozenset(store.active_provider_attempts), store.active_import
         if db is None or not db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_attempts'").fetchone():
             return None
         row = db.execute("SELECT * FROM provider_attempts WHERE id=?", (local_id(attempt_id),)).fetchone()
-        return attempt_row(db, row) if row else None
+        return attempt_row(row, *ownership) if row else None
 
 
 def capabilities(payload, trace, qc):
@@ -181,14 +191,15 @@ def capabilities(payload, trace, qc):
 
 def status(store):
     """Local persisted evidence only; reads never test credentials or contact APIs."""
-    with store.history() as db:
+    with store.recovery_lock, store.history() as db:
+        ownership = frozenset(store.active_provider_attempts), store.active_import
         config = selected(db)
         revisions, attempts, activities, verified, pending = [], [], [], [], []
         if db is not None:
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "provider_config_revisions" in tables:
                 revisions = [dict(r) for r in db.execute("SELECT * FROM provider_config_revisions ORDER BY revision DESC")]
-                attempts = [attempt_row(db, r) for r in db.execute("SELECT * FROM provider_attempts ORDER BY id DESC LIMIT 20")]
+                attempts = [attempt_row(r, *ownership) for r in db.execute("SELECT * FROM provider_attempts ORDER BY id DESC LIMIT 20")]
             if "garmin_scans" in tables:
                 verified, pending = garmin_coverage.coverage_ranges(db)
             if "canonical_activity_heads" in tables:
