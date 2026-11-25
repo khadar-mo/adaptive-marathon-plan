@@ -703,3 +703,20 @@ async def test_exact_boundary_coordinate_round_trips_without_changing_review_ide
         for invalid in ('1/0', '-1', '999', 'NaN'):
             response = await client.post('/api/activities/1/efforts/inspect', json={**payload, "start_coordinate_m": invalid})
             assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_nonrepresentable_positive_elapsed_returns_422_without_partial_writes(history, tmp_path):
+    async with server() as client:
+        await upload(client, ('normal.fit', trace_fit([(i, i * 4) for i in range(21)])))
+        row = (await client.get('/api/activities/1/efforts')).json()
+        before = digest((tmp_path / 'runs.sqlite3').read_bytes())
+        selected = await client.post('/api/activities/1/efforts/inspect', json={
+            "version": row["version_id"], "source": row["selected_fit_sha256"],
+            "start_distance_m": 0, "distance_m": 5e-324})
+        assert selected.status_code == 422 and 'represent' in selected.json()['detail']
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [5e-324]}
+        computed = await client.post('/api/efforts/recompute', json={"config_version": "subnormal-target", "config": config})
+        assert computed.status_code == 422 and 'represent' in computed.json()['detail']
+        assert digest((tmp_path / 'runs.sqlite3').read_bytes()) == before
+        assert (await client.get('/api/activities/1/efforts')).json() == row

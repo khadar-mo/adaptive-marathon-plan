@@ -230,6 +230,11 @@ reports `REVIEW_ELIGIBILITY_LIMIT`; an unresolved rejected optimum reports
 `REVIEW_REJECTION_LIMIT`. These diagnostics also prevent a slower activity from
 being presented as the exact global best. Original records with missing timestamps
 retain their QC flags wherever an interval's raw support spans them.
+Limiting evidence must be approached through an eligible open interval: an endpoint
+that merely touches a jump or a recent-window boundary cannot supply missing
+eligibility. Rejected flat-range representatives leave other tied intervals available.
+Exact rational coordinates accompany generated inspection forms so browser rounding
+cannot change the reviewed interval.
 
 For existing archives, explicitly backfill offline:
 

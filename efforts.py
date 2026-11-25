@@ -49,7 +49,7 @@ class NotFound(LookupError):
     pass
 
 
-def register(db, name, config):
+def register(db, name, config, *, save=True):
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", name):
         raise ValueError("Use a configuration version of 1–80 letters, digits, dots, underscores or hyphens.")
     if not isinstance(config, dict) or set(config) != set(DEFAULT_CONFIG):
@@ -67,7 +67,8 @@ def register(db, name, config):
     old = db.execute("SELECT payload FROM effort_configs WHERE version=?", (name,)).fetchone()
     if (old and json.loads(old[0]) != config) or (name == DEFAULT_CONFIG_VERSION and config != DEFAULT_CONFIG):
         raise ValueError("That extraction configuration version is immutable; choose a new version.")
-    db.execute("INSERT OR IGNORE INTO effort_configs VALUES (?, ?)", (name, canonical.encoded(config)))
+    if save:
+        db.execute("INSERT OR IGNORE INTO effort_configs VALUES (?, ?)", (name, canonical.encoded(config)))
 
 
 def source_data(db, source):
@@ -357,7 +358,7 @@ def rejected_intervals(db, result, source):
 def recompute(store, activity_ids=None, *, config_version=DEFAULT_CONFIG_VERSION, config=None):
     # Canonical backfill also processes existing original archives, without upstream calls.
     with store.connect(write=True, create=True) as db:
-        register(db, config_version, DEFAULT_CONFIG if config is None else config)
+        register(db, config_version, DEFAULT_CONFIG if config is None else config, save=False)
     with store.history() as db:
         ids = activity_ids if activity_ids is not None else [r[0] for r in db.execute("SELECT id FROM activities ORDER BY id")]
         missing = [aid for aid in ids if not db.execute("SELECT 1 FROM canonical_activity_heads WHERE activity_id=?", (owner(db, aid),)).fetchone()]
@@ -365,6 +366,7 @@ def recompute(store, activity_ids=None, *, config_version=DEFAULT_CONFIG_VERSION
         canonical.recompute(store, missing)
     results = []
     with store.connect(write=True) as db:
+        register(db, config_version, DEFAULT_CONFIG if config is None else config)
         for requested in ids:
             aid = owner(db, requested)
             head = db.execute("SELECT version_id FROM canonical_activity_heads WHERE activity_id=?", (aid,)).fetchone()

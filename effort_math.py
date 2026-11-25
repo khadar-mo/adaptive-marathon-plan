@@ -141,13 +141,16 @@ class Block:
         state = next((s for s in ("INVALID", "INSUFFICIENT", "SUSPECT") if s in effects), "VALID")
         whole = whole or (a["timestamp_utc"] == self.trace["samples"]["rows"][0]["timestamp_utc"] and
                           b["timestamp_utc"] == self.trace["samples"]["rows"][-1]["timestamp_utc"])
-        distance = float(distance)
         elapsed = float(last - first)
+        if not math.isfinite(elapsed) or elapsed <= 0:
+            raise ValueError("Requested interval elapsed time cannot be represented as positive finite seconds.")
+        pace, speed = float((last - first) * 1000 / distance), float(distance / (last - first))
+        distance = float(distance)
         return {"distance_m": distance, "start_distance_m": a["distance_m"], "end_distance_m": b["distance_m"],
                 "start_elapsed_seconds": float(first), "end_elapsed_seconds": float(last),
                 "start_utc": a["timestamp_utc"], "end_utc": b["timestamp_utc"],
-                "elapsed_seconds": elapsed, "elapsed_coordinate_s": str(last - first), "pace_seconds_per_km": elapsed * 1000 / distance,
-                "mean_speed_mps": distance / elapsed, "block_index": self.block["block_index"],
+                "elapsed_seconds": elapsed, "elapsed_coordinate_s": str(last - first), "pace_seconds_per_km": pace,
+                "mean_speed_mps": speed, "block_index": self.block["block_index"],
                 "computed_quality_state": state, "flags": flags, "original_sample_count": count,
                 "start": a, "end": b, "attainment": "ONE_SIDED_LIMIT" if side else "ATTAINED",
                 "kind": "WHOLE_ACTIVITY" if whole else "CONTINUOUS_SEGMENT",

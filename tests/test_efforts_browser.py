@@ -24,7 +24,9 @@ def test_effort_verification_review_context_and_mobile_keyboard(tmp_path):
             page.get_by_label('FIT files', exact=True).set_input_files([
                 {"name": name, "mimeType": "application/octet-stream", "buffer": raw} for name, raw in examples().items()])
             page.get_by_role('button', name='Upload FIT files').press('Enter')
-            expect(page.get_by_text('Complete', exact=True)).to_be_visible()
+            # The three-file background batch includes exact trace extraction;
+            # wait for its visible completion, not Playwright's 5-second default.
+            expect(page.get_by_text('Complete', exact=True)).to_be_visible(timeout=30_000)
             page.get_by_role('link', name='Activity 1', exact=True).first.click()
             page.get_by_role('link', name='Inspect continuous efforts').press('Enter')
             expect(page.get_by_role('heading', level=1)).to_have_text('Activity continuous efforts')
@@ -100,13 +102,19 @@ def test_rejected_flat_effort_replacement_preserves_exact_coordinate_in_browser(
                 page.get_by_role('link', name='Best efforts', exact=True).press('Enter')
                 row = page.get_by_role('row').filter(has=page.get_by_role('cell', name='15', exact=True))
                 expect(row).to_contain_text('3.000000')
-                with page.expect_response(lambda res: res.url.endswith('/efforts/inspect')) as inspected:
+                with page.expect_request(lambda req: req.method == 'POST' and req.url.endswith('/efforts/inspect')) as inspected:
                     row.get_by_role('button', name='Inspect activity 1', exact=True).first.press('Enter')
-                result = inspected.value.json()['candidate']
-                submitted = inspected.value.request.post_data_json
+                submitted = inspected.value.post_data_json
+                expect(page.get_by_role('heading', level=1)).to_have_text('Verify continuous effort')
+                # The form immediately navigates after its fetch. Read the saved
+                # verification resource, rather than a discarded fetch body.
+                with page.expect_response(lambda res: '/api/activities/1/efforts/' in res.url) as verification:
+                    page.get_by_role('link', name='Verification JSON', exact=True).press('Enter')
+                result = verification.value.json()['candidate']
                 assert isinstance(submitted['start_coordinate_m'], str)
                 assert result['start']['distance_coordinate_m'] == submitted['start_coordinate_m']
                 assert result['id'] not in rejected and result['elapsed_seconds'] == 3
+                page.go_back()
                 expect(page.get_by_role('heading', level=1)).to_have_text('Verify continuous effort')
                 expect(page.get_by_text('Reviewer verdict:', exact=False)).to_contain_text('UNREVIEWED')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')

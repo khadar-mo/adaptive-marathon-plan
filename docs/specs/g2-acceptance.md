@@ -11,6 +11,8 @@ does not establish manual Garmin agreement or physiological/predictive validity.
 After review fixes, main `e7b05cd834914daa9226750b605a867444d60948`
 (context ingestion #29 / PR #35) was merged in `4c4461d`. Both additive schemas,
 route groups, navigation entries and acceptance reports were retained.
+Round-two fixes also integrate provider main `98d91391b417730741d7ce128b4794ef62dc373d`
+in `ce9c99d`, retaining provider/context/effort schemas, routes and all five navigation links.
 
 ## 2. Existing implementation preserved
 
@@ -53,10 +55,17 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
 - Distance coordinates are exact rationals of the persisted decimal SI values.
   Observed `10.02` and shifted `5010.02−5000` therefore have one identity, retaining
   the original plateau sides; no arbitrary epsilon snap is used. The original
-  source values remain unchanged. Binary64 relative elapsed seconds avoid large
-  epoch subtraction; elapsed ranking rounds to nine decimal places, UTC to microseconds.
+  source values remain unchanged. Crossing clocks and recency comparisons are also
+  rational, constructed from original datetime differences without binary64 epoch
+  subtraction. Public numeric seconds use binary64; elapsed ranking rounds to nine
+  decimal places. UTC presentation rounds half-even to microseconds and never
+  determines mathematical recency membership.
   Ties use elapsed, activity ID, absolute UTC start (across timer blocks), then
   deterministic candidate identity. Limits are identified as non-attained.
+  A positive exact duration that cannot be represented as positive finite public
+  seconds returns 422. Pace and speed ratios are formed rationally before numeric
+  conversion. A failed inspection/recompute does not persist a zero-time result,
+  configuration, extraction version or head change.
 - On a flat open cell, QC can admit four original records while both endpoint
   candidates have only three. The exact coordinate midpoint is an attained
   representative of that constant elapsed optimum. Selection records its open
@@ -65,6 +74,13 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
   they do not invent a first point of an open domain. A nonflat QC domain whose
   infimum is faster than every attained candidate returns `REVIEW_ELIGIBILITY_LIMIT`,
   including across activities. An attained tie may win normally.
+- Each one-sided limit names its approached open affine cell, exact rational bounds,
+  original endpoint supports and an exact interior witness. QC, recency and rejection
+  eligibility come from that cell, not the boundary's instantaneous coincidence.
+  A right approach through a speed jump is ineligible even if the limiting end only
+  touches the jump. A left approach whose ends remain before the recency lower bound
+  is ineligible even if the limiting end equals it. Attained boundary candidates
+  are evaluated independently; no review or QC override is applied.
 - Segment-end recency uses inclusive `[T−W,T]`; complete recorded activity end and
   every source sample must be at or before T. Missing recorded end excludes as-of
   authority. Comparisons include provisional 56/84/112/168-day windows. All activities
@@ -80,6 +96,11 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
   scoped by source/version (candidate IDs also include block and attainment).
   Sub-microsecond coordinate variations cannot acquire a new reviewer identity
   for the same reported interval. Stored computed QC and extraction payloads never change.
+  The exact ±0.5-microsecond boundaries of rejected reported-time bins partition
+  each domain, including half-even endpoint membership. Remaining flat cells yield
+  new deterministic midpoints; eligible partition boundaries are also evaluated.
+  Repeatedly rejecting a representative does not erase other attained tied intervals.
+  These are exact eligibility boundaries, not arbitrary epsilon probes.
 - Boundary/review re-evaluation requires the same code checksum as the stored
   extraction. Otherwise a rebuild-required reason is exposed. Historical saved
   candidates remain inspectable; explicit recompute creates new code lineage.
@@ -91,7 +112,7 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
 | `POST /api/efforts/recompute`, activity-specific `/efforts/recompute` | Explicit offline backfill/recompute; complete immutable config or default. |
 | `GET /api/efforts` | `cutoff` with UTC offset, optional `days`; all-time/whole/internal/recent evidence, exclusions and deterministic selection ID. No writes. |
 | `GET /api/activities/{id}/efforts` | Optional owned extraction `version` and FIT `source`; source-specific results and lineage. |
-| `POST /api/activities/{id}/efforts/inspect` | `version`, `source`, `start_distance_m`, `distance_m`; persist an independently selected interval in one usable block. |
+| `POST /api/activities/{id}/efforts/inspect` | `version`, `source`, `start_distance_m`, `distance_m`, optional exact `start_coordinate_m` rational string; persist an independently selected interval in one usable block. The exact coordinate must match the displayed numeric value. |
 | `GET /api/activities/{id}/efforts/{version}/{candidate}` | Exact verification plus raw excerpt `offset`/`limit`; 1–500 rows, full endpoints always included separately. |
 | Same verification URL + `/review` POST | `action` accept/reject/annotate, `actor`, `note`; append-only previous-review linkage. |
 | Same verification URL + `/context` POST | `category`, tags, actor, note, optional protocol and explicit `maximal_confirmed`; append-only context ID and previous-context linkage. |
@@ -105,6 +126,11 @@ RACE, TRAINING_FAST, FATIGUED_BLOCK and EASY_OR_UNKNOWN. Computed provenance,
 explicit correction, planned label and inferred pattern remain separate.
 Maximal confirmation requires explicit user attestation, VERIFIED_TEST and a
 recorded protocol; race/fast labels and development review cannot infer it.
+
+Global inspection forms carry the exact rational start separately from its numeric
+display. This prevents a nonterminating rational at a rounding boundary from moving
+to a different reported interval when the browser submits JSON. Manual numeric
+selection remains supported; malformed or mismatched exact coordinates return 422.
 
 Raw `acquired_at`, canonical/source creation, extraction creation/head selection,
 review timestamp and context `known_at` are distinct from activity event times.
@@ -163,12 +189,18 @@ Development dependencies are isolated in this worktree's `.venv`; only synthetic
 temporary stores are used. CLI subprocess tests anchor their script path to the
 repository, independent of pytest's working directory.
 
-- G2 targeted suite after review: **30 passed**.
-- Final broad local pass from the integrated worktree root: **366 passed, six
-  browser tests skipped** in 46.74 seconds because native Chrome was not on PATH.
-  A separate native Chrome replay with an explicit executable stalled and was
-  terminated at its 55-second bound. Linux CI requires all six browser replays; its final
-  result is recorded in the linked PR before merge.
+- G2 numerical/API suite plus the independent oracle: **37 passed**.
+- The integrated full local run using the cached standalone Chromium headless
+  shell exercised all 416 checks: **414 passed** and two G2 browser harness checks
+  failed. The three-file import needed an explicit bounded completion wait instead
+  of Playwright's five-second default; the replacement test read a fetch body after
+  navigation had discarded it. It now verifies the submitted request and saved
+  Verification JSON. Both affected browser replays then passed in **10.81 s**.
+  All eight browser flows have therefore passed locally, with no skipped checks.
+  Final-head Linux CI reruns the complete suite; its result is recorded in the PR.
+- The earlier macOS Chrome app stall was stopped at its 55-second bound. The
+  separate installed headless shell supplied the final actual browser replay;
+  the old stall is not recorded as a passing check.
 - Removing the import extraction hook made the public T01/T05/T22/T23 test fail.
   Replacing last departure with first arrival made the normative plateau test fail.
   Source was restored after each mutation.
@@ -179,6 +211,17 @@ repository, independent of pytest's working directory.
   The decimal-plateau regression rejects the actual saved optimum and verifies it
   cannot return under another ID. The browser replay uses the real combobox's
   accessible role/name, retaining the saved context and Accept form assertions.
+- Round-two regressions reproduced both cross-activity selection errors and loss
+  of tied alternatives before the fixes. A separate oracle independently checks
+  600 exact-rational QC-cell and recency cases, including jumps, gaps, plateaus,
+  record counts and direction-specific limits. Repeated public reject/inspect
+  cycles verify 24 distinct attained replacements. Half-even boundary tests check
+  both open/closed rejection bins, rational recency before a rounded UTC cutoff,
+  exact-coordinate JSON round-trips and invalid-coordinate 422 responses.
+- The reviewer identified a finite subnormal target (5e-324 m) whose elapsed value
+  underflowed to zero. The new public regression first reproduced ZeroDivisionError.
+  Inspection and recompute now return 422 with a byte-identical database; staged
+  configuration registration rolls back with the failed extraction.
 - Final mutation checks removed raw-index uncertainty overlap, then replaced the
   rational coordinate conversion with binary64. Each corresponding new public
   regression failed as expected. Both mutations were restored byte-for-byte;
@@ -192,8 +235,11 @@ repository, independent of pytest's working directory.
   0.9890552995391934 at brackets [6,7] and [300,301]. No console errors/warnings.
 - That browser check found a real `form.action` collision with a named action
   button. The handler now uses `getAttribute('action')`; the replay submits Accept
-  through that button and checks the saved verdict. Native replay host limitations
-  from G1 are not claimed as passing; CUA and required Linux CI supply browser proof.
+  through that button and checks the saved verdict. The new browser flow also
+  rejects two flat-cell representatives and follows each actual global replacement
+  form, verifying its exact coordinate, distinct candidate ID, saved geometry and
+  unreviewed state after navigation. Mobile overflow checks pass with all five
+  integrated navigation links.
 - Final integrated real HTTP proof imported five synthetic traces into a separate
   store. Missing clock at 200 m withholds the 400 m PB. In the 1200 m companion,
   100→500 and 700→1100 m remain VALID; 400→800 m is SUSPECT with original record 30.
@@ -205,6 +251,20 @@ repository, independent of pytest's working directory.
   midpoint and lack of an earliest start. All four merged navigation links fit
   mobile; Context opened correctly. Page width equaled viewport width, console
   warnings/errors were empty, and the temporary viewport was reset.
+- Round-two real HTTP proof imports into an isolated store: after rejecting the
+  1500 s optimum, the jump source contributes only its eligible 1505 s left limit
+  and another activity's 1502 s 5K wins. The recency boundary fixture selects the
+  other activity's 3.75 s result with no false limit. Subnormal requests return 422
+  and leave the database checksum unchanged.
+- Bounded synthetic performance check (no performance acceptance threshold):
+  12,001 original one-second records, 30 km/12,000 s, all 12 standard targets took
+  0.239 s for decode/QC and 37.372 s for extraction at `ce9c99d` before the final
+  numeric-representation guard. It evaluated 215,199 attained candidates and
+  215,188 limits and found 11 eligible targets (the trace is shorter than 42,195 m).
+  On the final guarded code, a separate real multipart import of 2,001 records,
+  5 km/2,000 s and all 12 targets completed in 3.512 s. Both completed within a
+  120-second bound. The readable reference search remains computation-heavy on
+  dense long runs; these timings are measurements, not validated service limits.
 
 ## 8. Reproduce the synthetic walkthrough
 
