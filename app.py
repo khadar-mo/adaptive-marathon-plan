@@ -21,6 +21,7 @@ from garmin_import import run_import
 import garmin_coverage
 import history
 import canonical
+import effort_api
 import recording
 from storage import ActiveImport, Archive, Store
 import views
@@ -42,6 +43,7 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+effort_api.register(app)
 
 
 @app.middleware("http")

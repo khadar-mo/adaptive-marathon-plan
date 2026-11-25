@@ -31,7 +31,7 @@ th, td {{padding:.35rem .65rem; text-align:left; border-bottom:1px solid #d9e1db
 .recording-table {{min-width:42rem; width:100%}} .recording-table td {{vertical-align:top}}
 .recording-table pre {{max-width:28rem; white-space:pre-wrap}}
 :focus-visible {{outline:3px solid #1a704e; outline-offset:2px}}
-</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a></nav><main><h1>{escape(title)}</h1>
+</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/imports">Imports</a><a href="/efforts">Best efforts</a></nav><main><h1>{escape(title)}</h1>
 {content}</main></body></html>"""
 
 
@@ -297,6 +297,7 @@ def activity(row):
 {garmin_link}<dl class="detail-metrics">{''.join(values)}</dl>{warnings}<h2>Recorded laps</h2>{lap_table}
 <p><a href="/activities/{row["id"]}/recording">Inspect recorded samples and events</a></p>
 <p><a href="/activities/{row["id"]}/canonical">Inspect canonical trace and quality</a></p>
+<p><a href="/activities/{row["id"]}/efforts">Inspect continuous efforts</a></p>
 <p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
 
 
@@ -425,7 +426,8 @@ def canonical_page(row):
 
     content = f'<p><a href="/activities/{aid}">Back to activity {aid}</a></p>'
     content += '<p>Engineering quality checks preserve recorded UTC timestamps, cumulative metres and elapsed time. '
-    content += 'Thresholds are provisional. Human comparison and scientific validation remain unverified. No fastest efforts are calculated.</p>'
+    content += 'Thresholds are provisional. Human comparison and scientific validation remain unverified. '
+    content += f'<a href="/activities/{aid}/efforts">Inspect calculated continuous efforts separately.</a></p>'
     content += f'<button id="recompute" data-url="/api/activities/{aid}/canonical/recompute">Recompute offline with default QC</button><p id="result" role="status"></p>'
     content += """<script>
 document.getElementById('recompute').addEventListener('click', async event => {

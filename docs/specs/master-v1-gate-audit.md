@@ -81,9 +81,17 @@ proof and unverified comparisons. Source activity event time, raw acquisition ti
 first derivation time and selection/correction availability are distinct. G1 has
 no fastest-effort extractor and no physiological or planning authority.
 
-**Human/scientific validation for G0/G1 remains UNVERIFIED.** Software merge is not
-a claim that those validation gates passed. G2 (#17) is the next software gate,
-followed by G3 workload and G4 candidate estimators after G2 verification.
+G2 software is implemented by #17: exact first-arrival/last-departure continuous
+efforts, candidate-local QC, immutable extraction lineage, all-time/recent selection,
+raw endpoint verification and auditable review/context entry. See the
+[ten-item G2 report](g2-acceptance.md) for normative tests, independent arithmetic,
+real HTTP/browser evidence and final review/CI requirements. Whole-activity evidence
+uses original samples, never silently substituted summary elapsed. Non-attained
+recency optima remain explicit review states with separate attained evidence.
+
+**Human/scientific validation for G0/G1/G2 remains UNVERIFIED.** Software merge is
+not a claim that those validation gates passed. G3 workload, G4 candidate estimators
+and #30 provenance classification follow the G2 software merge and preserve that status.
 
 ## Baseline verification
 

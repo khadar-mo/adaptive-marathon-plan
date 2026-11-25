@@ -132,6 +132,61 @@ Generate six made-up examples with `python3 demo_canonical.py /tmp/marathon-g1-e
 See the [G1 acceptance report](docs/specs/g1-acceptance.md) for the separate demo
 database, exact thresholds, software checks and outstanding human comparisons.
 
+## Verify continuous efforts
+
+Open **Best efforts** for distinct all-time, whole-activity, internal-segment and
+recent results. New imports and corrections extract efforts automatically from the
+complete selected canonical trace. Configured targets retain fractional metres,
+including 1609.344 m and 21097.5 m. Confirmed timer breaks split the search; interior
+stationary and jogging time is retained. Flagged candidates never become PBs.
+
+Open **Inspect continuous efforts** on an activity to choose a historical extraction
+or alternate source. Each result links to exact UTC bounds, original endpoint rows,
+interpolation fractions, elapsed/pace, timer coverage, pause/plateau audit and QC
+flags. The excerpt is paginated; extraction always uses all original records.
+**Inspect a selected interval** records an arbitrary cumulative start and target
+distance for independent verification without calling it a fastest effort.
+
+The verification page records **Accept**, **Reject** and **Annotate** with actor,
+note and timestamp. Acceptance does not clear computed QC; rejection excludes the
+reviewed interval from selection. **Recorded effort context** stores explicit
+categories, tags and corrections separately. A race label is not maximality proof;
+an explicit maximal declaration requires a recorded test protocol and remains a
+user attestation, not scientific validation.
+
+Recent windows use segment end inclusively in `[T−W,T]` and require the whole source
+activity to end by T. The 112-day default and 56/84/168-day comparisons are provisional.
+An expired PB stays all-time while recent evidence can be `MISSING_RECENT`. If a
+boundary creates an unattained limiting optimum, the response reports
+`REVIEW_RECENCY_LIMIT` and retains attained evidence separately. No endpoint is
+shifted to make it recent. These are event-time reconstructions using currently
+selected source versions, not frozen knowledge-time predictions or present capability.
+
+For existing archives, explicitly backfill offline:
+
+```sh
+.venv/bin/python efforts.py --database /path/to/runs.sqlite3 --archive /path/to/runs-archive
+```
+
+Optional `--activity`, `--config-version` and `--config` select activities and a
+complete versioned G2 configuration. `POST /api/efforts/recompute` and
+`POST /api/activities/{id}/efforts/recompute` expose the same workflow. G1 QC settings
+remain governed by canonical recompute. Existing configuration names are immutable.
+GET requests never write or backfill. Recompute after a code update before creating
+new intervals under that code; stored historical evidence remains readable.
+
+`GET /api/efforts?cutoff=<offset-aware timestamp>&days=112` returns global selection.
+`GET /api/activities/{id}/efforts` accepts optional owned `version` and `source`.
+`POST /api/activities/{id}/efforts/inspect` accepts `version`, `source`,
+`start_distance_m` and `distance_m`. It returns a saved verification URL whose JSON
+counterpart accepts `offset` and `limit` (1–500). Append `/review` or `/context` to
+that JSON verification URL for the auditable POST actions. See the
+[G2 acceptance report](docs/specs/g2-acceptance.md) for contracts, fixtures and checks.
+
+Generate made-up exports with `python3 demo_efforts.py /tmp/marathon-g2-examples`;
+upload them only to a separate demo database. Human Garmin comparison and scientific
+validation remain unverified. Observed fastest efforts are not coaching authority.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.

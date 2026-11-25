@@ -190,6 +190,9 @@ def persist(db, archive, activity_id, config_version=DEFAULT_CONFIG_VERSION, con
     if changed:
         db.execute("INSERT INTO canonical_selections(activity_id, version_id, selected_at) VALUES (?, ?, ?)",
                    (activity_id, version_id, knowledge_time()))
+    # Same serialized import/correction transaction; includes linked-owner refreshes.
+    import efforts
+    efforts.persist(db, version_id)
     return version_id
 
 

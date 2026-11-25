@@ -16,6 +16,7 @@ import time
 
 import activity_sensors
 import canonical
+import efforts
 import fit_store
 import garmin_activity
 import garmin_coverage
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-""" + fit_store.SCHEMA + canonical.SCHEMA
+""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA
 
 
 def prepare_schema(db):
