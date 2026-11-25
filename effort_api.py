@@ -21,6 +21,7 @@ class Interval(BaseModel):
     source: str = Field(pattern=r"^[a-f0-9]{64}$")
     start_distance_m: float = Field(ge=0, allow_inf_nan=False, strict=True)
     distance_m: float = Field(gt=0, allow_inf_nan=False, strict=True)
+    start_coordinate_m: str | None = Field(None, pattern=r"^\d+(?:/\d+)?$", max_length=160)
 
 
 class Verdict(BaseModel):
@@ -79,7 +80,7 @@ def register(app):
     @app.post("/api/activities/{activity_id}/efforts/inspect")
     def selected_interval(activity_id: str, interval: Interval):
         c = call(efforts.save_inspection, app.state.store, activity_id, interval.version, interval.source,
-                 interval.start_distance_m, interval.distance_m)
+                 interval.start_distance_m, interval.distance_m, interval.start_coordinate_m)
         return {"candidate": c, "html_url": f"/activities/{activity_id}/efforts/{interval.version}/{c['id']}"}
 
     @app.get("/api/activities/{activity_id}/efforts/{version}/{candidate_id}")

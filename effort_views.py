@@ -64,6 +64,8 @@ def inspect_form(c):
     # read-only global selection never writes an inspection into history.
     inputs = {"version": c["version_id"], "source": c["source_sha256"],
               "start_distance_m": c["start_distance_m"], "distance_m": c["distance_m"]}
+    if "distance_coordinate_m" in c["start"]:
+        inputs["start_coordinate_m"] = c["start"]["distance_coordinate_m"]
     return result_text(c) + f'<form data-json action="/api/activities/{aid}/efforts/inspect" method="post">' + ''.join(
         f'<input type="hidden" name="{k}" value="{show(v)}">' for k, v in inputs.items()) + f'<button>Inspect activity {aid}</button></form>'
 

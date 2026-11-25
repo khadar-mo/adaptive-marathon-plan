@@ -269,9 +269,15 @@ def inspect(store, activity_id, version, candidate_id, *, offset=0, limit=200):
                 "events": data["trace"]["events"]}
 
 
-def save_inspection(store, activity_id, version, source, start_distance_m, distance_m):
+def save_inspection(store, activity_id, version, source, start_distance_m, distance_m, start_coordinate_m=None):
     if not effort_math.positive(distance_m) or type(start_distance_m) not in (int, float) or not math.isfinite(start_distance_m) or start_distance_m < 0:
         raise ValueError("Use a finite nonnegative cumulative start and positive target distance in metres.")
+    try:
+        start = effort_math.coordinate(start_coordinate_m if start_coordinate_m is not None else start_distance_m)
+    except (ValueError, ZeroDivisionError):
+        raise ValueError("Use a valid rational start coordinate.") from None
+    if start < 0 or float(start) != start_distance_m:
+        raise ValueError("The exact start coordinate must match the displayed cumulative metres.")
     with store.connect(write=True, create=True) as db:
         result = load(db, activity_id, version)
         selected = select_source(result, source)
@@ -283,12 +289,12 @@ def save_inspection(store, activity_id, version, source, start_distance_m, dista
         payload = json.loads(db.execute("SELECT payload FROM canonical_activity_versions WHERE id=?", (result["canonical_version_id"],)).fetchone()[0])
         blocks, _ = effort_math.prepare(data["trace"], qc, result["qc_config"], global_flags(payload, selected, data["trace"]))
         for block in blocks:
-            if block.distances[0] <= start_distance_m and start_distance_m + distance_m <= block.distances[-1]:
-                c = block.candidate(start_distance_m, distance_m)
+            if block.coordinates[0] <= start and start + effort_math.coordinate(distance_m) <= block.coordinates[-1]:
+                c = block.candidate(start, distance_m)
                 if c:
                     for saved in candidates(selected["result"]):
                         if (saved["attainment"] == "ATTAINED" and saved["kind"] == "CONTINUOUS_SEGMENT" and
-                                saved["start_distance_m"] == start_distance_m and saved["distance_m"] == distance_m):
+                                effort_math.interval_key(saved) == effort_math.interval_key(c)):
                             return saved
                     c["provenance"]["category"] = "EASY_OR_UNKNOWN"
                     block.audit(c)

@@ -462,7 +462,9 @@ async def test_rejected_tied_interval_selects_next_attained_valid_interval(histo
         await client.post(f'/api/activities/1/efforts/{row["version_id"]}/{c["id"]}/review', json={"action": "reject", "actor": "Synthetic reviewer", "note": "Reject the first interval only"})
         report = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()
         replacement = next(r for r in report["distances"] if r["distance_m"] == 400)["all_time"]
-        assert replacement["elapsed_seconds"] == 100 and replacement["start_distance_m"] == 2
+        # The rejected UTC bin extends through +0.5 microseconds = 0.000002 m;
+        # the first remaining flat cell's exact midpoint is (0.000002 + 4)/2.
+        assert replacement["elapsed_seconds"] == 100 and replacement["start_distance_m"] == 2.000001
         assert replacement["selection"]["basis"] == 'FLAT_OPEN_CELL_MIDPOINT'
         assert replacement["selection"]["earliest_start_attained"] is False
         assert replacement["id"] != c["id"]
@@ -593,3 +595,111 @@ async def test_open_qc_infimum_blocks_a_slower_other_activity_but_an_attained_ti
         result = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()["distances"][0]
         assert result["state"] == 'VALID' and result["all_time"]["elapsed_seconds"] == 2.5
         assert result["all_time"]["activity_id"] == 3
+
+
+@pytest.mark.anyio
+async def test_limit_approach_crossing_a_jump_cannot_block_another_activity_pb(history):
+    points = dense([(0, 0), (5, 10.02), (10, 10.02), (1510, 5010.02), (1511, 5030.02)])
+    async with server() as client:
+        await upload(client, ('jump-after-optimum.fit', trace_fit(points)))
+        await upload(client, ('legitimate-1502.fit', trace_fit(dense([(0, 0), (1502, 5000)]), start=START + 86400)))
+        row = (await client.get('/api/activities/1/efforts')).json()
+        winner = distance(row, 5000)["best"]
+        assert winner["elapsed_seconds"] == 1500
+        response = await client.post(f'/api/activities/1/efforts/{row["version_id"]}/{winner["id"]}/review',
+            json={"action": "reject", "actor": "Synthetic reviewer", "note": "Reject exact optimum; right approaches cross a 20 m/s jump."})
+        assert response.status_code == 200
+        result = next(r for r in (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()["distances"] if r["distance_m"] == 5000)
+        assert result["state"] == 'VALID'
+        assert result["all_time"]["activity_id"] == 2 and result["all_time"]["elapsed_seconds"] == 1502
+        limiting = result["unattained_limits"][0]["limit"]
+        assert limiting["elapsed_seconds"] == 1505
+        assert limiting["approached_cell"]["computed_quality_state"] == 'VALID'
+        assert limiting["approached_cell"]["approach_side"] == -1
+
+
+@pytest.mark.anyio
+async def test_old_open_cell_limit_at_cutoff_does_not_block_a_recent_other_activity(history):
+    lower = absolute_time(START + 5)
+    cutoff = (lower + timedelta(days=112)).isoformat()
+    async with server() as client:
+        await upload(client, ('old-open-domain.fit', trace_fit([(0, 0), (2, 10), (4, 20), (6, 30)])))
+        await upload(client, ('recent-3_75.fit', trace_fit([(i, i * 4) for i in range(9)], start=START + 86400)))
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [15]}
+        await client.post('/api/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})
+        result = (await client.get('/api/efforts', params={"cutoff": cutoff, "days": 112})).json()["distances"][0]
+        recent = next(w for w in result["recent"] if w["days"] == 112)
+        assert result["all_time"]["elapsed_seconds"] == 3
+        assert recent["state"] == 'VALID' and recent["best"]["activity_id"] == 2
+        assert recent["best"]["elapsed_seconds"] == 3.75 and recent["unattained_limits"] == []
+
+
+@pytest.mark.anyio
+async def test_repeated_flat_cell_rejections_leave_other_attained_ties(history):
+    async with server() as client:
+        await upload(client, ('open-flat-domain.fit', trace_fit([(0, 0), (2, 10), (4, 20), (6, 30)])))
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [15]}
+        await client.post('/api/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})
+        row = (await client.get('/api/activities/1/efforts')).json()
+        rejected = set()
+        for i in range(24):
+            result = (await client.get('/api/efforts?cutoff=2026-01-01T00:00:00Z')).json()["distances"][0]
+            assert result["state"] == 'VALID', (i, result)
+            c = result["all_time"]
+            assert c["id"] not in rejected and c["elapsed_seconds"] == 3
+            assert 5 < c["start_distance_m"] < 10 and c["original_sample_count"] == 4
+            if c["selection"]["basis"] == 'FLAT_OPEN_CELL_MIDPOINT':
+                assert c["selection"]["earliest_start_attained"] is False
+            else:
+                assert c["selection"]["basis"] == 'EXACT_PARTITION_BOUNDARY'
+                assert c["selection"]["earliest_start_claimed"] is False
+            # Register the actual globally selected representative through the
+            # public inspection path, as the UI does, then reject that identity.
+            saved = await client.post('/api/activities/1/efforts/inspect', json={
+                "version": row["version_id"], "source": row["selected_fit_sha256"],
+                "start_distance_m": c["start_distance_m"], "distance_m": 15,
+                "start_coordinate_m": c["start"]["distance_coordinate_m"]})
+            assert saved.status_code == 200 and saved.json()["candidate"]["id"] == c["id"]
+            response = await client.post(f'/api/activities/1/efforts/{row["version_id"]}/{c["id"]}/review',
+                json={"action": "reject", "actor": "Synthetic reviewer", "note": f"Reject representative {i + 1}; other tied intervals remain."})
+            assert response.status_code == 200
+            rejected.add(c["id"])
+
+
+def test_rational_window_membership_and_half_even_review_boundaries():
+    trace = inspect(trace_fit([(0, 0), (2, 10), (4, 20), (6, 30)]), 0, 99)
+    block = effort_math.prepare(trace, assess(trace, 'a' * 64, DEFAULT_CONFIG), DEFAULT_CONFIG)[0][0]
+    lower = absolute_time(START + 5).isoformat()
+    just_old = block.candidate(Fraction('9.9999999'), 15)
+    assert just_old["end_utc"] == lower  # presentation rounds to the boundary
+    assert not block.in_window(just_old, lower)  # arithmetic does not
+    assert block.in_window(block.candidate(10, 15), lower)
+    assert not pure([(0, 0), (2, 10), (4, 20), (6, 30)], [15], min_end=lower)["distances"][0]["unattained_limit"]
+    radius = Fraction(5, 2_000_000)  # 5 m/s times exactly half a microsecond
+    for centre, inclusive in ((Fraction('7.5'), True), (Fraction('7.500005'), False)):
+        baseline = effort_math.interval_key(block.candidate(centre, 15))
+        for direction in (-1, 1):
+            boundary = centre + direction * radius
+            assert (effort_math.interval_key(block.candidate(boundary, 15)) == baseline) is inclusive
+            assert effort_math.interval_key(block.candidate(boundary + direction * Fraction(1, 10**10), 15)) != baseline
+
+
+@pytest.mark.anyio
+async def test_exact_boundary_coordinate_round_trips_without_changing_review_identity(history):
+    async with server() as client:
+        await upload(client, ('rational-boundary.fit', trace_fit([(0, 0), (3, 10), (6, 20), (9, 30)])))
+        config = {**efforts.DEFAULT_CONFIG, "distances_m": [15]}
+        await client.post('/api/efforts/recompute', json={"config_version": "fifteen-metres", "config": config})
+        row = (await client.get('/api/activities/1/efforts')).json()
+        c = distance(row, 15)["best"]
+        exact = Fraction(4500001, 600000)  # time 2.2500005 s, a half-even bin edge
+        payload = {"version": row["version_id"], "source": row["selected_fit_sha256"],
+                   "start_distance_m": float(exact), "distance_m": 15}
+        rounded = (await client.post('/api/activities/1/efforts/inspect', json=payload)).json()["candidate"]
+        preserved = (await client.post('/api/activities/1/efforts/inspect', json={**payload, "start_coordinate_m": str(exact)})).json()["candidate"]
+        assert rounded["id"] != c["id"]  # a float alone lands beyond the exact bin edge
+        assert preserved["id"] == c["id"]
+        assert preserved["start_utc"] == c["start_utc"] and preserved["end_utc"] == c["end_utc"]
+        for invalid in ('1/0', '-1', '999', 'NaN'):
+            response = await client.post('/api/activities/1/efforts/inspect', json={**payload, "start_coordinate_m": invalid})
+            assert response.status_code == 422

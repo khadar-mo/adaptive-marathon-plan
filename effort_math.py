@@ -6,18 +6,24 @@ from itertools import chain
 import math
 
 
-ALGORITHM_VERSION = "g2-arrival-departure-v2"
+ALGORITHM_VERSION = "g2-arrival-departure-v3"
 PRECISION = ("Exact rational distance coordinates from the persisted decimal SI values; observed and "
              "shifted coordinates share identity without epsilon snapping. Source values remain unchanged. "
-             "Interpolation uses binary64 relative seconds; elapsed ranking rounds to 9 decimal places and "
-             "UTC rendering to microseconds. Review identity uses the reported target and UTC interval. "
-             "Flat open cells use a deterministic attained midpoint, not a claim of earliest possible start. "
-             "One-sided limits are diagnostics, never represented as attained performances.")
+             "Crossing times and eligibility comparisons are rational; public numeric seconds use binary64. "
+             "Elapsed ranking rounds to 9 decimal places and UTC rendering rounds half-even to microseconds. "
+             "Review identity uses the reported target and UTC interval; rejected UTC bins partition the domain. "
+             "Flat eligible open cells use deterministic attained midpoints, not a claim of earliest possible start. "
+             "One-sided limits carry their approached cell's QC and window support, never an attained performance.")
 
 
 def coordinate(value):
     """Preserve the stored decimal value, including across shifted-end subtraction."""
     return value if isinstance(value, Fraction) else Fraction(str(value))
+
+
+def duration(value):
+    """A datetime difference without an intermediate binary64 clock."""
+    return Fraction(value.days * 86400 + value.seconds) + Fraction(value.microseconds, 1_000_000)
 
 
 def positive(value):
@@ -46,7 +52,8 @@ class Block:
         self.trace, self.block, self.qc, self.config = trace, block, qc, config
         self.samples = [trace["samples"]["rows"][i] for i in block["sample_indices"]]
         self.origin = stamp(self.samples[0]["timestamp_utc"])
-        self.times = [(stamp(s["timestamp_utc"]) - self.origin).total_seconds() for s in self.samples]
+        self.clocks = [duration(stamp(s["timestamp_utc"]) - self.origin) for s in self.samples]
+        self.times = [float(t) for t in self.clocks]
         self.distances = [s["distance_m"] for s in self.samples]
         if (any(type(d) not in (int, float) or not math.isfinite(d) or d < 0 for d in self.distances)
                 or any(b <= a for a, b in zip(self.times, self.times[1:]))
@@ -57,7 +64,7 @@ class Block:
         self.flag_ranges = []
         self.uncertain_index_ranges = []
         for flag in self.flags:
-            ts = [(stamp(t) - self.origin).total_seconds() for t in flag.get("sample_times_utc", ()) if t]
+            ts = [duration(stamp(t) - self.origin) for t in flag.get("sample_times_utc", ()) if t]
             self.flag_ranges.append((min(ts), max(ts)) if ts else None)
             raw = flag.get("sample_indices", ())
             self.uncertain_index_ranges.append((min(raw), max(raw)) if raw and len(ts) < len(raw) else None)
@@ -81,11 +88,11 @@ class Block:
                 left = right = first if role == "arrival" else after - 1
         else:
             left, right = first - 1, first
-        fraction = 0.0 if left == right else float((x - ds[left]) / (ds[right] - ds[left]))
-        t = self.times[left] + fraction * (self.times[right] - self.times[left])
+        fraction = Fraction(0) if left == right else (x - ds[left]) / (ds[right] - ds[left])
+        t = self.clocks[left] + fraction * (self.clocks[right] - self.clocks[left])
         return {"requested_distance_m": float(x), "distance_m": float(x), "distance_coordinate_m": str(x), "role": role,
-                "limit_side": side, "fraction": fraction, "elapsed_seconds": t,
-                "timestamp_utc": (self.origin + timedelta(seconds=t)).isoformat(),
+                "limit_side": side, "fraction": float(fraction), "elapsed_seconds": float(t), "elapsed_coordinate_s": str(t),
+                "timestamp_utc": (self.origin + timedelta(microseconds=round(t * 1_000_000 + self.origin.microsecond) - self.origin.microsecond)).isoformat(),
                 "sample_indices": [self.samples[left]["record_index"], self.samples[right]["record_index"]],
                 "samples": [self.samples[left], self.samples[right]],
                 "bracket_gap_s": self.times[right] - self.times[left], "positions": [left, right]}
@@ -99,7 +106,7 @@ class Block:
             # Whole-activity evidence means the complete recorded sample interval,
             # including leading/trailing stationarity. Header duration is never substituted.
             a, b = self.crossing(start, "arrival"), self.crossing(start + distance, "departure")
-        first, last = a["elapsed_seconds"], b["elapsed_seconds"]
+        first, last = coordinate(a["elapsed_coordinate_s"]), coordinate(b["elapsed_coordinate_s"])
         if last <= first:
             return None
         indices = [a["positions"][0], b["positions"][1]]
@@ -135,11 +142,12 @@ class Block:
         whole = whole or (a["timestamp_utc"] == self.trace["samples"]["rows"][0]["timestamp_utc"] and
                           b["timestamp_utc"] == self.trace["samples"]["rows"][-1]["timestamp_utc"])
         distance = float(distance)
+        elapsed = float(last - first)
         return {"distance_m": distance, "start_distance_m": a["distance_m"], "end_distance_m": b["distance_m"],
-                "start_elapsed_seconds": first, "end_elapsed_seconds": last,
+                "start_elapsed_seconds": float(first), "end_elapsed_seconds": float(last),
                 "start_utc": a["timestamp_utc"], "end_utc": b["timestamp_utc"],
-                "elapsed_seconds": last - first, "pace_seconds_per_km": (last - first) * 1000 / distance,
-                "mean_speed_mps": distance / (last - first), "block_index": self.block["block_index"],
+                "elapsed_seconds": elapsed, "elapsed_coordinate_s": str(last - first), "pace_seconds_per_km": elapsed * 1000 / distance,
+                "mean_speed_mps": distance / elapsed, "block_index": self.block["block_index"],
                 "computed_quality_state": state, "flags": flags, "original_sample_count": count,
                 "start": a, "end": b, "attainment": "ONE_SIDED_LIMIT" if side else "ATTAINED",
                 "kind": "WHOLE_ACTIVITY" if whole else "CONTINUOUS_SEGMENT",
@@ -147,7 +155,20 @@ class Block:
                 "provenance": {"category": "TRAINING_FAST" if state == "VALID" else "EASY_OR_UNKNOWN", "tags": [], "verified_maximal": False,
                                "planned_workout": None, "inferred_pattern": None, "user_correction": None}}
 
-    def starts(self, distance, min_end=None):
+    def distance_at(self, t):
+        """Forward distance at an exact clock, used only to partition the domain."""
+        if t < self.clocks[0] or t > self.clocks[-1]:
+            return None
+        i = bisect_left(self.clocks, t)
+        if self.clocks[i] == t:
+            return self.coordinates[i]
+        fraction = (t - self.clocks[i - 1]) / (self.clocks[i] - self.clocks[i - 1])
+        return self.coordinates[i - 1] + fraction * (self.coordinates[i] - self.coordinates[i - 1])
+
+    def in_window(self, candidate, min_end):
+        return min_end is None or coordinate(candidate["end"]["elapsed_coordinate_s"]) >= duration(stamp(min_end) - self.origin)
+
+    def starts(self, distance, min_end=None, rejected=()):
         ds, distance = self.coordinates, coordinate(distance)
         lo, hi = ds[0], ds[-1] - distance
         if hi < lo:
@@ -155,36 +176,81 @@ class Block:
         starts = {lo, hi}
         starts.update(d for d in ds if lo <= d <= hi)
         starts.update(d - distance for d in ds if lo <= d - distance <= hi)
+        def add_clock(t, shift):
+            d = self.distance_at(t)
+            if d is not None and lo <= d - shift <= hi:
+                starts.add(d - shift)
         if min_end is not None:
-            t = (stamp(min_end) - self.origin).total_seconds()
-            i = bisect_left(self.times, t)
-            if 0 < i < len(self.times):
-                fraction = coordinate(t - self.times[i - 1]) / coordinate(self.times[i] - self.times[i - 1])
-                end_distance = ds[i - 1] + fraction * (ds[i] - ds[i - 1])
-                x = end_distance - distance
-                if lo <= x <= hi:
-                    starts.add(x)
+            add_clock(duration(stamp(min_end) - self.origin), distance)
+        # QC is constant inside each open cell, including flags whose known clock
+        # is not itself a member of this running block's original samples.
+        for span in self.flag_ranges:
+            for t in span or ():
+                add_clock(t, 0)
+                add_clock(t, distance)
+        # A rejection covers a reported UTC interval, whose half-even rendering
+        # bin has exact +/-0.5 microsecond boundaries. Partition at those true
+        # eligibility boundaries; never probe an arbitrary epsilon near a limit.
+        for target, start, end, kind in rejected:
+            if coordinate(target) == distance and kind == "CONTINUOUS_SEGMENT":
+                for value, shift in ((start, 0), (end, distance)):
+                    t = duration(stamp(value) - self.origin)
+                    for offset in (Fraction(-1, 2_000_000), Fraction(0), Fraction(1, 2_000_000)):
+                        add_clock(t + offset, shift)
         return sorted(starts)
 
-    def flat_representative(self, left, right, distance):
+    def flat_representative(self, left, right, distance, candidate=None):
         """A constant objective can be attained only inside an eligible open cell.
 
         Every endpoint bracket and original-record count is constant inside that
         cell. Its midpoint is deterministic; an open QC domain has no first start.
         """
-        c = self.candidate((left + right) / 2, distance)
+        c = candidate if candidate is not None else self.candidate((left + right) / 2, distance)
         if c is None:
             return None
         a, b = c["start"]["positions"], c["end"]["positions"]
         def slope(pair):
             i, j = pair
-            return coordinate(self.times[j] - self.times[i]) / (self.coordinates[j] - self.coordinates[i])
+            return (self.clocks[j] - self.clocks[i]) / (self.coordinates[j] - self.coordinates[i])
         if a[0] == a[1] or b[0] == b[1] or slope(a) != slope(b):
             return None
         c["selection"] = {"basis": "FLAT_OPEN_CELL_MIDPOINT", "open_start_domain_m": [float(left), float(right)],
+                          "open_start_coordinates_m": [str(left), str(right)],
                           "cell_elapsed_function": "CONSTANT", "representative_attained": True, "earliest_start_attained": False,
                           "start_tie_rule": "EARLIEST_ENUMERATED_REPRESENTATIVE"}
         return c
+
+    def cell_candidates(self, left, right, distance, min_end, rejected):
+        """Limits are approached through this cell, not through a boundary alone.
+
+        Original/shifted knots, QC clocks, recency and rejection-bin boundaries
+        partition every eligibility change. The exact midpoint witnesses the
+        constant support/QC/window state of the open affine cell.
+        """
+        witness = self.candidate((left + right) / 2, distance)
+        if witness is None:
+            return
+        representative = self.flat_representative(left, right, distance, witness)
+        if representative:
+            yield representative
+        support = {"open_start_coordinates_m": [str(left), str(right)],
+                   "witness_start_coordinate_m": witness["start"]["distance_coordinate_m"],
+                   "witness_end_coordinate_m": witness["end"]["distance_coordinate_m"],
+                   "witness_end_clock_s": witness["end"]["elapsed_coordinate_s"],
+                   "start_sample_indices": witness["start"]["sample_indices"],
+                   "end_sample_indices": witness["end"]["sample_indices"],
+                   "computed_quality_state": witness["computed_quality_state"],
+                   "min_end_inclusive_utc": min_end, "recency_eligible": self.in_window(witness, min_end),
+                   "review_eligible": interval_key(witness) not in rejected}
+        for x, side in ((left, 1), (right, -1)):
+            c = self.candidate(x, distance, side)
+            if c is not None:
+                # This is the QC of the approaching intervals, not an override of
+                # the attained boundary candidate, which is evaluated separately.
+                c["computed_quality_state"], c["flags"] = witness["computed_quality_state"], witness["flags"]
+                c["provenance"]["category"] = witness["provenance"]["category"]
+                c["approached_cell"] = {**support, "approach_side": side}
+                yield c
 
     def audit(self, candidate):
         first, last = candidate["start_elapsed_seconds"], candidate["end_elapsed_seconds"]
@@ -225,21 +291,24 @@ def extract(trace, qc, config, distances, *, whole_tolerance=0, global_flags=(),
         evaluated, limits = 0, 0
         unattained = None
         for block in blocks:
-            xs = block.starts(distance, min_end)
-            probes = (block.candidate(x, distance, side) for x in xs for side in (0, -1, 1))
-            representatives = (block.flat_representative(a, b, distance) for a, b in zip(xs, xs[1:]))
-            for c in chain(probes, representatives):
+            xs = block.starts(distance, min_end, rejected)
+            probes = (block.candidate(x, distance) for x in xs)
+            cells = chain.from_iterable(block.cell_candidates(a, b, distance, min_end, rejected) for a, b in zip(xs, xs[1:]))
+            for c in chain(probes, cells):
                 if c is None:
                     continue
                 side = c["attainment"] == "ONE_SIDED_LIMIT"
                 evaluated += not side
                 limits += side
-                if min_end and stamp(c["end_utc"]) < stamp(min_end):
+                if not block.in_window(c, min_end):
                     continue
                 if side:
-                    if c["computed_quality_state"] == "VALID" and (unattained is None or key(c) < key(unattained)):
+                    if (c["computed_quality_state"] == "VALID" and c["approached_cell"]["recency_eligible"]
+                            and c["approached_cell"]["review_eligible"] and (unattained is None or key(c) < key(unattained))):
                         unattained = c
                     continue
+                c.setdefault("selection", {"basis": "EXACT_PARTITION_BOUNDARY", "earliest_start_claimed": False,
+                                            "start_tie_rule": "EARLIEST_ENUMERATED_REPRESENTATIVE"})
                 valid = c["computed_quality_state"] == "VALID" and interval_key(c) not in rejected
                 if valid and (best is None or key(c) < key(best)):
                     best = c
@@ -254,7 +323,7 @@ def extract(trace, qc, config, distances, *, whole_tolerance=0, global_flags=(),
             if entire and span > 0 and abs(span - coordinate(distance)) <= coordinate(whole_tolerance):
                 c = block.candidate(block.distances[0], span, whole=True)
                 if (c and c["computed_quality_state"] == "VALID" and interval_key(c) not in rejected
-                        and (not min_end or stamp(c["end_utc"]) >= stamp(min_end))):
+                        and block.in_window(c, min_end)):
                     c["matched_target_distance_m"] = distance
                     c["distance_match_delta_m"] = float(span - coordinate(distance))
                     whole_best = c
