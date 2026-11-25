@@ -66,18 +66,24 @@ delivered MVP; their narrower scope must not be equated with full G0/G1/G3 compl
 | 9. Adaptive coaching | Not started | P5 and P7. |
 | 10. Golden-path forecasting | Not started | P6, dependent on fitness evidence and G6 validation. |
 
-## Next deliverable
+## Current software delivery and next work
 
-Complete **G0 — Raw activity access and sample/event inspection** first. Reuse the
-existing importer/archive and add a read-only activity inspection page and JSON.
-Show source-specific raw decoded records in their recorded order, UTC timestamps,
-distance, HR, timer/events, lap markers, field coverage and missing-data notices.
-Keep linked recordings/versions distinct and expose checksums and decoder/version
-provenance. An absent event stream must remain unknown, not evidence of no pauses.
+The table above is the original audit baseline, not the current software state.
+G0 software merged in PR #14 (issue #13), with 235 CI tests and independent review.
+It exposes raw samples, separate HR, events, laps and decoder/source provenance.
+The runner's detailed original-file comparison is still separate human evidence.
 
-This is the smallest missing prerequisite that can be checked independently. No
-schema rebuild, new connector, PB extraction, estimator or training policy is needed.
-G1's QC and G2's algorithms/tests remain separate future deliverables.
+G1 software is delivered by issue #16 and its linked PR: additive, persisted
+canonical/source/QC versions, exact source ranges, explicit offline recomputation,
+timer-separated blocks, a public API and inspection UI. See
+[the ten-item G1 report](g1-acceptance.md) for acceptance/test mappings, CI/review
+proof and unverified comparisons. Source activity event time, raw acquisition time,
+first derivation time and selection/correction availability are distinct. G1 has
+no fastest-effort extractor and no physiological or planning authority.
+
+**Human/scientific validation for G0/G1 remains UNVERIFIED.** Software merge is not
+a claim that those validation gates passed. G2 (#17) is the next software gate,
+followed by G3 workload and G4 candidate estimators after G2 verification.
 
 ## Baseline verification
 
@@ -90,6 +96,10 @@ report records final local/CI evidence separately.
 Tests are collected from `tests/` with `--rootdir=.` and `PYTHONPATH=..` so pytest
 does not traverse the private repository `.env`. No credential-file access is needed.
 
-The supplied coordinator workflow requires a ten-item acceptance report and manual
-acceptance after each gate. G0 remains pending that acceptance even after its software
-checks pass. G1 starts only after explicit acceptance or requested corrections.
+The user's later explicit instruction superseded the coordinator workflow's
+per-gate development pause: continue all development and merge each in-scope change
+after tests, CI and independent review pass. Routine engineering choices use the
+recommended option consistent with the specification. This authorization does not
+fabricate manual comparisons, scientific validation, or runtime athlete approvals.
+Unverified outputs must not become downstream coaching authority merely because
+their software is merged.

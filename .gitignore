@@ -5,6 +5,7 @@ docs/specs/*
 !docs/specs/adaptive-marathon-plan-mvp-spec.md
 !docs/specs/master-v1-gate-audit.md
 !docs/specs/g0-acceptance.md
+!docs/specs/g1-acceptance.md
 .codex/
 .venv/
 __pycache__/

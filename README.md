@@ -91,6 +91,47 @@ Generate three made-up example files with
 `python3 demo_recordings.py /tmp/marathon-g0-examples`; upload these only into a
 separate demo database, as explained in the walkthrough.
 
+## Inspect canonical trace quality
+
+Open **Inspect canonical trace and quality** on an activity. New imports and
+explicit identity/date resolutions persist a canonical version, original source
+versions and versioned QC. The view shows VALID, SUSPECT, INSUFFICIENT or INVALID,
+exact affected sample/event indices, calculations, timer-separated blocks,
+source/header discrepancies and the original device-time evidence. Missing events
+remain unknown. Separate HR streams remain separate. All distances retain the
+decoder's precision in metres; elapsed, timer and moving seconds stay distinct.
+
+Choose a historical canonical version or another owned original to compare its
+evidence. The page labels which source supplies the canonical view. GET reads never
+backfill, recalculate or rewrite derived data. Original bytes and earlier derived
+versions remain immutable. QC is provisional engineering evidence, not scientific
+validation or permission to use a PB or change training.
+
+For already imported history, stop the app and explicitly backfill offline:
+
+```sh
+.venv/bin/python canonical.py --database /path/to/runs.sqlite3 --archive /path/to/runs-archive
+```
+
+Use `--activity 123` to process a single activity. The canonical page also offers
+**Recompute offline with default QC**. `POST /api/canonical/recompute` with `{}`
+backfills all saved activities; `POST /api/activities/{id}/canonical/recompute`
+processes one. Neither contacts a provider. Changed settings require a new
+`config_version` plus a complete `config` object (CLI: `--config-version` and
+`--config /path/to/settings.json`). Existing version names cannot be redefined.
+
+`GET /api/activities/{id}/canonical` exposes the persisted view. Optional `version`
+selects a saved version ID, `source` an owned FIT checksum, and `offset`/`limit`
+paginate original sample indices (`limit` 1–500). `header.end_utc` is the selected
+FIT session's recorded UTC end, when present. `summary.end_utc` may instead be
+derived from reported elapsed time and has an explicit `end_basis`. Raw acquisition,
+first derived-version creation and selection-history timestamps are retained
+separately from activity event time; later reconstruction is not prospective proof.
+
+Generate six made-up examples with `python3 demo_canonical.py /tmp/marathon-g1-examples`.
+See the [G1 acceptance report](docs/specs/g1-acceptance.md) for the separate demo
+database, exact thresholds, software checks and outstanding human comparisons.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.

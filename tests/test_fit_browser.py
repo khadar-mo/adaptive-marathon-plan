@@ -18,6 +18,52 @@ def chrome_executable():
     return chrome
 
 
+def test_canonical_qc_versions_flags_pagination_and_keyboard(tmp_path):
+    chrome = chrome_executable()
+    from playwright.sync_api import expect, sync_playwright
+
+    with serve_database(tmp_path / "runs.sqlite3") as port, sync_playwright() as driver:
+        base = f"http://127.0.0.1:{port}"
+        with driver.chromium.launch(executable_path=chrome) as browser:
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            errors = []
+            page.on("pageerror", lambda exc: errors.append(str(exc)))
+            page.on("console", lambda msg: errors.append(msg.text) if msg.type in ("warning", "error") else None)
+            page.on("requestfailed", lambda req: errors.append(req.url))
+            page.on("response", lambda res: errors.append(res.url) if res.status >= 400 else None)
+            page.goto(base + "/imports")
+            page.get_by_label("FIT files", exact=True).set_input_files([
+                {"name": name, "mimeType": "application/octet-stream", "buffer": data} for name, data in examples().items()])
+            page.get_by_role("button", name="Upload FIT files").click()
+            expect(page.get_by_text("Complete", exact=True)).to_be_visible()
+            page.get_by_role("link", name="Activity 1", exact=True).first.click()
+            page.get_by_role("link", name="Inspect canonical trace and quality").press("Enter")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Canonical trace and quality")
+            expect(page.get_by_text("Canonical quality:", exact=False)).to_contain_text("VALID")
+            for width in (1280, 375):
+                page.set_viewport_size({"width": width, "height": 812})
+                page.get_by_role("link", name="Next samples", exact=True).press("Enter")
+                expect(page.get_by_role("table", name="Canonical records in file order").get_by_role("row").nth(1)).to_contain_text("200")
+                page.get_by_text("Canonical provenance and QC settings", exact=True).press("Enter")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                with page.expect_response(lambda res: "/api/activities/1/canonical?" in res.url) as response:
+                    page.get_by_role("link", name="Canonical JSON", exact=True).click()
+                assert response.value.json()["trace"]["samples"]["rows"][0]["record_index"] == 200
+                page.go_back()
+                page.get_by_role("link", name="Previous samples", exact=True).click()
+            button = page.get_by_role("button", name="Recompute offline with default QC")
+            button.focus()
+            with page.expect_response(base + "/api/activities/1/canonical/recompute") as response:
+                page.keyboard.press("Enter")
+            assert response.value.status == 200
+            expect(page.get_by_label("Canonical version").locator("option")).to_have_count(1)
+            page.goto(base + "/activities/3/canonical")
+            expect(page.get_by_text("Canonical quality:", exact=False)).to_contain_text("INSUFFICIENT")
+            expect(page.get_by_text("0 original records", exact=False)).to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert errors == []
+
+
 def test_recording_inspection_pagination_missing_data_and_keyboard(tmp_path):
     chrome = chrome_executable()
     from playwright.sync_api import expect, sync_playwright
