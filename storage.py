@@ -19,6 +19,7 @@ import canonical
 import fit_store
 import garmin_activity
 import garmin_coverage
+import provider_modes
 
 
 # The app serves one database. On macOS SQLite, overlapping opens/closes of ro
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-""" + fit_store.SCHEMA + canonical.SCHEMA
+""" + fit_store.SCHEMA + canonical.SCHEMA + provider_modes.SCHEMA
 
 
 def prepare_schema(db):

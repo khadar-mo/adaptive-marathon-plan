@@ -309,7 +309,7 @@ def test_strava_connect_checks_credentials_before_opening_browser(cli, upstream,
     assert not upstream.calls
 
 
-def test_strava_connect_callback_grants_access_and_reuses_tokens(cli, upstream, monkeypatch):
+def test_strava_connect_callback_grants_access_and_reuses_tokens(cli, upstream, monkeypatch, tmp_path):
     strava_credentials(monkeypatch)
     with socket.socket() as available:
         available.bind(("127.0.0.1", 0))
@@ -333,7 +333,8 @@ def test_strava_connect_callback_grants_access_and_reuses_tokens(cli, upstream, 
         return True
 
     monkeypatch.setattr(runs.webbrowser, "open", browser)
-    upstream.reply({"access_token": "new-access", "refresh_token": "new-refresh", "expires_at": 4102444800})
+    upstream.reply({"access_token": "new-access", "refresh_token": "new-refresh", "expires_at": 4102444800,
+                    "athlete": {"id": 42, "firstname": "Do not retain fixture profile"}})
     upstream.reply([])
     code, out, err = cli("strava", "--connect", "--limit", "1")
     browser_threads[0].join(timeout=3)
@@ -346,6 +347,30 @@ def test_strava_connect_callback_grants_access_and_reuses_tokens(cli, upstream, 
     upstream.reply([])
     assert cli("strava")[0] == 0
     assert [c[2] for c in upstream.calls] == [None, "Bearer new-access", "Bearer new-access"]
+    grant = runs.read_grant(tmp_path / ".config" / "adaptive-marathon-plan" / "strava-123.token")
+    assert grant["scopes"] == ["activity:read_all"] and grant["athlete_id"] == 42
+    assert "firstname" not in str(grant)
+    upstream.reply(ERROR_BODY, 401)
+    upstream.reply({"access_token": "refreshed-access", "refresh_token": "refreshed-refresh", "expires_at": 4102444800})
+    upstream.reply([])
+    assert cli("strava")[0] == 0
+    refreshed = runs.read_grant(tmp_path / ".config" / "adaptive-marathon-plan" / "strava-123.token")
+    assert refreshed["scopes"] == grant["scopes"] and refreshed["athlete_id"] == 42
+
+
+@pytest.mark.parametrize("status", [200, 429])
+def test_rest_metadata_preserves_read_and_overall_quota_without_retry(upstream, status):
+    headers = {"X-RateLimit-Limit": "200,2000", "X-RateLimit-Usage": "4,5",
+               "X-ReadRateLimit-Limit": "100,1000", "X-ReadRateLimit-Usage": "3,4", "Retry-After": "90"}
+    upstream.reply([], status, headers)
+    metadata = {}
+    if status == 200:
+        assert runs.request(upstream.url, step="Fixture REST", reconnect="fixture", response_metadata=metadata) == []
+    else:
+        with pytest.raises(runs.ProviderError) as caught:
+            runs.request(upstream.url, step="Fixture REST", reconnect="fixture", response_metadata=metadata)
+        assert caught.value.code == "RATE_LIMITED"
+    assert metadata == headers and len(upstream.calls) == 1
 
 
 @pytest.mark.parametrize("args", [("garmin", "--limit", "0"), ("strava", "--limit", "11"),

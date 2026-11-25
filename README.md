@@ -42,6 +42,67 @@ The JSON endpoint accepts `{}` for normal sync or an inclusive pair such as `{"f
 
 Back up the database and archive together before upgrading. On the first submission the app adds scan tracking to an existing database. Earlier one-page reports and their saved activities remain available. A new normal sync verifies coverage from June.
 
+## Choose running data sources
+
+Open **Sources** at `/providers` to save one of four modes. The default is
+`GARMIN_ONLY`. Choices are versioned; a repeated save is idempotent and stale
+edits require a reload. **Import selected sources** uses the saved revision for
+that attempt, even if you change the choice while the import is running.
+
+| Mode | Current analytical import behaviour |
+|---|---|
+| `GARMIN_ONLY` | Uses the existing Garmin importer; exported FIT also works without Garmin or Strava credentials. |
+| `STRAVA_ONLY` | Returns `POLICY_BLOCKED`; no Strava activity fetch or persistence. |
+| `BOTH` | Imports Garmin and explicitly reports the blocked Strava branch. |
+| `GARMIN_PRIMARY_FALLBACK` | Imports Garmin first. An empty relevant response or a provider failure records its own fallback cause; Strava fallback remains `POLICY_BLOCKED`. |
+
+The [Strava API Policy](https://www.strava.com/legal/api_policy), effective
+1 June 2026 and checked 25 November 2026, restricts the intended analytics,
+combination and persistent storage. [Issue #33](https://github.com/khadar-mo/adaptive-marathon-plan/issues/33)
+tracks external enablement. OAuth success does not remove the block; no runtime
+flag enables persistent Strava ingestion. Existing `runs.py strava --limit` and
+`--connect` retain their transient listing interface. Their saved grant now keeps
+accepted scopes and authenticated athlete ID when supplied; older grants keep
+unknown metadata. Optional `request(..., response_metadata={})` exposes read and
+overall rate-limit headers without changing the returned payload. A 429 stops
+the request and reports reset/retry advice; the CLI does not retry quota failures.
+
+Mode selection controls **Import selected sources**. Explicit **Sync Garmin**
+and **Upload FIT files** on Imports remain available in every mode. Changing
+modes never filters or erases saved actuals. Source status shows exact canonical
+versions, linked provider IDs, original checksums, unresolved matches, and observed
+tiers A/B/C. Summary-only evidence remains `INSUFFICIENT` for continuous efforts;
+missing timer events remain `NOT_PROVIDED`. Contextual wellness/feedback is assessed
+separately, so activity ingress does not claim Tier D. Fully checked provider dates
+mean the scan completed, not proof that every real-world run exists in that account.
+An empty response is distinct from an outage; failed and unscanned dates remain
+incomplete. Offline FIT uploads do not certify provider date coverage.
+
+The following loopback endpoints use the same configured database/archive:
+
+| Endpoint | Input / result |
+|---|---|
+| `GET /api/providers` | Current mode/revision, immutable choice history, latest 20 attempts, local capability/coverage and duplicate-review links. No provider calls. |
+| `POST /api/providers/config` | `{"mode":"BOTH","expected_revision":0}`. Returns the saved revision; stale edits return 409. |
+| `POST /api/providers/import` | `{}` or the existing inclusive `{"from":"2026-10-01","to":"2026-10-31"}`. Returns 202 plus attempt links, including a persisted blocked result for Strava-only. 202 accepts an attempt, not proof of data availability. |
+| `GET /api/provider-attempts/{id}` | Frozen mode, provider outcomes, fallback cause, Garmin report/scans and exact canonical versions available in that import. |
+| `POST /api/imports/strava` | Same date syntax; returns 403 with `POLICY_BLOCKED` before credentials, network or raw writes. |
+
+Use the local CLI without reading provider credentials:
+
+```sh
+.venv/bin/python provider_cli.py status
+.venv/bin/python provider_cli.py configure GARMIN_PRIMARY_FALLBACK --revision 0
+.venv/bin/python provider_cli.py sync --from 2026-10-01 --to 2026-10-31
+```
+
+Use the revision returned by `status`, and `--port 8028` before the subcommand
+for a separate local demo server. The CLI connects only to `127.0.0.1` and does
+not follow redirects. Garmin still uses its existing Personal API configuration;
+`RUNS_GARMIN_OFFLINE=1` gives an explicit offline status. FIT remains independent.
+See the [provider acceptance report](docs/specs/provider-modes-acceptance.md) for
+synthetic verification and the remaining external/manual limitations.
+
 ## Read running history
 
 Open [History](http://127.0.0.1:8001/history). Choose **Month** or **Week (Monday–Sunday)**, enter a date in the period and select **Show history**. The initial view uses the current month in Europe/London. Each activity belongs to its recorded local date, including when travelling. Undated FIT runs appear below the period totals until you confirm their dates on Imports.

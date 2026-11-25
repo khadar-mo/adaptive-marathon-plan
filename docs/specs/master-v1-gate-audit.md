@@ -103,3 +103,27 @@ recommended option consistent with the specification. This authorization does no
 fabricate manual comparisons, scientific validation, or runtime athlete approvals.
 Unverified outputs must not become downstream coaching authority merely because
 their software is merged.
+
+## Provider-mode software — issue #28
+
+Supported provider orchestration adds persisted mode revisions, explicit attempt
+outcomes, source/capability/coverage UI and API, and a loopback configuration CLI.
+Garmin/FIT imports continue through G1 canonical identities and immutable source
+versions; modes never remove saved actuals. Empty relevant data, outage, offline,
+authorization, forbidden, rate-limit and unsupported response states remain
+distinct. Fallback records its cause and the unavailable secondary branch.
+See the [ten-item provider acceptance report](provider-modes-acceptance.md) for
+synthetic contracts, duplicate/correction evidence, API/CLI/UI checks and limits.
+
+**Live persistent Strava analytics remains EXTERNALLY BLOCKED by #33.** Official
+terms effective 1 June 2026, verified 25 November 2026, conflict with the requested
+combined analytical archive. #28 denies that branch with `POLICY_BLOCKED` before
+fetch or raw persistence. Strava-only analytics is unavailable; Both retains
+supported Garmin output with the limitation; Garmin-primary fallback exposes the
+block. Synthetic eligible-secondary decisions are not live-mode verification.
+The original full four-mode requirement remains visible and unfulfilled in part.
+
+#33 does not block G2–G6 or planner software: G6 consumes supported ingress and
+explicit unavailable states. A23/M08 downstream planner acceptance, manual
+Garmin comparisons and prospective scientific evidence remain separate. No
+provider policy or runtime athlete approval is waived by software merge.
