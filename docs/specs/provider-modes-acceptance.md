@@ -54,7 +54,9 @@ unfulfilled under [external blocker #33](https://github.com/khadar-mo/adaptive-m
 
 5. **Tests.** `PYTHONPATH=. .venv/bin/python -m pytest tests -q` passed with
    **319 passed, 5 skipped** on the initial implementation base. The five skipped
-   tests are browser replays requiring Chrome on PATH. The focused mode/provider
+   tests are browser replays requiring Chrome on PATH. After merging main
+   `e7b05cd834914daa9226750b605a867444d60948` (context ingestion), the suite passed
+   **368 tests with 6 browser skips**. The focused mode/provider
    suites passed **98 tests**. `git diff --check` passed. Regression sensitivity
    was proved by temporarily making the denied adapter load settings: the
    before-fetch spy test failed. Temporarily removing the stale revision guard
@@ -112,6 +114,15 @@ unfulfilled under [external blocker #33](https://github.com/khadar-mo/adaptive-m
 
 10. **Review and CI.** Independent review and passing final-head CI are merge
     requirements; this report records author evidence and does not self-approve.
+    Initial PR #37 CI passed 323 tests but failed the new browser replay because
+    the test reloaded/navigated before asynchronous mode saving completed. The
+    replay now waits for the save response and navigation, retaining strict
+    request-failure and console checks. The merged-main replay also follows the
+    shared Context/Sources navigation. A fresh CUA integration check saved Both,
+    navigated to Context, saved a synthetic wellness observation with exact
+    `47.12345678901234567890` precision, and returned to Sources with the saved
+    mode and all C/B/A evidence intact; console warn/error logs remained empty.
+    No browser viewport override was needed for this integration check.
     The linked PR conversation/checks carry the final SHA, independent verdict,
     CI run and any base-integration fixes. The coordinator owns the merge and
     records final proof in parent #15. External #33 remains open regardless of

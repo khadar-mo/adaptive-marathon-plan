@@ -127,3 +127,29 @@ The original full four-mode requirement remains visible and unfulfilled in part.
 explicit unavailable states. A23/M08 downstream planner acceptance, manual
 Garmin comparisons and prospective scientific evidence remain separate. No
 provider policy or runtime athlete approval is waived by software merge.
+
+The provider branch incorporates merged contextual-input main `e7b05cd` and
+preserves both schema sets, navigation entries and runtime forms. Integration
+checks passed 368 local tests (six browser replays require final CI) and a fresh
+Chrome source/context save-and-return walkthrough retained exact context decimals.
+
+## Optional contextual inputs — issue #29
+
+The independent ingestion prerequisite for G5 now has additive append-only wellness,
+versioned post-run/pre-week feedback, strength and explicit coverage records. JSON/CSV
+imports, entry/correction forms, CLI, event feed and versioned scale/policy controls
+retain raw source bytes, exact decimal units, missingness and separate event/known-at
+times. Activity donor redirects and canonical source reclassification do not erase
+feedback targets. S&C is isolated from running totals; pain/illness reports only emit
+attention signals. See [the contract](context-inputs.md) and
+[ten-item software acceptance record](context-ingestion-acceptance.md).
+
+PR #35's initial CI passed all 328 tests including five browser flows. Independent
+review found browser decimal rounding and two malformed-input 500 paths. Targeted
+regressions reproduced them; the fixes pass 336 local tests with five browser skips.
+Latest-head CI and changed-diff approval are required before serialized merge.
+
+This is ingestion software, not G5 recovery interpretation, G6 prospective validation,
+or P5 approved recovery adaptation. Missing sources remain missing. Real Garmin
+wellness mapping/manual comparison and physiological validation remain UNVERIFIED;
+the generic owned-export/self-report schema does not claim a vendor-specific adapter.

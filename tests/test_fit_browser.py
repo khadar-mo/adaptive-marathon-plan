@@ -34,11 +34,17 @@ def test_source_modes_saved_configuration_blocked_fallback_and_mobile_keyboard(t
             page.on("request", lambda req: requests.append(req.url))
             page.goto(base + "/providers")
             expect(page.get_by_role("heading", level=1)).to_have_text("Running data sources")
+            page.get_by_role("link", name="Context", exact=True).press("Enter")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Context inputs and history")
+            page.get_by_role("link", name="Sources", exact=True).press("Enter")
+            expect(page.get_by_role("heading", level=1)).to_have_text("Running data sources")
             for width, mode in ((1280, "STRAVA_ONLY"), (375, "GARMIN_PRIMARY_FALLBACK")):
                 page.set_viewport_size({"width": width, "height": 850})
                 page.get_by_role("combobox", name="Source mode", exact=True).select_option(mode)
                 page.get_by_role("button", name="Save source mode").focus()
-                page.keyboard.press("Enter")
+                with page.expect_navigation(wait_until="domcontentloaded"), page.expect_response(base + "/api/providers/config") as saved:
+                    page.keyboard.press("Enter")
+                assert saved.value.status == 200
                 expect(page.get_by_role("combobox", name="Source mode", exact=True)).to_have_value(mode)
                 page.reload()
                 expect(page.get_by_role("combobox", name="Source mode", exact=True)).to_have_value(mode)
@@ -54,7 +60,9 @@ def test_source_modes_saved_configuration_blocked_fallback_and_mobile_keyboard(t
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             # Explicit offline FIT still works even with Strava-only selected.
             page.get_by_role("combobox", name="Source mode", exact=True).select_option("STRAVA_ONLY")
-            page.get_by_role("button", name="Save source mode").click()
+            with page.expect_navigation(wait_until="domcontentloaded"), page.expect_response(base + "/api/providers/config") as saved:
+                page.get_by_role("button", name="Save source mode").click()
+            assert saved.value.status == 200
             page.get_by_role("link", name="Imports", exact=True).click()
             page.get_by_label("FIT files", exact=True).set_input_files({"name": "synthetic.fit", "mimeType": "application/octet-stream", "buffer": make_fit()})
             page.get_by_role("button", name="Upload FIT files").click()
