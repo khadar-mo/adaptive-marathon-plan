@@ -70,6 +70,10 @@ timer events and lap markers. Coverage tables identify missing fields. Choose an
 original file to distinguish linked recordings or older versions, and expand
 **Source and decoder provenance** for checksums and decoding settings.
 
+Some FITs carry HR in separate messages. These have their own section and source
+indices; their timing fields remain inspectable without merging readings into the
+sample stream. Sample HR coverage describes only the record messages.
+
 Sample indices start at zero in the FIT's record order. **Next samples** and
 **Previous samples** preserve that order and the selected original. **Decoded
 fields** exposes the SDK-decoded source values; **Recording JSON** opens the same

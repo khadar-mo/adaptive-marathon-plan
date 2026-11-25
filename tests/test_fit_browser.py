@@ -34,7 +34,10 @@ def test_recording_inspection_pagination_missing_data_and_keyboard(tmp_path):
             page.on("request", lambda req: requests.append(req.url))
             page.goto(base + "/imports")
             page.get_by_label("FIT files", exact=True).set_input_files([
-                {"name": name, "mimeType": "application/octet-stream", "buffer": data} for name, data in examples().items()])
+                {"name": name, "mimeType": "application/octet-stream", "buffer": data} for name, data in examples().items()] + [
+                {"name": "separate-hr.fit", "mimeType": "application/octet-stream", "buffer": make_fit(messages=[
+                    (20, {"timestamp": START, "distance": 0}),
+                    (132, {"timestamp": START, "filtered_bpm": [150, 151], "event_timestamp": [100, 101]})])}])
             page.get_by_role("button", name="Upload FIT files").click()
             expect(page.get_by_text("Complete", exact=True)).to_be_visible()
             page.get_by_role("link", name="Activity 1", exact=True).first.click()
@@ -59,6 +62,8 @@ def test_recording_inspection_pagination_missing_data_and_keyboard(tmp_path):
             page.goto(base + "/activities/3/recording")
             expect(page.get_by_text("This file provides summary data only.", exact=False)).to_be_visible()
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            page.goto(base + "/activities/4/recording")
+            expect(page.get_by_role("table", name="Separate HR messages in file order")).to_contain_text("[150, 151]")
             assert errors == [] and all(url.startswith(base + "/") for url in requests)
 
 

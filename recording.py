@@ -78,6 +78,9 @@ def inspect(data, offset, limit):
         raise ValueError("Expected an indexed single-session running FIT.")
     session = sessions[0]
     samples = [sample(i, fields) for i, fields in enumerate(messages.get("record_mesgs", []))]
+    heart_rates = [{"hr_index": i, "timestamp_utc": utc(fields.get("timestamp")),
+                   "filtered_bpm": json_safe(fields.get("filtered_bpm")), "fields": json_safe(fields)}
+                  for i, fields in enumerate(messages.get("hr_mesgs", []))]
     events = [event(i, fields) for i, fields in enumerate(messages.get("event_mesgs", []))]
     timers = [e for e in events if e["fields"].get("event") == 0]
     laps = [{"lap_index": i, "start_utc": utc(fields.get("start_time")),
@@ -98,11 +101,14 @@ def inspect(data, offset, limit):
                    "time_correlations": json_safe(messages.get("timestamp_correlation_mesgs", [])),
                    "activity_summaries": json_safe(messages.get("activity_mesgs", []))},
         "coverage": {"samples": channels, "event_count": len(events), "timer_event_count": len(timers),
+                     "heart_rate_message_count": len(heart_rates),
+                     "heart_rate_message_timestamp_utc": coverage([h["timestamp_utc"] for h in heart_rates]),
+                     "heart_rate_message_bpm": coverage([h["filtered_bpm"] for h in heart_rates]),
                      "timer_events": timer_status, "lap_count": len(laps),
                      "lap_start_utc": coverage([lap["start_utc"] for lap in laps]),
                      "lap_end_utc": coverage([lap["end_utc"] for lap in laps])},
         "samples": {"total": len(samples), "offset": offset, "limit": limit, "rows": samples[offset:offset + limit]},
-        "events": events, "laps": laps,
+        "events": events, "laps": laps, "heart_rate_messages": heart_rates,
     }
 
 
@@ -137,9 +143,11 @@ def read(store, activity_id, source=None, *, offset=0, limit=200):
               "provenance": {"inspection_version": INSPECTION_VERSION, "decoder": "garmin-fit-sdk",
                              "decoder_version": version("garmin-fit-sdk"), "decode_options": dict(DECODE_OPTIONS),
                              "sample_indices": "zero-based record_mesgs order",
+                             "heart_rate_indices": "zero-based hr_mesgs order",
                              "event_indices": "zero-based event_mesgs order", "lap_indices": "zero-based lap_mesgs order"},
               "state": "UNAVAILABLE", "limitations": list(LIMITATIONS), "header": None, "coverage": None,
-              "samples": {"total": 0, "offset": offset, "limit": limit, "rows": []}, "events": [], "laps": []}
+              "samples": {"total": 0, "offset": offset, "limit": limit, "rows": []},
+              "events": [], "laps": [], "heart_rate_messages": []}
     if selected is None:
         result["limitations"].insert(0, "No original FIT is indexed for this activity. Upload its exported FIT from Imports.")
         return result

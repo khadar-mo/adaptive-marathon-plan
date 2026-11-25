@@ -78,6 +78,34 @@ async def test_summary_only_missing_channels_are_unknown_not_zero(history):
         html = (await client.get('/activities/1/recording')).text
         assert "Pause and resume history is unknown" in html and "summary data only" in html
         assert "Lap markers not provided" in html
+        assert row["heart_rate_messages"] == [] and row["coverage"]["heart_rate_message_count"] == 0
+
+
+async def test_separate_heart_rate_messages_are_visible_without_merging_into_records(history):
+    # Standard FIT global message 132 can carry HR outside the record stream.
+    fit = make_fit(messages=[(20, {"timestamp": START, "distance": 0}),
+                             (20, {"timestamp": START + 1, "distance": 3}),
+                             (132, {"timestamp": START, "fractional_timestamp": 0, "time256": 0,
+                                    "filtered_bpm": [145, 146], "event_timestamp": [100, 101]}),
+                             (132, {"filtered_bpm": 147, "event_timestamp": 102})])
+    async with server() as client:
+        await upload(client, ("separate-hr.fit", fit))
+        row = (await client.get('/api/activities/1/recording')).json()
+        assert row["samples"]["rows"][0]["heart_rate_bpm"] is None
+        assert row["coverage"]["samples"]["heart_rate_bpm"]["status"] == "NOT_PROVIDED"
+        assert row["coverage"]["heart_rate_message_count"] == 2
+        assert row["coverage"]["heart_rate_message_timestamp_utc"]["status"] == "PARTIAL"
+        assert row["coverage"]["heart_rate_message_bpm"]["status"] == "RECORDED"
+        assert [h["hr_index"] for h in row["heart_rate_messages"]] == [0, 1]
+        assert row["heart_rate_messages"][0]["filtered_bpm"] == [145, 146]
+        assert row["heart_rate_messages"][1]["filtered_bpm"] == 147
+        assert row["heart_rate_messages"][0]["timestamp_utc"] == absolute_time(START).isoformat()
+        assert row["heart_rate_messages"][1]["timestamp_utc"] is None
+        assert row["heart_rate_messages"][1]["fields"]["event_timestamp"] == 102
+        assert row["provenance"]["heart_rate_indices"] == "zero-based hr_mesgs order"
+        html = (await client.get('/activities/1/recording')).text
+        assert "Separate heart-rate messages" in html and "2 separate HR messages" in html
+        assert "[145, 146]" in html and "147" in html and "not merged" in html
 
 
 async def test_partial_fields_relative_time_and_unknown_events_remain_inspectable(history):

@@ -24,6 +24,10 @@ Missing fields, absent/partial timer coverage, missing archives and checksum fai
 are explicit. Decoding options, SDK version and inspection version accompany results.
 No activity/archive data or existing schema is changed by inspection.
 
+Standard separate FIT HR messages are also exposed, with their own indices, BPM
+values (including arrays), timing fields and coverage. These remain separate from
+the record stream, whose missing HR is labelled specifically as sample-record HR.
+
 ## 4. Components
 
 - `recording.py`: source ownership, archive recovery for reading, decoding and coverage.
@@ -50,8 +54,8 @@ No new scientific threshold or training policy is introduced.
 - Baseline: 215 tests passed. Two pre-existing browser tests skipped without Chrome
   on PATH; explicitly launching the installed Chrome failed due to macOS process
   permission restrictions before either test could exercise the app.
-- Local final suite: **231 passed, 3 browser tests skipped**. Run from `tests/` using
-  `PYTHONPATH=.. ../.venv/bin/python -m pytest --rootdir=. -q`. Includes 16 new
+- Local final suite: **232 passed, 3 browser tests skipped**. Run from `tests/` using
+  `PYTHONPATH=.. ../.venv/bin/python -m pytest --rootdir=. -q`. Includes 17 new
   server/decoder/demo cases. Browser replay is separately required in CI.
 - A deliberate sorting mutation failed the source-order regression test; the
   original code was restored. This demonstrates that the test detects reordered
@@ -119,7 +123,9 @@ Only the existing supported single-session running FIT path is covered. The Stra
 CLI exists, but persisted Strava trace ingestion is not implemented or required here.
 The view decodes the original on each request; sample output is paginated, not the
 underlying decoder workload. SDK scaling applies; raw bytes are still retained in
-the archive and all decoded fields remain inspectable. Records are not corrected,
+the archive. Decoded record, HR, event, lap, session, file/device and time-correlation
+fields are inspectable; other FIT message groups are not exposed by this view.
+Records are not corrected,
 resampled or assigned a G1 quality state or a claimed B/C capability tier.
 
 G1 canonical trace/event storage and versioned QC remain incomplete. G2 fastest

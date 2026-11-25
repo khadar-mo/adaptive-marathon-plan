@@ -346,7 +346,7 @@ def recording_page(row):
     content += raw(header, "Session, device and recorded time fields")
     channels = row["coverage"]
     names = {"timestamp_utc": "Timestamp (UTC)", "distance_m": "Cumulative distance (m)",
-             "heart_rate_bpm": "Heart rate (bpm)", "elevation_m": "Elevation (m)", "speed_m_per_s": "Speed (m/s)",
+             "heart_rate_bpm": "Heart rate in sample records (bpm)", "elevation_m": "Elevation (m)", "speed_m_per_s": "Speed (m/s)",
              "cadence_rpm": "Cadence (recorded rpm)", "temperature_c": "Temperature (°C)", "gps": "GPS coordinates"}
     statuses = {"RECORDED": "Recorded", "PARTIAL": "Partial", "NOT_PROVIDED": "Not provided"}
     content += table("Sample field coverage", ("Field", "Coverage", "Present / total", "Missing"), (
@@ -354,6 +354,18 @@ def recording_page(row):
         for key, c in channels["samples"].items()))
     content += '<p>Counts include readable values only. Decoded fields retain the original SDK values, including '
     content += 'unusable timestamps. GPS uses FIT semicircles; cadence is shown in the file’s recorded rpm.</p>'
+    content += '<h2>Separate heart-rate messages</h2>'
+    if row["heart_rate_messages"]:
+        content += f'<p>{channels["heart_rate_message_count"]} separate HR messages are supplied by this file. '
+        content += 'These readings have their own timing fields and are not merged into the sample records above. '
+        content += 'Expand Decoded fields for fractional timestamps and beat-event timing; absent base timestamps remain unknown.</p>'
+        content += '<p>Base timestamp coverage: ' + statuses[channels["heart_rate_message_timestamp_utc"]["status"]]
+        content += '; filtered BPM field coverage: ' + statuses[channels["heart_rate_message_bpm"]["status"]] + '.</p>'
+        content += table("Separate HR messages in file order", ("HR index", "Base timestamp (UTC)", "Filtered BPM", "Source fields"), (
+            (str(h["hr_index"]), value(h["timestamp_utc"]), value(h["filtered_bpm"]), raw(h["fields"]))
+            for h in row["heart_rate_messages"]))
+    else:
+        content += '<p>No separate HR messages supplied. Any heart rate in sample records is shown in the coverage table above.</p>'
     content += '<h2>Timer and other events</h2><p>Timer-event coverage: <strong>' + statuses[channels["timer_events"]] + '</strong>. '
     content += f'{channels["timer_event_count"]} timer events; {channels["event_count"]} events in total.</p>'
     if row["events"]:
