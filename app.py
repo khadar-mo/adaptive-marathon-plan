@@ -39,6 +39,7 @@ import validation_refresh
 from validation_web import router as validation_router
 from workout_web import router as workout_router
 from runner_settings_web import router as settings_router
+from workout_template_web import router as template_router
 
 
 @asynccontextmanager
@@ -73,6 +74,7 @@ app.include_router(fitness_router)
 app.include_router(validation_router)
 app.include_router(workout_router)
 app.include_router(settings_router)
+app.include_router(template_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 effort_api.register(app)
 estimator_api.register(app)

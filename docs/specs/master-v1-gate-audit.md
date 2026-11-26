@@ -246,6 +246,19 @@ inspection, custom configuration and recent-boundary behavior after this upgrade
 Software conformance does not establish manual Garmin or scientific validation.
 Final-head CI and independent review remain the merge gates.
 
+## Editable workout templates — issue #50
+
+1. Master Part B §7 and Part C §§6–7 define the input for APE-WK-01–04 and W2. Issues #22 and #23 own candidate selection and scheduling.
+2. Workout labels links to a local template library. Every revision retains the declared purpose, role, independent tags, block order, runner and reason.
+3. The form records integer metres per repetition, active recoveries, stationary rest, protected work and declared easy-volume bounds and splitting permission.
+4. The W2 browser entry returned 27,000 m total, 6,000 m work and 21,000 m easy. An interval fixture keeps two 400 m repetitions distinct and counts a 150 m active recovery and 37.125 s stationary rest.
+5. Exact-revision previews exercise a one-metre easy adjustment, a protected effort and invalid bounds. Storage tests cover duplicate retries, competing decisions across two running app processes and microsecond cutoffs.
+6. The normal browser form stores long decimal pace bounds and preserves them through an unrelated edit. Each pace carries its supplied units, method and evidence. Missing support yields FEASIBILITY_UNCERTAIN.
+7. Zone descriptions retain the declared method, band and calibration. A device band lacking calibration shows ZONE_UNVERIFIED.
+8. The public library opens on a genuine synthetic G0 SQLite fixture. The coordinator independently verified W2, permitted adjustment and decimal duration through that layout. Activity, import, source and original FIT records retain their values.
+9. Current and historical views expose exact JSON revisions. The Chromium checks cover keyboard entry, mobile layout, historical links, stale submissions and invalid bounds.
+10. The tests establish deterministic arithmetic and source preservation. Template suitability and individual pace calibration depend on the runner's evidence. Final CI and independent review are recorded in the pull request.
+
 ## Completed-run fueling evidence — issue #39
 
 Optional source-linked practice, runner-entered strategy, GI tolerance and timestamped
