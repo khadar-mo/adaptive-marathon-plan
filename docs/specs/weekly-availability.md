@@ -118,7 +118,8 @@ Proof: the independent check and browser replay below; all inputs are synthetic.
 ## 7. Automated and causal checks
 
 `PYTHONPATH=. .venv/bin/python -m pytest tests/test_availability.py tests/test_availability_browser.py -q`:
-**33 passed**, including real Chromium. Chrome/Chromium must be on PATH; Linux CI
+**34 passed** after the precise-time review correction, including two real Chromium
+flows. Chrome/Chromium must be on PATH; Linux CI
 requires browser replays. In-memory mutations that counted overlaps separately
 and ignored the second clock occurrence each failed their public API regression.
 Neither mutation changed a source file. `git diff --check` passed.
@@ -141,6 +142,14 @@ remain visible; corrected submissions produce 3,600 and 5,400 seconds.
 At 1280px/375px, keyboard submission/navigation and expanded source details work
 without page overflow. No JavaScript errors or failed requests occurred; the main
 browser's only HTTP errors were the two deliberately asserted 422 clock errors.
+
+Review found that native datetime-local controls emptied supported microsecond
+values. A new API-seeded browser test reproduced this on the reviewed head. The
+editor now retains a lossless text input whenever the native control changes the
+saved value; ordinary minute fields keep their native control. The test verifies
+a note-only edit preserves raw and UTC times across an overnight year boundary,
+including six fractional digits and explicit zero seconds, then adds an ordinary
+minute window without changing the precise interval. The old revision remains exact.
 
 ## 10. Limits and delivery
 

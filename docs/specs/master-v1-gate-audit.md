@@ -192,8 +192,9 @@ spring gaps are rejected and autumn ambiguity requires an explicit choice.
 Overlaps count once. Identical retries are idempotent and stale edits conflict.
 Exact-version reads supply future P0/P4 without activating plans or approving targets.
 
-The [ten-item acceptance record](weekly-availability.md) includes 33 passing focused
-checks and an actual desktop/mobile browser replay. The coordinator independently
+The [ten-item acceptance record](weekly-availability.md) includes 34 passing focused
+checks and two actual browser flows, including a precise-time note-only edit after
+review exposed a native-input round-trip loss. The coordinator independently
 verified the first immutable commit through HTTP against expected clock/union
 results. Final integrated CI and independent review are required before merge.
 This completes calendar input only; P0/P4 and their coaching/approval boundaries remain.

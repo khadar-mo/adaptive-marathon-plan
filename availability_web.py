@@ -88,10 +88,14 @@ def choice(identity, label, values, selected, extra=""):
 
 def window_fields(identity, row=None):
     row = row or {}
-    result = '<fieldset class="time-window"><legend>Time window</legend>'
+    result = '<fieldset class="time-window"><legend>Time window</legend><p>Use London local date and time, for example 2026-10-25T01:30. Seconds and up to six fractional digits are kept.</p>'
     for boundary, title in (("start", "Start"), ("end", "End")):
         values = row.get(boundary, {})
-        result += field(f"{identity}-{boundary}", f"{title} London date and time", values.get("local", ""), "datetime-local", f'data-boundary="{boundary}" step="any"')
+        local = values.get("local", "")
+        # Native controls support milliseconds, while the API preserves microseconds.
+        # Render their fallback before parsing HTML, avoiding a browser rejection/warning.
+        kind = "text" if "." in local and len(local.rsplit(".", 1)[1]) > 3 else "datetime-local"
+        result += field(f"{identity}-{boundary}", f"{title} London date and time", local, kind, f'data-boundary="{boundary}" step="any"')
     result += '<details><summary>Clock-change choices and offsets</summary><p>Ordinary times resolve automatically. For a repeated autumn time, choose its first or second occurrence, or supply its UTC offset. Spring-gap times cannot be used.</p>'
     for boundary, title in (("start", "Start"), ("end", "End")):
         values = row.get(boundary, {})
@@ -126,6 +130,12 @@ SCRIPT = """
 <script>
 const form=document.getElementById('availability-editor');
 if(form) {
+ // Native datetime-local controls can reject microseconds or normalize away
+ // explicit seconds. Preserve each saved lexeme whenever that happens.
+ form.querySelectorAll('[data-boundary]').forEach(input=>{
+  const saved=input.getAttribute('value');
+  if(saved && input.value!==saved) {input.type='text';input.value=saved;}
+ });
  let sequence=1000;
  const renew=()=>{form.dataset.request=crypto.randomUUID();};
  const sync=day=>{
