@@ -23,7 +23,7 @@ def field(name, title, value="", required=False, typ="text"):
 
 
 def textarea(name, title, value):
-    return f'<label>{e(title)}<textarea name="{e(name)}" rows="3" style="width:100%;box-sizing:border-box">{e(value)}</textarea></label>'
+    return f'<label for="fitness-{e(name)}">{e(title)}</label><textarea id="fitness-{e(name)}" name="{e(name)}" rows="3" style="width:100%;box-sizing:border-box">{e(value)}</textarea>'
 
 
 def select(name, title, vals, chosen):
@@ -167,7 +167,12 @@ document.querySelectorAll('#fitness-save,#fitness-config,#fitness-observation').
  form.addEventListener('submit',async event=>{
   event.preventDefault();
   const button=event.submitter,message=form.querySelector('[role=status]'),f=Object.fromEntries(new FormData(form));
-  let url,body;
+  let url,serialized;
+  const appendJSON=(fields,key,raw)=>{
+   const pairs=Object.entries(fields).map(([name,value])=>JSON.stringify(name)+':'+JSON.stringify(value));
+   pairs.push(JSON.stringify(key)+':'+raw);
+   return '{'+pairs.join(',')+'}';
+  };
   const band=name=>{
    const low=f[name+'_low'], high=f[name+'_high'];
    if(!low && !high) return null;
@@ -175,24 +180,26 @@ document.querySelectorAll('#fitness-save,#fitness-config,#fitness-observation').
    return {low,high};
   };
   try {
-   if(form.id==='fitness-save'){url='/api/fitness/capture'; body=JSON.parse(form.dataset.query);}
+   if(form.id==='fitness-save'){url='/api/fitness/capture'; serialized=form.dataset.query;}
    if(form.id==='fitness-config'){
     url='/api/fitness/configurations';
     const rpe=band('rpe'),hr=band('hr'),duration=band('duration'),grade=band('grade');
     const match=f.route||f.conditions||hr||rpe||duration||grade||f.scale_version;
-    body={version:f.version,actor:f.actor,reason:f.reason,config:{baseline_days:Number(f.baseline_days),minimum_days:Number(f.minimum_days),
-     expected_metrics:f.expected_metrics.split(',').map(x=>x.trim()).filter(Boolean),robust_deviations:JSON.parse(f.robust_deviations||'[]'),
+    const rules=f.robust_deviations||'[]';
+    JSON.parse(rules); // Validate syntax only. The server parses the submitted decimal lexemes.
+    const config={baseline_days:Number(f.baseline_days),minimum_days:Number(f.minimum_days),
+     expected_metrics:f.expected_metrics.split(',').map(x=>x.trim()).filter(Boolean),
      estimator_config:f.estimator_config,comparison:match?{route:f.route,conditions:f.conditions,duration_s:duration,grade_percent:grade,hr_bpm:hr,
-      rpe:rpe||f.scale_version?{scale_version:f.scale_version,values:rpe}:null}:null,sustained_pace_s_per_km:band('pace'),late_after_m:f.late_after_m||null}};
+      rpe:rpe||f.scale_version?{scale_version:f.scale_version,values:rpe}:null}:null,sustained_pace_s_per_km:band('pace'),late_after_m:f.late_after_m||null};
+    serialized=appendJSON({version:f.version,actor:f.actor,reason:f.reason},'config',appendJSON(config,'robust_deviations',rules));
    }
    if(form.id==='fitness-observation'){
-    url='/api/fitness/run-context'; body={source:f.source,source_reference:f.source_reference,actor:f.actor,reason:f.reason,
+    url='/api/fitness/run-context'; const body={source:f.source,source_reference:f.source_reference,actor:f.actor,reason:f.reason,
       canonical_version_id:form.dataset.canonical,previous_id:form.dataset.previous||null};
     for(const key of ['route','conditions','grade_percent','mean_hr_bpm']) body[key]=f[key]||null;
     body.rpe=f.rpe_value||f.rpe_scale?{value:f.rpe_value,scale_version:f.rpe_scale}:null;
+    serialized=appendJSON(body,'activity_id',form.dataset.activity);
    }
-   let serialized=JSON.stringify(body);
-   if(form.id==='fitness-observation'){serialized='{"activity_id":'+form.dataset.activity+','+serialized.slice(1);}
    button.disabled=true;message.textContent='Saving…';
    const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:serialized});
    const result=await response.json(); if(!response.ok) throw Error(typeof result.detail==='string'?result.detail:'Check the required fields and ranges.');

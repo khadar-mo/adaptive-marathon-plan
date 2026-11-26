@@ -56,3 +56,38 @@ def test_chromium_fitness_inputs_versions_and_frozen_changes(tmp_path):
                 page.get_by_role("link",name="Rebuild and compare").press("Enter")
             assert replay.value.json()["status"]=="IDENTICAL"
             assert not errors
+
+
+def test_browser_preserves_unquoted_decimal_rule_and_range_when_versioning(tmp_path):
+    import json
+    from playwright.sync_api import expect, sync_playwright
+    digits = "0.12345678901234567890123456789"
+    range_end = "350.12345678901234567890123456789"
+    raw = ('[{"stream":{"metric":"resting_hr","unit":"bpm","source":"watch","method":"rest","calibration":null},'
+           '"epsilon":' + digits + ',"direction":"HIGHER"}]')
+    with serve_database(tmp_path / "runs.sqlite3") as port, sync_playwright() as driver:
+        base = f"http://127.0.0.1:{port}"
+        with driver.chromium.launch(executable_path=chrome_executable()) as browser:
+            page = browser.new_page()
+            page.goto(base + "/fitness")
+            for version in ("exact-a", "exact-b"):
+                page.get_by_text("Define a descriptor version",exact=True).click()
+                form = page.locator("#fitness-config")
+                form.get_by_label("New descriptor version",exact=True).fill(version)
+                form.get_by_label("Configuration author",exact=True).fill("runner")
+                form.get_by_label("Reason for this definition",exact=True).fill("Precision check")
+                if version == "exact-a":
+                    form.get_by_label("Robust-deviation rules (JSON array)",exact=True).fill(raw)
+                    form.get_by_label("Sustained pace (seconds/km) minimum",exact=True).fill("290")
+                    form.get_by_label("Sustained pace (seconds/km) maximum",exact=True).fill(range_end)
+                else:
+                    assert json.loads(form.get_by_label("Robust-deviation rules (JSON array)").input_value())[0]["epsilon"] == digits
+                    expect(form.get_by_label("Sustained pace (seconds/km) maximum",exact=True)).to_have_value(range_end)
+                with page.expect_response(base + "/api/fitness/configurations") as response:
+                    form.get_by_role("button",name="Save descriptor version").press("Enter")
+                assert response.value.status == 200
+                page.wait_for_url("**/fitness?**config_version=" + version + "**")
+                state = page.request.get(base + "/api/fitness", params={"config_version":version}).json()
+                config = state["definition"]["config"]
+                assert config["robust_deviations"][0]["epsilon"] == digits
+                assert config["sustained_pace_s_per_km"]["high"] == range_end
