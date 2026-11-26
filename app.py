@@ -30,6 +30,7 @@ from storage import ActiveImport, Archive, Store
 import views
 from context_web import router as context_router
 from workload_web import router as workload_router
+from fitness_web import router as fitness_router
 from workout_web import router as workout_router
 
 
@@ -50,6 +51,7 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 app.include_router(context_router)
 app.include_router(workload_router)
+app.include_router(fitness_router)
 app.include_router(workout_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 effort_api.register(app)
