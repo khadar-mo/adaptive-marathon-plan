@@ -217,6 +217,7 @@ def page(request: Request, week: str | None = None, version: str | None = None):
             body += '<ul>' + ''.join(f'<li>{e(w["start_utc"])} → {e(w["end_utc"])} · {w["elapsed_seconds"]:g} seconds</li>' for w in record["union_windows"]) + '</ul>'
         body += '<details><summary>Original local choices, UTC bounds and daily limits</summary><pre style="white-space:pre-wrap">' + e(json.dumps(record, indent=2, ensure_ascii=False)) + '</pre></details>'
         body += f'<p><a href="/api/availability/{week}/versions/{record["version_id"]}">This immutable revision as JSON</a></p>'
+        body += f'<p><a href="/calendar-fit?week={week}&amp;availability_version_id={record["version_id"]}">Check workout time</a></p>'
     if version:
         body += f'<p>This revision is read-only. <a href="/availability?week={week}">Open current availability to edit</a>.</p>'
     else:

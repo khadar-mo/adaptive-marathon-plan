@@ -259,6 +259,27 @@ Final-head CI and independent review remain the merge gates.
 9. Current and historical views expose exact JSON revisions. The Chromium checks cover keyboard entry, mobile layout, historical links, stale submissions and invalid bounds.
 10. The tests establish deterministic arithmetic and source preservation. Template suitability and individual pace calibration depend on the runner's evidence. Final CI and independent review are recorded in the pull request.
 
+## Fixed-session calendar feasibility — issue #53
+
+Master Part B §8 and Part C §§2/7 supply H2 and APE-SCH-01/03. A read-only
+consumer now places concrete workout revisions and their selected block metres
+against an exact London calendar revision. The normal diagnostic retains source
+window IDs, workout and daily-preference versions, occupied intervals and the
+midweek cutoff. Source revisions and completed activities remain independently
+readable. The three W2 sessions occupy 8,176, 7,500 and 8,400 seconds in the
+5→3-day fixture, including 75.125 seconds of stationary rest.
+
+The deterministic search tries distinct duration orders with the longest and
+then session ID first, placing each at its earliest allowed instant. For a fixed
+order, moving a session earlier within its start date preserves later room.
+Moving it to an earlier start date also frees its original date’s allowance.
+An exhaustive failure therefore covers every order. Equal-duration sessions
+are interchangeable for this time check. Missing source facts or a search
+cutoff can keep the result uncertain. If conservative placement fails, an
+impossibility proof also has to survive any shorter supplied pace bounds and
+the broadest remaining calendar allowed by unknown dates. Planning targets,
+distance redistribution, warning decisions and activation are tracked in #23.
+
 ## Completed-run fueling evidence — issue #39
 
 Optional source-linked practice, runner-entered strategy, GI tolerance and timestamped

@@ -350,6 +350,31 @@ original local inputs, UTC bounds and actor/time history. Overlaps count once.
 Saving this calendar does not approve a target or activate a plan. See the
 [API, clock policy and acceptance evidence](docs/specs/weekly-availability.md).
 
+### Check whether fixed workouts fit
+
+Open a saved week in **Weekly availability → Check workout time**. Select each
+workout revision, enter any fixed block-distance adjustments, and supply a
+midweek start cutoff or occupied intervals as needed. The result shows actual
+London start/end times and the exact UTC intervals, revisions and assumptions.
+This diagnostic reads the existing calendar and templates without saving a plan.
+
+`POST /api/calendar-fit` takes `week`, `availability_version_id`, and a list
+of `sessions`. Each session has a distinct `session_id`, `template_id`,
+`template_version_id` and optional `distances_m` keyed by block ID. Optional
+`earliest_start_utc` and occupied `{id,kind,start_utc,end_utc}` intervals use
+absolute timestamps. `RUNNING` occupancy consumes a start on its actual London
+start date. `NON_RUNNING` occupancy blocks time. Both retain their supplied
+IDs. Weekly limits are intersected with the runner preference known when
+availability was recorded, or an explicitly supplied `preferences_version_id`.
+
+`FEASIBLE` supplies a placement at each workout’s conservative upper duration.
+The check rounds once after summing all moving blocks and stationary rests.
+`IMPOSSIBLE` reports a limiting inequality or exhaustive search proof.
+`FEASIBILITY_UNCERTAIN` identifies missing information, a pace range that
+straddles feasibility, or an exhausted `search_budget`. `conservative_fit`
+reports the upper-duration result for the declared windows independently.
+The default budget is 10,000 placement attempts, configurable from 0 to 20,000.
+
 ## Update runner settings
 
 Open **Runner settings** in the main navigation to see the original 2:30:00 marathon
