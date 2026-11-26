@@ -125,7 +125,7 @@ class Request(fi.Model):
 
 
 def code_hash():
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return hashlib.sha256(Path(__file__).read_bytes() + fitness.code_hash().encode()).hexdigest()
 
 
 def policy(db, version):
@@ -181,8 +181,12 @@ def scope_data(snapshot, scope, cfg):
     if target:
         day = wi.stamp(target["start_utc"]).astimezone(ZoneInfo("Europe/London")).date()
         week = (day - timedelta(days=day.weekday())).isoformat()
-    end = datetime.combine(date.fromisoformat(week) + timedelta(days=7), time(), ZoneInfo("Europe/London"))
-    anchor = min(wi.stamp(snapshot["event_cutoff"]), wi.stamp(target["end_utc"]) if target else end)
+    start = datetime.combine(date.fromisoformat(week), time(), ZoneInfo("Europe/London"))
+    end = start + timedelta(days=7)
+    event = wi.stamp(snapshot["event_cutoff"])
+    # A future target is not today's week. Available evidence must also reach
+    # that target under the explicitly supplied lookback/freshness policy.
+    anchor = wi.stamp(target["end_utc"]) if target else max(start, min(event, end - timedelta(microseconds=1)))
     recent = []
     for row in actuals:
         run_end = wi.stamp(row["end_utc"])
@@ -191,8 +195,9 @@ def scope_data(snapshot, scope, cfg):
         elif target and row["activity_id"] == target["activity_id"]:
             recent.append(row)
     return {"week": week, "activity_id": scope.activity_id, "resolved_activity_id": target["activity_id"] if target else None,
-            "timezone": "Europe/London", "reference_time": snapshot["event_cutoff"], "run_window_end": wi.utc(anchor.isoformat()),
-            "report_rule": "Exact preweek target; post-run target membership and optional dated completed-run lookback. No current redirects are consulted."}, by_member, sorted(recent, key=lambda r:(r["end_utc"],r["activity_id"]))
+            "timezone": "Europe/London", "reference_time": snapshot["event_cutoff"], "target_reference_time": wi.utc(anchor.isoformat()),
+            "run_window_end": wi.utc(anchor.isoformat()), "post_run_lookback_days": cfg["post_run_lookback_days"],
+            "report_rule": "Exact preweek target and report freshness at T. Post-run membership uses the explicit lookback ending at T clamped into the target week, or the selected run's finish. Wellness freshness also applies at this target reference. No current redirects are consulted."}, by_member, sorted(recent, key=lambda r:(r["end_utc"],r["activity_id"]))
 
 
 def feedback_evidence(snapshot, scope, cfg, definition, scope_info, by_member, runs):
@@ -252,7 +257,7 @@ def feedback_evidence(snapshot, scope, cfg, definition, scope_info, by_member, r
     return rows
 
 
-def wellness_evidence(snapshot, bundle, cfg):
+def wellness_evidence(snapshot, bundle, cfg, scope_info):
     evidence = []
     metrics = snapshot["fitness"]["recovery"]["wellness"]
     all_streams = [s for metric in metrics.values() for s in metric["streams"]]
@@ -272,6 +277,12 @@ def wellness_evidence(snapshot, bundle, cfg):
         if latest is None or (today - date.fromisoformat(latest)).days > cfg["wellness_max_age_days"]:
             result["reasons"].append("CURRENT_MISSING_OR_STALE")
             continue
+        reference = wi.stamp(scope_info["target_reference_time"]).astimezone(ZoneInfo(rule["stream"]["timezone"])).date()
+        target_age = (reference - date.fromisoformat(latest)).days
+        result["target_reference_local_date"] = reference.isoformat()
+        if target_age < 0 or target_age > cfg["wellness_max_age_days"]:
+            result["reasons"].append("OUTSIDE_TARGET_FRESHNESS_WINDOW")
+            continue
         rows = [r for r in bundle["g5"]["context_records"] if r["kind"] == "wellness" and {k:r.get(k) for k in recovery.STREAM_FIELDS} == rule["stream"]]
         number = cfg["consecutive_wellness_days"] or 1
         with localcontext() as precision:
@@ -281,6 +292,9 @@ def wellness_evidence(snapshot, bundle, cfg):
                 if day == today:
                     descriptor = found
                 else:
+                    if bundle["g5"]["code_sha256"] != fitness.code_hash():
+                        result["reasons"].append("DAILY_RECOMPUTATION_REQUIRES_RECORDED_G5_CODE")
+                        break
                     # This anchor selects a calendar day, never an observation instant.
                     anchor = datetime.combine(day, time(), ZoneInfo(rule["stream"]["timezone"])).isoformat()
                     descriptor = recovery.wellness_stream(rows, anchor, bundle["g5"]["definition"]["config"])
@@ -294,8 +308,9 @@ def wellness_evidence(snapshot, bundle, cfg):
                 elif robust["rule"] and robust["rule"]["direction"] != rule["direction"]:
                     reason = "INCOMPATIBLE_G5_DIRECTION"
                 result["days"].append({"local_date": day.isoformat(), "level": level, "reason": reason, "g5_descriptor": descriptor})
-        result["state"] = result["days"][-1]["level"]
-        result["persistence"] = number >= 2 and all(d["level"] == "CONCERN" for d in result["days"])
+        if len(result["days"]) == number:
+            result["state"] = result["days"][-1]["level"]
+            result["persistence"] = number >= 2 and all(d["level"] == "CONCERN" for d in result["days"])
         result["day_interpretation"] = "Descriptive daily recomputation from the same frozen G5 rows and configuration at K, not prospective historical assessments."
     return evidence
 
@@ -304,7 +319,7 @@ def calculate(snapshot, bundle, definition, scope):
     cfg = definition["config"]
     scope_info, by_member, runs = scope_data(snapshot, scope, cfg)
     reports = feedback_evidence(snapshot, scope, cfg, definition, scope_info, by_member, runs)
-    wellness = wellness_evidence(snapshot, bundle, cfg)
+    wellness = wellness_evidence(snapshot, bundle, cfg, scope_info)
     applicable = [r for r in reports if r["applicable"]]
     persistent = []
     n = cfg["consecutive_report_count"]
@@ -339,7 +354,7 @@ def calculate(snapshot, bundle, definition, scope):
     return {"algorithm_version": VERSION, "code_sha256": code_hash(), "snapshot_id": snapshot["id"], "snapshot_input_hash": snapshot["input_hash"],
             "event_cutoff": snapshot["event_cutoff"], "knowledge_cutoff": snapshot["knowledge_cutoff"], "snapshot_kind": snapshot["kind"],
             "scope": scope_info, "state": state, "reason": reason, "policy": definition,
-            "policy_time_basis": "LATER_POLICY_REANALYSIS" if definition["known_at"] and wi.utc(definition["known_at"]) > snapshot["knowledge_cutoff"] else "POLICY_KNOWN_BY_SNAPSHOT_K",
+            "policy_time_basis": "BUILTIN_UNCONFIGURED_POLICY" if definition["known_at"] is None else "LATER_POLICY_REANALYSIS" if wi.utc(definition["known_at"]) > snapshot["knowledge_cutoff"] else "POLICY_KNOWN_BY_SNAPSHOT_K",
             "runner_reports": reports, "wellness_evidence": wellness, "persistence": persistent,
             "missingness": missing, "unlinked_feedback": snapshot["fitness"]["recovery"]["unlinked_feedback"],
             "unconfigured_wellness_streams": [s for metric in snapshot["fitness"]["recovery"]["wellness"].values() for s in metric["streams"] if not any(r["stream"] == s["stream"] for r in cfg["wellness_rules"])],
@@ -377,3 +392,13 @@ def saved(store, identity):
     if not row:
         raise KeyError("Readiness record not found.")
     return {"id": row["id"], "created_at": row["created_at"], "result": json.loads(row["payload"])}
+
+
+def replay(store, identity):
+    record = saved(store, identity)
+    prior = record["result"]
+    if prior["code_sha256"] != code_hash():
+        return {"id": identity, "status": "REQUIRES_RECORDED_CODE"}
+    scope = {"activity_id": prior["scope"]["activity_id"]} if prior["scope"]["activity_id"] else {"week": prior["scope"]["week"]}
+    current = evaluate(store, {"snapshot_id": prior["snapshot_id"], "policy_version": prior["policy"]["version"], "scope": scope})
+    return {"id": identity, "status": "IDENTICAL" if current == prior and wi.digest(prior) == identity else "MISMATCH"}

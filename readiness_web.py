@@ -46,6 +46,11 @@ def saved(request: Request, identity: str = Path(pattern=r"^[a-f0-9]{64}$")):
     return call(readiness.saved, request.app.state.store, identity)
 
 
+@router.get("/api/readiness/records/{identity}/replay")
+def replay(request: Request, identity: str = Path(pattern=r"^[a-f0-9]{64}$")):
+    return call(readiness.replay, request.app.state.store, identity)
+
+
 def evidence(result):
     text = '<h2>Readiness: ' + e(result["state"]) + '</h2><p>' + e(result["reason"]) + '</p>'
     text += '<p>Policy ' + e(result["policy"]["version"]) + ' · ' + e(result["policy_time_basis"]) + '</p>'
@@ -76,7 +81,11 @@ STYLE = '<style>textarea{box-sizing:border-box;width:100%;font:inherit}form{marg
 
 @router.get("/readiness", response_class=HTMLResponse)
 def page(request: Request, snapshot_id: str | None = None, policy_version: str = readiness.DEFAULT_POLICY,
-         week: str | None = None, activity_id: int | None = Query(None, ge=1, le=context_data.MAX_SQLITE_INTEGER)):
+         week: str | None = None, activity_id: str | None = None):
+    # Native GET forms submit the unselected run as an empty string.
+    activity_id = call(int, activity_id) if activity_id else None
+    if activity_id is not None:
+        call(readiness.Scope, activity_id=activity_id)
     store = request.app.state.store
     records = fm_snapshots.history(store)
     definitions = readiness.policies(store)
@@ -113,7 +122,7 @@ def page(request: Request, snapshot_id: str | None = None, policy_version: str =
 @router.get('/readiness/records/{identity}', response_class=HTMLResponse)
 def record_page(request: Request, identity: str = Path(pattern=r'^[a-f0-9]{64}$')):
     value = saved(request, identity)
-    return views.page('Saved readiness interpretation', STYLE + '<p>' + link('/api/readiness/records/'+identity,'Frozen interpretation JSON') + ' · ' + link('/readiness','Inspect another scope or policy') + '</p>' + evidence(value['result']))
+    return views.page('Saved readiness interpretation', STYLE + '<p>' + link('/api/readiness/records/'+identity,'Frozen interpretation JSON') + ' · ' + link('/api/readiness/records/'+identity+'/replay','Replay frozen interpretation') + ' · ' + link('/readiness','Inspect another scope or policy') + '</p>' + evidence(value['result']))
 
 
 SCRIPT = r"""<script>

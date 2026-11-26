@@ -88,7 +88,7 @@ async def test_frozen_g5_baseline_and_contradictory_device_report(history):
         source=original['fitness']['recovery']['wellness']['resting_hr']['streams'][0]
         assert source['baseline']=='48' and source['observed_days']==14
         assert source['robust_deviation']['value']=='8.000000000000000000008'
-        await policy(client,config(wellness_max_age_days=0,wellness_rules=[{'id':'rhr','stream':source['stream'],'direction':'HIGHER','adverse_at_z':'4','ordinary_abs_z_max':'1'}]))
+        await policy(client,config(wellness_max_age_days=1,wellness_rules=[{'id':'rhr','stream':source['stream'],'direction':'HIGHER','adverse_at_z':'4','ordinary_abs_z_max':'1'}]))
         result=await interpret(client,snap,policy_version='fixture-readiness-v1')
         assert result['state']=='MIXED' and result['policy_time_basis']=='LATER_POLICY_REANALYSIS'
         assert result['wellness_evidence'][0]['frozen_g5_stream']==source
