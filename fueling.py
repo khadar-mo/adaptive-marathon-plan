@@ -17,7 +17,8 @@ def entry_target(db, activity_id, known_at):
     else:
         summary = canonical.summary(dict(db.execute("SELECT * FROM activities WHERE id=?", (target["activity_id"],)).fetchone()))
     end = summary.get("end_utc")
-    if end and context.moment(end) > known_at:
+    start = summary.get("start_utc")
+    if (start and context.moment(start) > known_at) or (end and context.moment(end) > known_at):
         raise ValueError("Fueling history requires a completed activity, not a future run.")
     sources = [dict(row) for row in db.execute("SELECT kind,sha256,format,acquired_at FROM activity_sources WHERE activity_id=? ORDER BY kind,sha256", (target["activity_id"],))]
     return {**target, "activity_end_utc": end, "end_basis": summary.get("end_basis", "NOT_PROVIDED"),

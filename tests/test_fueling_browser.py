@@ -68,6 +68,10 @@ def test_activity_fueling_entry_correction_exact_text_missingness_and_keyboard(t
             page.get_by_role('button',name='Inspect fueling cutoff').press('Enter')
             expect(page.get_by_role('heading',name='self-report / browser-fueling · revision 1',exact=True)).to_be_visible()
             assert not page.get_by_text(final['tolerance'],exact=True).count()
+            with page.expect_response(lambda response:'/api/activities/1/fueling?' in response.url) as historical:
+                page.get_by_role('link',name='Fueling JSON',exact=True).click()
+            assert historical.value.json()['reports'][0]['version_id']==initial['version_id']
+            page.go_back()
             for width in (375,1280):
                 page.set_viewport_size({'width':width,'height':812})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')

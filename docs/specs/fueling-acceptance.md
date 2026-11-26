@@ -99,6 +99,15 @@ CRLF/CR became LF (one failure, 5.42 s). Production code was restored before int
 checks. The G4-integrated API regression additionally asserts unchanged estimator
 preview output before/after fueling entry. Final integrated checks are tracked on PR #44.
 
+Independent #44 review then found three edge cases: a known future start with no
+end could accept a completed-history entry; the historical JSON link lost its cutoff;
+and whitespace-only actor/tolerance counted as supplied text. New direct regressions
+produced **9 failures and 1 already-correct case** before the fixes. New entries now
+reject a known future start or end, historical links fetch the same revision, and
+blank-only actor/tolerance is rejected while meaningful multiline text is unchanged.
+A known past start with unknown end remains supported. The browser replay follows
+the actual historical JSON link as well as the direct HTTP regression.
+
 ## 9. Boundaries and unverified work
 
 All test data are synthetic. No real FIT, credentials, private history or nutritional

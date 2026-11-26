@@ -283,6 +283,13 @@ class Fueling(BaseRecord):
     notes: str | None = Field(None, max_length=10000)
     research_status: Literal["RESEARCH_PENDING"] = "RESEARCH_PENDING"
 
+    @field_validator("actor", "tolerance")
+    @classmethod
+    def meaningful_text(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("Supply meaningful text; omit unknown tolerance instead of blank-only text.")
+        return value
+
     @model_validator(mode="after")
     def timestamps(self):
         report = moment(self.reported_at)

@@ -1,5 +1,6 @@
 """Activity-linked entry and exact revision inspection for optional fueling history."""
 import json
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Path, Request
@@ -121,7 +122,8 @@ def page(request: Request, activity_id: int = Path(ge=1, le=context.MAX_SQLITE_I
         selected = next((r for r in current["reports"] + current["withheld"] if r["record_id"] == edit), None)
         if selected is None:
             raise HTTPException(404, "Fueling record not found for this activity.")
-    body = STYLE + f'<p><a href="/activities/{activity_id}">Back to activity {activity_id}</a> · <a href="/api/activities/{activity_id}/fueling">Fueling JSON</a></p>'
+    json_url = f'/api/activities/{activity_id}/fueling?' + urlencode({'as_of': data['as_of']})
+    body = STYLE + f'<p><a href="/activities/{activity_id}">Back to activity {activity_id}</a> · <a href="{e(json_url)}">Fueling JSON</a></p>'
     body += '<p>OPTIONAL · RESEARCH_PENDING. Record your own practice and tolerance. No intake quantities, timing, readiness or fitness decisions are generated here.</p>'
     body += f'<p>Report state: {e(data["state"])}. Practice: {e(data["practice_status"])}. Tolerance: {e(data["tolerance_status"])}.</p>'
     if data["missing_reason"]:

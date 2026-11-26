@@ -291,3 +291,59 @@ async def test_future_activity_and_foreign_target_are_rejected(history):
         for invalid in ('0','-1','9223372036854775808'):
             assert (await client.get('/api/activities/'+invalid+'/fueling')).status_code==422
         assert (await client.get('/api/fueling/versions/'+'0'*64)).status_code==404
+
+
+@pytest.mark.parametrize('status',['COMPLETED','UNKNOWN','PLANNED'])
+async def test_known_future_start_without_end_is_not_completed_history(history,status):
+    from fit_fixture import START,make_fit
+    async with server() as client:
+        await upload(client,('future-no-elapsed.fit',make_fit(start=START+15*365*86400)))
+        target=(await client.get('/api/activities/1/canonical')).json()['summary']
+        assert target['start_utc'] > context.now() and target['end_utc'] is None
+        await enter(client,report(practice_status=status),422)
+        assert (await read(client))['reports']==[]
+
+
+async def test_known_past_start_with_unknown_end_retains_time_uncertainty(history):
+    from fit_fixture import make_fit
+    async with server() as client:
+        await upload(client,('past-no-elapsed.fit',make_fit()))
+        await enter(client,report(tolerance='\n  Felt comfortable\n  ',tolerance_reported_at='2026-10-25T13:00:00Z',actor='  Runner ♥  '))
+        row,=(await read(client))['reports']
+        assert row['target_at_entry']['activity_end_utc'] is None
+        assert row['target_at_entry']['completion_time_state']=='UNKNOWN'
+        assert row['tolerance']=='\n  Felt comfortable\n  ' and row['actor']=='  Runner ♥  '
+
+
+async def test_historical_fueling_json_link_fetches_same_revision(history,monkeypatch):
+    from html import unescape
+    import re
+    clock=['2026-11-01T10:00:00.000000+00:00']
+    monkeypatch.setattr(context,'now',lambda:clock[0])
+    async with server() as client:
+        await upload(client,('run.fit',trace_fit()))
+        first=(await enter(client,report(notes='original report')))['records'][0]
+        cutoff=clock[0]
+        clock[0]='2026-11-02T10:00:00.000000+00:00'
+        await enter(client,report(notes='later correction',supersedes=first['version_id'],correction_reason='later context'))
+        page=await client.get('/activities/1/fueling',params={'as_of':cutoff})
+        assert page.status_code==200 and 'original report' in page.text and 'later correction' not in page.text
+        href,=re.findall(r'<a href="([^"]+)">Fueling JSON</a>',page.text)
+        response=await client.get(unescape(href))
+        assert response.status_code==200,response.text
+        row,=response.json()['reports']
+        assert row['version_id']==first['version_id'] and row['notes']=='original report'
+        assert response.json()['as_of']==cutoff
+
+
+@pytest.mark.parametrize('change',[
+    {'actor':'   '},{'actor':'\t\n\r'},
+    {'tolerance':'   ','tolerance_reported_at':'2026-10-25T13:00:00Z'},
+    {'tolerance':'\t\n\r','tolerance_reported_at':'2026-10-25T13:00:00Z'},
+    {'tolerance':''}, {'tolerance':'   '}
+])
+async def test_blank_only_actor_or_tolerance_is_not_a_report(history,change):
+    async with server() as client:
+        await upload(client,('run.fit',trace_fit()))
+        await enter(client,report(**change),422)
+        assert (await read(client))['reports']==[]

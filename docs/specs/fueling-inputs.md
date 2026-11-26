@@ -21,6 +21,8 @@ The context event timestamp is the report time; an absent practice observation t
 does not become a fabricated observation instant.
 The actor is a supplied provenance label, not an authenticated identity. Server receipt
 and correction availability cannot be supplied/backdated by a client.
+Actor and supplied tolerance must contain non-whitespace text; blank-only values
+return 422. Omit unknown tolerance. Meaningful text keeps its original whitespace.
 
 ## Public interface
 
@@ -65,13 +67,14 @@ correction cannot retarget the record to a different activity. It preserves the 
 saved activity reference, canonical version and raw source references. Current donor
 redirects group records without rewriting their entry references. Source reclassification
 does not delete old evidence or prevent correcting it. New entries require a recorded
-running activity and reject a known future end; incomplete legacy timing remains
+running activity and reject a known future start or end; incomplete legacy timing remains
 explicitly UNKNOWN instead of inventing a completion instant. No long-run distance
 threshold or classification is invented to limit entry.
 
 `target_now` is a current identity display aid, explicitly not historical evidence.
 An as-of read selects versions by server receipt time and report time. Exact-revision
 inspection retains a labelled eligibility flag even for a report with later event time.
+The page's Fueling JSON link carries that same cutoff, including after a correction.
 Multiple reports remain separate; no strategy/tolerance is silently chosen or averaged.
 
 For #25, retain the `record_id` plus exact `version_id` in the future planned-session
