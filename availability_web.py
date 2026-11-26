@@ -221,6 +221,7 @@ def page(request: Request, week: str | None = None, version: str | None = None):
         body += f'<p>This revision is read-only. <a href="/availability?week={week}">Open current availability to edit</a>.</p>'
     else:
         body += editor(state) + '<template id="availability-window">' + window_fields("WINDOW_ID") + '</template>' + SCRIPT
+        body += f'<p><a href="/api/runner-settings/availability/{week}">Daily limits with current runner preferences (JSON)</a></p>'
     body += f'<h2>Revision history</h2><p><a href="/api/availability/{week}">Current availability JSON</a></p>'
     body += '<ul>' + ''.join(f'<li><a href="/availability?week={week}&amp;version={v["id"]}">Revision {v["revision"]}</a> · {e(v["received_at"])} · {e(v["actor"])}</li>' for v in state["versions"]) + '</ul>'
     return views.page("Weekly availability", body)
