@@ -175,17 +175,21 @@ For already imported history, stop the app and explicitly backfill offline:
 ```
 
 Use `--activity 123` to process a single activity. The canonical page also offers
-**Recompute offline with default QC**. `POST /api/canonical/recompute` with `{}`
+**Recompute offline with current QC**. `POST /api/canonical/recompute` with `{}`
 backfills all saved activities; `POST /api/activities/{id}/canonical/recompute`
-processes one. Neither contacts a provider. Changed settings require a new
+processes one. Omitted settings preserve each activity's selected configuration;
+explicitly naming a configuration, including the default, selects it. Neither
+endpoint contacts a provider. Changed settings require a new
 `config_version` plus a complete `config` object (CLI: `--config-version` and
 `--config /path/to/settings.json`). Existing version names cannot be redefined.
 
 `GET /api/activities/{id}/canonical` exposes the persisted view. Optional `version`
 selects a saved version ID, `source` an owned FIT checksum, and `offset`/`limit`
-paginate original sample indices (`limit` 1–500). `header.end_utc` is the selected
-FIT session's recorded UTC end, when present. `summary.end_utc` may instead be
-derived from reported elapsed time and has an explicit `end_basis`. Raw acquisition,
+paginate original sample indices (`limit` 1–500). `header.end_utc` derives from the
+FIT Session's start plus reported elapsed, including fractional seconds. Lap ends
+use the same formula, with explicit `end_basis`. `message_timestamp_utc` is when
+the summary was written and never fills a missing end. `summary.end_utc` separately
+uses the activity summary's start and elapsed. Raw acquisition,
 first derived-version creation and selection-history timestamps are retained
 separately from activity event time; later reconstruction is not prospective proof.
 
@@ -248,6 +252,10 @@ complete versioned G2 configuration. `POST /api/efforts/recompute` and
 remain governed by canonical recompute. Existing configuration names are immutable.
 GET requests never write or backfill. Recompute after a code update before creating
 new intervals under that code; stored historical evidence remains readable.
+An omitted extraction configuration preserves its current selection. Recompute also
+upgrades old G0/G1 span normalization without changing selected custom QC settings.
+Legacy versions show a recompute warning and are excluded from current bests until
+upgraded; historical payloads and raw archives remain inspectable.
 
 `GET /api/efforts?cutoff=<offset-aware timestamp>&days=112` returns global selection.
 `GET /api/activities/{id}/efforts` accepts optional owned `version` and `source`.

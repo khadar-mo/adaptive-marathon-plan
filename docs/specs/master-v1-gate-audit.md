@@ -97,6 +97,13 @@ coordinate form round-trips have causal regressions and an independent QC-cell o
 Legacy member/lap indexing, canonical backfill and requested G2 extraction now share
 one SQLite transaction; public single/mixed-batch regressions and a real HTTP retry
 verify no committed heads, configuration or selections after extraction failure.
+Garmin's summary-first/summary-last compatibility guidance is now reflected in G0/G1
+v2: Session/Lap ends derive from start plus reported elapsed; written clocks remain
+separate. Synthetic span/cutoff/conflict and upgrade regressions preserve raw data,
+custom settings and immutable old versions. Legacy normalization is visibly marked
+for explicit offline recompute and excluded from current G2 bests until upgraded.
+The [dated G1 correction](g1-acceptance.md#4-components-and-stable-interfaces)
+supersedes earlier G0/G1 wording that treated a message-written clock as a span end.
 
 **Human/scientific validation for G0/G1/G2 remains UNVERIFIED.** Software merge is
 not a claim that those validation gates passed. G3 workload, G4 candidate estimators

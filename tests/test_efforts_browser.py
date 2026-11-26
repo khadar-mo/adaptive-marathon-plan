@@ -7,6 +7,7 @@ import efforts
 from test_canonical import trace_fit
 from test_fit_browser import chrome_executable
 from test_health import serve_database
+from test_fit_summary_spans import summary_fit
 
 
 def test_effort_verification_review_context_and_mobile_keyboard(tmp_path):
@@ -118,4 +119,45 @@ def test_rejected_flat_effort_replacement_preserves_exact_coordinate_in_browser(
                 expect(page.get_by_role('heading', level=1)).to_have_text('Verify continuous effort')
                 expect(page.get_by_text('Reviewer verdict:', exact=False)).to_contain_text('UNREVIEWED')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert errors == []
+
+
+def test_summary_first_spans_and_recompute_settings_in_browser(tmp_path):
+    chrome = chrome_executable()
+    with serve_database(tmp_path / 'runs.sqlite3') as port, sync_playwright() as driver:
+        base = f'http://127.0.0.1:{port}'
+        with driver.chromium.launch(executable_path=chrome) as browser:
+            page = browser.new_page(viewport={'width': 1280, 'height': 900})
+            errors = []
+            page.on('pageerror', lambda exc: errors.append(str(exc)))
+            page.on('console', lambda msg: errors.append(msg.text) if msg.type in ('warning', 'error') else None)
+            page.goto(base + '/imports')
+            page.get_by_label('FIT files', exact=True).set_input_files({
+                'name': 'summary-first.fit', 'mimeType': 'application/octet-stream', 'buffer': summary_fit()})
+            page.get_by_role('button', name='Upload FIT files').press('Enter')
+            expect(page.get_by_text('Complete', exact=True)).to_be_visible(timeout=30_000)
+            page.get_by_role('link', name='Activity 1', exact=True).first.press('Enter')
+            page.get_by_role('link', name='Inspect recorded samples and events').press('Enter')
+            for width in (1280, 375):
+                page.set_viewport_size({'width': width, 'height': 900})
+                expect(page.get_by_text('Derived end (UTC)', exact=True).first).to_be_visible()
+                expect(page.get_by_text('Message written (UTC)', exact=True).first).to_be_visible()
+                laps = page.get_by_role('table', name='Laps in file order')
+                expect(laps).to_contain_text('2024-02-28T23:40:38.375000+00:00')
+                expect(laps).to_contain_text('2024-02-28T23:15:38+00:00')
+                expect(laps).to_contain_text('start_time_plus_total_elapsed_time')
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            with httpx.Client(base_url=base) as client:
+                response = client.post('/api/activities/1/efforts/recompute', json={
+                    'config_version': 'browser-custom', 'config': {**efforts.DEFAULT_CONFIG, 'distances_m': [5000], 'recent_days': 84}})
+                response.raise_for_status()
+            page.goto(base + '/activities/1/efforts')
+            with page.expect_response(base + '/api/activities/1/efforts/recompute') as response:
+                page.get_by_role('button', name='Recompute efforts offline').press('Enter')
+            assert response.value.status == 200
+            expect(page.get_by_role('table', name='Activity target distances')).to_contain_text('1500.000000')
+            with page.expect_response(lambda res: '/api/activities/1/efforts?' in res.url) as saved:
+                page.get_by_role('link', name='Efforts JSON', exact=True).press('Enter')
+            assert saved.value.json()['config_version'] == 'browser-custom'
+            assert saved.value.json()['config']['recent_days'] == 84
             assert errors == []

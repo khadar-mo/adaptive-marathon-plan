@@ -81,8 +81,17 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
   touches the jump. A left approach whose ends remain before the recency lower bound
   is ineligible even if the limiting end equals it. Attained boundary candidates
   are evaluated independently; no review or QC override is applied.
-- Segment-end recency uses inclusive `[T−W,T]`; complete recorded activity end and
-  every source sample must be at or before T. Missing recorded end excludes as-of
+- FIT Session/Lap spans use `start_time + total_elapsed_time`, including fractional
+  reported seconds, following [Garmin's official ordering guidance](https://forums.garmin.com/developer/fit-sdk/b/news-announcements/posts/important-fit-activity-file-message-change).
+  Their message-written timestamps remain separately exposed and never substitute
+  for an end. G0 normalization/G1 canonical/QC v2 correct the former interpretation.
+  A genuine out-of-span sample flags only candidates whose interiors or endpoint
+  brackets use that raw record. Exact discrepancy, sample index and raw provenance
+  are retained; no rounding tolerance or time repair is invented.
+- Segment-end recency uses inclusive `[T−W,T]`; complete derived activity end and
+  every source sample must be at or before T. Cutoff eligibility uses the later of
+  the derived session end and latest raw sample, including fractional differences.
+  Missing derived end excludes as-of
   authority. Comparisons include provisional 56/84/112/168-day windows. All activities
   are assessed against each selected window even when extraction configurations differ.
 - Boundary-straddling sources add the actual distance crossing at T−W and re-evaluate
@@ -109,7 +118,7 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
 
 | Entry point | Contract |
 |---|---|
-| `POST /api/efforts/recompute`, activity-specific `/efforts/recompute` | Explicit offline backfill/recompute; complete immutable config or default. |
+| `POST /api/efforts/recompute`, activity-specific `/efforts/recompute` | Explicit offline backfill/recompute and stale-normalization upgrade. Omitted config preserves each selected setting (default only for new activities); an explicitly named config is honored. |
 | `GET /api/efforts` | `cutoff` with UTC offset, optional `days`; all-time/whole/internal/recent evidence, exclusions and deterministic selection ID. No writes. |
 | `GET /api/activities/{id}/efforts` | Optional owned extraction `version` and FIT `source`; source-specific results and lineage. |
 | `POST /api/activities/{id}/efforts/inspect` | `version`, `source`, `start_distance_m`, `distance_m`, optional exact `start_coordinate_m` rational string; persist an independently selected interval in one usable block. The exact coordinate must match the displayed numeric value. |
@@ -123,6 +132,14 @@ transaction. Any extraction failure rolls back the whole batch, including earlie
 activities with existing heads. Original archive bytes are immutable; unpacking can
 retain a content-addressed copy of an existing ZIP member, but its database index
 and derived evidence remain uncommitted until the request succeeds.
+
+Legacy span normalization exposes `recompute_required` in canonical, effort and
+direct candidate inspection responses and visible warnings on their pages. Global
+bests exclude it as `SOURCE_NORMALIZATION_REBUILD_REQUIRED` until explicit offline
+recompute. GET never upgrades or rewrites saved evidence. Both recompute entry
+points preserve implicit custom QC/extraction settings, raw/source IDs and activity
+actuals; corrected source/derived version IDs are new. Explicit requests for named
+defaults still change settings. Historical payloads and selections remain available.
 
 Effort identity hashes extraction version, source checksum and the reported interval
 including block and attainment convention. Exact rational crossing coordinates and
@@ -238,6 +255,25 @@ repository, independent of pytest's working directory.
   complete canonical/import suites: **105 passed**. A separate loopback HTTP replay
   confirmed unchanged canonical/effort reads and SQLite after failure, followed by
   successful processing of both activities with their original IDs.
+- Summary-first/summary-last synthetic FITs reproduced wrong session/lap ends and
+  loss of fractional elapsed on the previous implementation. Corrected API tests
+  compare identical 5K trace timing, reported 1500.375 s spans, cutoff boundaries,
+  missing elapsed, separate invalid/missing written clocks, and genuine late-tail
+  conflicts affecting only relevant raw support. Both G1 and G2 legacy-upgrade
+  paths preserve custom settings, actuals and immutable history, including rollback
+  on an invalid requested extraction and explicit selection of default configs.
+  A real browser upload verifies derived/written labels, lap spans, desktop/mobile
+  overflow, keyboard recompute and persistence of a custom extraction config.
+  The integrated v2 run passed **431 tests in 152.92 s**, including existing browser
+  flows. Final compatibility/bookmark and two affected browser checks passed
+  **14 tests in 45.09 s**; the added browser flow brings final CI coverage to 432.
+  Native Chrome separately showed the legacy warning on activity and bookmarked
+  candidate pages, then an ordinary recompute produced valid efforts while retaining
+  custom QC/extraction selections and historical versions. Derived fractional spans
+  and written clocks were distinct at 375/1280 px without page overflow; console
+  warnings/errors were empty. Keyboard proof comes from the headless browser replay.
+  Real HTTP checks before/at the fractional session end excluded/included the same
+  1500-second trace effort without substituting its 1500.375-second reported duration.
 - Final mutation checks removed raw-index uncertainty overlap, then replaced the
   rational coordinate conversion with binary64. Each corresponding new public
   regression failed as expected. Both mutations were restored byte-for-byte;

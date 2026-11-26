@@ -429,7 +429,7 @@ def canonical_page(row):
     content += '<p>Engineering quality checks preserve recorded UTC timestamps, cumulative metres and elapsed time. '
     content += 'Thresholds are provisional. Human comparison and scientific validation remain unverified. '
     content += f'<a href="/activities/{aid}/efforts">Inspect calculated continuous efforts separately.</a></p>'
-    content += f'<button id="recompute" data-url="/api/activities/{aid}/canonical/recompute">Recompute offline with default QC</button><p id="result" role="status"></p>'
+    content += f'<button id="recompute" data-url="/api/activities/{aid}/canonical/recompute">Recompute offline with current QC</button><p id="result" role="status"></p>'
     content += """<script>
 document.getElementById('recompute').addEventListener('click', async event => {
  const button = event.currentTarget; button.disabled = true;

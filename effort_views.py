@@ -127,6 +127,8 @@ def inspection(row):
     c, aid, vid = row["candidate"], row["activity_id"], row["version_id"]
     base = f'/activities/{aid}/efforts/{vid}/{c["id"]}'
     content = f'<p><a href="/activities/{aid}/efforts?version={vid}">Back to activity efforts</a> · <a href="/activities/{aid}">Original activity {aid}</a></p>' + NOTICE
+    if row.get("recompute_required"):
+        content += '<p><strong>Recompute required:</strong> this saved candidate uses an older session/lap time interpretation. Its original values remain inspectable and are excluded from current bests.</p>'
     content += f'<p><strong>{show(c["distance_m"])} m in {c["elapsed_seconds"]:.6f} s</strong> · {c["pace_seconds_per_km"]:.6f} s/km · {c["mean_speed_mps"]:.9f} m/s</p>'
     content += f'<p>Computed QC: <strong>{show(c["computed_quality_state"])}</strong>. Effective QC: <strong>{show(c["effective_quality_state"])}</strong>. Reviewer verdict: {show(c["review_verdict"])}.</p>'
     content += f'<p>{show(c["start_utc"])} → {show(c["end_utc"])} UTC. Cumulative distance: {show(c["start_distance_m"])} → {show(c["end_distance_m"])} m.</p>'

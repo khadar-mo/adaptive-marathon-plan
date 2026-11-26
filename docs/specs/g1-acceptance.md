@@ -22,7 +22,7 @@ raw bytes are preserved, including first-importer database upgrades.
 Imports persist source-specific decoded samples, events, laps, separate HR streams
 and original device-time evidence. Canonical versions identify their selected
 source, all provider/raw input IDs, decoder/options, normalization/QC/config versions,
-recorded UTC session bounds, precise SI metres and distinct durations. Summary-only
+derived UTC session spans, precise SI metres and distinct durations. Summary-only
 activities remain available with INSUFFICIENT trace quality.
 
 The inspection page and JSON expose exact raw indices, timestamps, references and
@@ -51,13 +51,35 @@ same inputs/config is idempotent; a new config, parser or source produces new pr
 Records outside known running timer ranges remain in the trace and are listed as
 `unassigned_sample_indices`. No source sample is sorted, filled, clamped or erased.
 
-`header.end_utc` is the selected source's recorded session end. A separately labelled
-`summary.end_utc` can be derived from reported elapsed time; its `end_basis` makes
-that distinction explicit. Source acquisition (`raw_sources[].acquired_at`), first
+**Correction — 26 November 2026:** v1 stored the summary message-written clock
+under `header.end_utc`; the original acceptance wording incorrectly called it the
+recorded session end. Earlier inspection evidence did not prove that span meaning.
+In v2, `header.end_utc` is the selected FIT Session's `start_time + total_elapsed_time`,
+including the reported fractional seconds. Lap ends use the same formula.
+`message_timestamp_utc` preserves when each summary was written; original decoded
+fields remain intact. The explicit `end_basis` is `start_time_plus_total_elapsed_time`
+for valid spans; missing/invalid start or elapsed keeps end unknown with an
+`end_issue`. A written-at timestamp never fills a missing end. This follows
+[Garmin's Session/Lap ordering guidance](https://forums.garmin.com/developer/fit-sdk/b/news-announcements/posts/important-fit-activity-file-message-change):
+summary-first and summary-last files describe the same spans regardless of when
+their messages were written. Missing/invalid written clocks are informational and
+distinct from missing/invalid span inputs. Lap-end coverage names its derived basis.
+
+The separately labelled `summary.end_utc` uses the activity summary's reported
+elapsed, with its own `end_basis`; neither summary duration replaces trace effort
+precision. Source acquisition (`raw_sources[].acquired_at`), first
 derived creation (`created_at` / `source_created_at`), and head selection
 (`selection_history[].selected_at`) are separate from activity event timestamps.
 Historical donor IDs are retained after explicit dedup merges. These timestamps
 support later as-of work; G1 does not claim a prospective validation ledger exists.
+
+G0 normalization, canonical and QC algorithms are v2 for this corrected span
+interpretation. Saved v1 traces, QC, selections and payloads remain immutable and
+inspectable, with a recompute warning at current/historical entry points. Explicit
+offline G1 or G2 recompute upgrades old normalization using archived bytes. An
+omitted configuration preserves the selected settings; an explicitly named default
+or other version is honored. Raw source IDs, summaries and acquisition times remain
+unchanged; corrected derivations receive new IDs and knowledge times.
 
 ## 5. Versioned engineering decisions
 

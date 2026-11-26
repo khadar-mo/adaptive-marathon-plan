@@ -176,6 +176,12 @@ async def test_explicit_upgrade_keeps_legacy_versions_and_selected_settings(hist
             assert (await client.get(f'/api/activities/1/{kind}')).json()['recompute_required'] is True
             assert 'Recompute required:' in (await client.get(f'/activities/1/{kind}')).text
         assert 'Recompute required:' in (await client.get('/efforts')).text
+        target = legacy_g2['inspected_source']['result']['distances'][0]
+        candidate = target['best'] or target['flagged_candidate']
+        bookmark = f'/activities/1/efforts/{legacy_g2["version_id"]}/{candidate["id"]}'
+        inspected = (await client.get('/api' + bookmark)).json()
+        assert inspected['recompute_required'] is True and inspected['candidate'] == candidate
+        assert 'Recompute required:' in (await client.get(bookmark)).text
         bests = (await client.get('/api/efforts', params={'cutoff': '2026-01-01T00:00:00Z'})).json()
         assert bests['excluded'][0]['reason'] == 'SOURCE_NORMALIZATION_REBUILD_REQUIRED'
         assert all(r['all_time'] is None for r in bests['distances'])
@@ -202,6 +208,8 @@ async def test_explicit_upgrade_keeps_legacy_versions_and_selected_settings(hist
         assert old['trace'] == legacy_g1['trace'] and old['parser'] == legacy_g1['parser']
         old = (await client.get('/api/activities/1/efforts', params={'version': legacy_g2['version_id']})).json()
         assert old['sources'] == legacy_g2['sources']
+        assert (await client.get('/api' + bookmark)).json()['candidate'] == candidate
+        assert 'Recompute required:' in (await client.get(bookmark)).text
         # Explicitly asking for the named default still changes the selection.
         assert (await client.post('/api/activities/1/canonical/recompute', json={
             'config_version': canonical.DEFAULT_CONFIG_VERSION})).status_code == 200

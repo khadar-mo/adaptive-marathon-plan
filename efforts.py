@@ -263,6 +263,7 @@ def inspect(store, activity_id, version, candidate_id, *, offset=0, limit=200):
         first, last = c["audit"]["sample_range"]
         excerpt = data["trace"]["samples"]["rows"][max(0, first - 1):last + 2]
         return {"activity_id": result["activity_id"], "version_id": version, "candidate": c, "source": source,
+                "recompute_required": result["recompute_required"],
                 "canonical_version_id": result["canonical_version_id"], "qc_config": result["qc_config"],
                 "qc_config_version": result["qc_config_version"], "config_version": result["config_version"],
                 "algorithm_version": result["algorithm_version"], "code_sha256": result["code_sha256"],

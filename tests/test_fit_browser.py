@@ -108,7 +108,7 @@ def test_canonical_qc_versions_flags_pagination_and_keyboard(tmp_path):
                 assert response.value.json()["trace"]["samples"]["rows"][0]["record_index"] == 200
                 page.go_back()
                 page.get_by_role("link", name="Previous samples", exact=True).click()
-            button = page.get_by_role("button", name="Recompute offline with default QC")
+            button = page.get_by_role("button", name="Recompute offline with current QC")
             button.focus()
             with page.expect_response(base + "/api/activities/1/canonical/recompute") as response:
                 page.keyboard.press("Enter")
