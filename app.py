@@ -34,6 +34,7 @@ from availability_web import router as availability_router
 from source_history_web import router as source_history_router
 from workload_web import router as workload_router
 from fitness_web import router as fitness_router
+from validation_web import router as validation_router
 from workout_web import router as workout_router
 from runner_settings_web import router as settings_router
 
@@ -59,6 +60,7 @@ app.include_router(availability_router)
 app.include_router(source_history_router)
 app.include_router(workload_router)
 app.include_router(fitness_router)
+app.include_router(validation_router)
 app.include_router(workout_router)
 app.include_router(settings_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])

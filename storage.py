@@ -26,6 +26,7 @@ import garmin_coverage
 import provider_modes
 import source_receipts
 import fitness_inputs
+import validation_store
 import workload_inputs
 import workout_labels
 
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + availability.SCHEMA + workload_inputs.SCHEMA + source_receipts.SCHEMA + fitness_inputs.SCHEMA
+""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + availability.SCHEMA + workload_inputs.SCHEMA + source_receipts.SCHEMA + fitness_inputs.SCHEMA + validation_store.SCHEMA
 
 
 def prepare_schema(db):
