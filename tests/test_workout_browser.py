@@ -1,6 +1,7 @@
 from playwright.sync_api import expect, sync_playwright
 import httpx
 import json
+import pytest
 import time
 
 from test_fit_browser import chrome_executable
@@ -38,7 +39,7 @@ def test_workout_labels_and_qualification_roundtrip_on_desktop_mobile_and_keyboa
             page.get_by_label('Planned intent recorded by',exact=True).fill('Synthetic athlete')
             page.get_by_label('Planned intent source reference',exact=True).fill('Synthetic plan')
             page.get_by_label('Planned intent explanation',exact=True).fill('Long run with a benchmark tag.')
-            page.get_by_label('Planned intent tags',exact=True).fill('BENCHMARK_TAG')
+            page.get_by_label('Planned intent tags',exact=True).fill('["BENCHMARK_TAG"]')
             page.get_by_role('button',name='Save planned intent',exact=True).press('Enter')
             expect(page.locator('#planned-label')).to_have_text('LONG_RUN')
             expect(page.locator('#effective-label')).to_contain_text('UNKNOWN')
@@ -204,3 +205,77 @@ def test_note_only_edits_preserve_all_references_and_explicit_removal_works(tmp_
                 assert after['qualification']['evidence_refs']==[] and after['category']=='RACE'
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert errors==[]
+
+
+@pytest.mark.parametrize('target', ('planned', 'corrected', 'effort'))
+def test_note_only_edits_preserve_literal_tag_arrays_and_allow_explicit_changes(tmp_path, target):
+    chrome=chrome_executable()
+    tags=['travel, FATIGUED_BLOCK']
+    with serve_database(tmp_path/'runs.sqlite3') as port, sync_playwright() as driver:
+        base=f'http://127.0.0.1:{port}'
+        with httpx.Client(base_url=base) as client:
+            response=client.post('/api/imports/fit',files=[('files',('synthetic.fit',structured_fit()))])
+            response.raise_for_status()
+            for _ in range(100):
+                report=client.get(response.headers['location']).json()
+                if report['state']=='complete':
+                    break
+                time.sleep(.05)
+            assert report['state']=='complete'
+            extraction=client.get('/api/activities/1/efforts').json()
+            candidate=next(r['best'] for r in extraction['inspected_source']['result']['distances'] if r['distance_m']==400)
+            effort_url=f'/activities/1/efforts/{extraction["version_id"]}/{candidate["id"]}'
+            declaration={'category':'RACE','tags':tags,'actor':'Synthetic runner','note':'Original context note',
+                'qualification':{'maximality':'UNKNOWN','rest_state':'RESTED','race_distance_verification':'ATTESTED',
+                'race_time_verification':'ATTESTED','evidence_refs':[{'kind':'athlete_attestation',
+                    'reference':'Synthetic race result','method':'Runner confirmed distance and elapsed time'}]}}
+            saved=client.post('/api'+effort_url+'/context',json=declaration)
+            assert saved.status_code==200,saved.text
+            assert saved.json()['candidate']['provenance']['qualification']['race_evidence_status']=='SUPPORTED_ATTESTATION'
+            if target=='effort':
+                url, note_label, tags_label, button=effort_url, 'Context note', 'Tags (JSON array)', 'Save effort context'
+            else:
+                workout=client.get('/api/activities/1/workout').json()
+                label={'layer':target,'primary':'LONG_RUN','canonical_version_id':workout['canonical_version_id_now'],
+                    'actor':'Synthetic runner','explanation':'Original label note','source':'owned-plan',
+                    'source_reference':'Synthetic plan','tags':tags}
+                assert client.post('/api/activities/1/workout',json=label).status_code==200
+                title='Planned intent' if target=='planned' else 'Runner correction'
+                url, note_label, tags_label, button='/activities/1/workout', title+' explanation', title+' tags', 'Save '+title.lower()
+
+            def assert_saved_tags(expected):
+                effort=client.get('/api'+effort_url).json()['candidate']['provenance']
+                actual=effort['tags'] if target=='effort' else client.get('/api/activities/1/workout').json()['layers'][target]['payload']['tags']
+                assert actual==expected
+                assert effort['qualification']['race_evidence_status']=='SUPPORTED_ATTESTATION'
+
+            with driver.chromium.launch(executable_path=chrome) as browser:
+                page=browser.new_page(viewport={'width':375,'height':900})
+                errors=[]
+                page.on('pageerror',lambda error:errors.append(str(error)))
+                page.on('console',lambda message:errors.append(message.text) if message.type in ('error','warning') else None)
+                page.on('requestfailed',lambda request:errors.append(request.url))
+                page.on('response',lambda response:errors.append(response.url) if response.status>=400 else None)
+                page.goto(base+url)
+                page.get_by_role('textbox',name=note_label,exact=True).fill('Only the note changed')
+                with page.expect_navigation(wait_until='domcontentloaded'):
+                    page.get_by_role('button',name=button,exact=True).press('Enter')
+                assert_saved_tags(tags)
+                # Deliberate edits support commas, quotes, escapes, line breaks,
+                # HTML-like text and Unicode without turning them into new tags.
+                changed=['literal, comma','quote " and backslash \\', 'line one\nline two\ttab',
+                    '</textarea><script>literal()</script>', 'café 🏃']
+                page.get_by_role('textbox',name=tags_label,exact=True).fill(json.dumps(changed))
+                with page.expect_navigation(wait_until='domcontentloaded'):
+                    page.get_by_role('button',name=button,exact=True).press('Enter')
+                assert_saved_tags(changed)
+                page.get_by_role('textbox',name=note_label,exact=True).fill('Another note-only edit')
+                with page.expect_navigation(wait_until='domcontentloaded'):
+                    page.get_by_role('button',name=button,exact=True).press('Enter')
+                assert_saved_tags(changed)
+                page.get_by_role('textbox',name=tags_label,exact=True).fill('[]')
+                with page.expect_navigation(wait_until='domcontentloaded'):
+                    page.get_by_role('button',name=button,exact=True).press('Enter')
+                assert_saved_tags([])
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                assert errors==[]

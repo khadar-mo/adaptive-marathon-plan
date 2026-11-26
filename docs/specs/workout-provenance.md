@@ -70,6 +70,9 @@ Running-label writes cannot turn a recorded run into strength or change its tota
 The browser supplies entry/correction, inference, JSON upload, configuration and
 history controls. The existing loopback origin protection applies to every POST.
 Unknown IDs return 404, malformed input 422 and stale source/revision writes 409.
+Both label and effort tag controls edit JSON string arrays. A comma inside a tag
+stays within that tag; note-only edits preserve the stored array exactly. Entering
+`[]` explicitly removes the tags. Arrays containing non-string values are rejected.
 
 ## One effort-context ledger
 

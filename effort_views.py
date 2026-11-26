@@ -28,7 +28,10 @@ document.querySelectorAll('form[data-json]').forEach(form => form.addEventListen
  try {
  const body = Object.fromEntries(new FormData(form));
  for (const key of ['start_distance_m','distance_m']) if (key in body) body[key] = Number(body[key]);
- if ('tags' in body) body.tags = body.tags.split(',').map(value => value.trim()).filter(Boolean);
+ if ('tags' in body) {
+  body.tags=JSON.parse(body.tags||'[]');
+  if(!Array.isArray(body.tags)||!body.tags.every(tag=>typeof tag==='string'))throw new Error('Tags must be a JSON array of strings.');
+ }
  if ('maximal_confirmed' in body) {
   const declaration=body.maximal_confirmed;
   body.maximal_confirmed = declaration === 'yes';
@@ -183,7 +186,9 @@ def inspection(row):
     protocol_null = 'yes' if selected_context.get('protocol') is None else 'no'
     content += f'<form data-json data-protocol-null="{protocol_null}" method="post" action="/api{base}/context"><fieldset><legend>Record context or correction</legend><label>Effort category<select name="category">'
     content += ''.join(f'<option' + (' selected' if category==c['provenance']['category'] else '') + f'>{category}</option>' for category in ('EASY_OR_UNKNOWN', 'TRAINING_FAST', 'FATIGUED_BLOCK', 'RACE', 'VERIFIED_TEST')) + '</select></label>'
-    content += '<label>Tags, separated by commas<input name="tags" value="' + escape(', '.join(c['provenance'].get('tags',[]))) + '"></label><label>Recorded by<input name="actor" required maxlength="120" value="' + escape(selected_context.get('actor','')) + '"></label><label>Context note<textarea name="note" required maxlength="4000">' + escape(selected_context.get('note','')) + '</textarea></label>'
+    content += '<label>Tags (JSON array)<input name="tags" value="' + escape(json.dumps(c['provenance'].get('tags',[]))) + '"></label>'
+    content += '<p>Enter tags as a JSON array, such as ["BENCHMARK_TAG"]. Commas inside quotes stay in one tag. Use [] to remove all tags.</p>'
+    content += '<label>Recorded by<input name="actor" required maxlength="120" value="' + escape(selected_context.get('actor','')) + '"></label><label>Context note<textarea name="note" required maxlength="4000">' + escape(selected_context.get('note','')) + '</textarea></label>'
     content += '<label>Benchmark protocol<textarea name="protocol" maxlength="4000">' + escape(selected_context.get('protocol') or '') + '</textarea></label><label>Explicit maximal confirmation<select name="maximal_confirmed">'
     maximal = {'CONFIRMED':'yes','NOT_MAXIMAL':'known_no'}.get(q.get('maximality'),'no')
     content += ''.join(f'<option value="{value}"' + (' selected' if value==maximal else '') + f'>{label}</option>' for value,label in (('no','Unknown / unconfirmed'),('yes','Yes, explicitly confirmed'),('known_no','Explicitly not maximal'))) + '</select></label>'

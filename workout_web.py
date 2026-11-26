@@ -110,7 +110,8 @@ document.querySelectorAll('form[data-label]').forEach(form => form.addEventListe
  const fields=Object.fromEntries(new FormData(form));let body,headers={'Content-Type':'application/json'},url=form.action;
  if(form.dataset.label==='upload'){body=new FormData(form);headers={};}
  else if(form.dataset.label==='config'){url='/api/workouts/configs/'+encodeURIComponent(fields.version);body=fields.config;}
- else {if('tags' in fields)fields.tags=fields.tags.split(',').map(x=>x.trim()).filter(Boolean);
+ else {if('tags' in fields){fields.tags=JSON.parse(fields.tags||'[]');
+ if(!Array.isArray(fields.tags)||!fields.tags.every(tag=>typeof tag==='string'))throw new Error('Tags must be a JSON array of strings.');}
  if('supersedes' in fields&&!fields.supersedes)fields.supersedes=null;
  if('event_utc' in fields&&!fields.event_utc)fields.event_utc=null;
  if('planned_session_ref' in fields&&!fields.planned_session_ref)fields.planned_session_ref=null;
@@ -163,7 +164,9 @@ def page(request: Request, activity_id: str, as_of: str | None = None, knowledge
             for key, val in {'layer': layer, 'canonical_version_id': row['canonical_version_id_now'], 'supersedes': entry['id'] if entry else ''}.items():
                 content += f'<input type="hidden" name="{key}" value="{val}">'
             content += select('primary', title + ' type', [v for v in labels.TYPES if v != 'STRENGTH_CONDITIONING'], value.get('primary'))
-            content += field('tags', title + ' tags', ', '.join(value.get('tags', []))) + field('actor', title + ' recorded by', value.get('actor',''), required=True)
+            content += field('tags', title + ' tags', json.dumps(value.get('tags', [])))
+            content += '<p>Enter tags as a JSON array, such as ["BENCHMARK_TAG"]. Commas inside quotes stay in one tag. Use [] to remove all tags.</p>'
+            content += field('actor', title + ' recorded by', value.get('actor',''), required=True)
             content += field('source', title + ' source', value.get('source', 'athlete'), True) + field('source_reference', title + ' source reference', value.get('source_reference', ''), True)
             content += field('event_utc', title + ' observation time UTC', entry['event_utc'] if entry else '')
             content += field('planned_session_ref', title + ' session reference', value.get('planned_session_ref',''))

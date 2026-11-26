@@ -61,3 +61,12 @@ supporting efforts and source/document/attestation evidence, then proves explici
 removal works. Missing/ambiguous step links remain UNKNOWN with raw rows retained;
 unique positive matches still work. Event and knowledge cutoffs are independent,
 with excluded IDs/reasons exposed separately from selected input fingerprints.
+
+The final tag-edit review reproduced comma splitting in all three browser forms
+(planned, corrected and effort context) before the fix. Nine affected browser flows
+now pass, including the previous edit/reference flows and literal tag-array checks.
+A note-only edit retains the single `travel, FATIGUED_BLOCK` tag and the rested
+race's SUPPORTED_ATTESTATION status. Explicit edits preserve commas, quotes,
+backslashes, line breaks, tabs, HTML-like text and Unicode; entering `[]` removes
+tags. These are real Chromium saves and public API readbacks, with keyboard/mobile
+checks and no unexpected console, page, request or HTTP errors.
