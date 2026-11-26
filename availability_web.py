@@ -202,7 +202,7 @@ def page(request: Request, week: str | None = None, version: str | None = None):
         invalid(exc)
     if version and record is None:
         raise HTTPException(404, "Availability version not found in this week.")
-    body = '<p><a href="/context">Context and weekly readiness</a></p>'
+    body = '<p><a href="/context">Context and weekly readiness</a> · <a href="/runner-settings">Runner settings</a></p>'
     body += '<form method="get" action="/availability"><fieldset><legend>Choose a week</legend>' + field("availability-week", "Week beginning Monday", week, "date", 'name="week" required') + '<button>Open week</button></fieldset></form>'
     body += '<p>All windows use Europe/London. Saving availability records your calendar; it does not approve a target or activate a training plan.</p>'
     shown = record["state"] if record else "UNKNOWN — not entered"
