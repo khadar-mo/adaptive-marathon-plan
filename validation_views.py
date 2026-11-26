@@ -36,7 +36,7 @@ def page(store, identity=None, previous=None):
         [[e(item[key]) for key in ("event_cutoff", "knowledge_cutoff", "created_at", "kind")]])
     content += '<p>' + ' · '.join([link(url + "/inputs", "Frozen input and configuration ledger"),
         link(url + "/replay", "Replay from frozen inputs"), link(url + "/planner", "Planner actuals JSON"),
-        link(url, "Full snapshot JSON")]) + '</p>'
+        link(url, "Full snapshot JSON"), link("/readiness?snapshot_id=" + identity, "Inspect readiness for this snapshot")]) + '</p>'
     runs = []
     for r in item["planner"]["actuals"]:
         runs.append([str(r["activity_id"]), e(r["start_utc"]), e(r["end_utc"]), e(r["distance_m"]), e(r["measures"]["elapsed_seconds"]),

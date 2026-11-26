@@ -29,6 +29,7 @@ import provider_views
 from storage import ActiveImport, Archive, Store
 import views
 from context_web import router as context_router
+from readiness_web import router as readiness_router
 from fueling_web import router as fueling_router
 from availability_web import router as availability_router
 from source_history_web import router as source_history_router
@@ -66,6 +67,7 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(context_router)
+app.include_router(readiness_router)
 app.include_router(fueling_router)
 app.include_router(availability_router)
 app.include_router(source_history_router)
