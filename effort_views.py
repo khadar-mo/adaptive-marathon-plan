@@ -87,7 +87,8 @@ def inspect_form(c):
 
 
 def bests(row):
-    content = NOTICE + '<form method="get"><fieldset><legend>Observed performance window</legend>'
+    content = NOTICE + '<p><a href="' + escape('/estimators?' + urlencode({'cutoff': row['cutoff_utc']})) + '">Compare performance estimators</a></p>'
+    content += '<form method="get"><fieldset><legend>Observed performance window</legend>'
     content += f'<label>Cutoff UTC<input name="cutoff" value="{show(row["cutoff_utc"])}" required></label>'
     content += f'<label>Recent days<input name="days" type="number" min="1" max="36500" value="{row["requested_recent_days"]}"></label><button>Show best efforts</button></fieldset></form>'
     content += '<p>Recent windows include segment ends on both boundaries and require the complete activity to have ended by the cutoff. '
