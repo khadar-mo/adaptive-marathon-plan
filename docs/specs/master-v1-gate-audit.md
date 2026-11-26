@@ -282,3 +282,9 @@ G4 software awaits final independent review and CI in its focused PR. Human and
 physiological validation remain **UNVERIFIED**, personal predictive validity
 **UNTESTED**, and prescription authority false. No personal CS-to-marathon
 regression, combined model or calibrated confidence interval is supplied.
+
+## Contextual fitness software — issue #31
+
+The Fitness profile combines supported all-time and recent observations, provisional G4 candidates, source-linked endurance, G3 workload, wellness/feedback/strength and six quality dimensions. T13 keeps running evidence available when sleep or HRV is missing. Editable descriptor versions can produce real matched-run medians, sustained segments and late blocks. Each saved state retains separate event, knowledge and creation times with raw references, original context and explained changes.
+
+The first runnable version passed independent existing-input API checks. A later review of an old interval initially left a rejected observation visible during retrospective calculation. The corrected selector applies quality decisions known by K to the observed interval at T. Earlier K and saved results remain reproducible. The [ten-item acceptance record](g5-acceptance.md) describes scope, synthetic browser/API cases, lineage and prospective evidence still required by G6.

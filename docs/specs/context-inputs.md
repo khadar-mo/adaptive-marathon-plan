@@ -67,7 +67,7 @@ receipt. Precision changes are retained as changes, even if numeric values compa
 
 | Kind | Required fields beyond common identity | Optional inputs |
 |---|---|---|
-| `wellness` | `local_date`, `metric`, `unit`; value or an explicit missing record | `timezone` (Europe/London default), `observed_at`, `value_type` (`decimal`/`category`), `validity` (`VALID`/`SUSPECT`/`INVALID`/`MISSING`), `missing_reason`, `method`, `origin` (`device`/`self_report`/`laboratory`/`unknown`) |
+| `wellness` | `local_date`, `metric`, `unit`; value or an explicit missing record | `timezone` (Europe/London default), `observed_at`, `value_type` (`decimal`/`category`), `validity` (`VALID`/`SUSPECT`/`INVALID`/`MISSING`), `missing_reason`, `method`, optional `calibration`, `origin` (`device`/`self_report`/`laboratory`/`unknown`) |
 | `post_run` | `activity_id`, offset-aware `reported_at`; supplied content or `missing_reason` | `ratings`, `pain_discomfort`, `pain_location`, `context`, `notes`, explicit `attention` flags |
 | `preweek` | Monday `week`, offset-aware `reported_at`; supplied content or `missing_reason` | Same feedback fields; week timezone is Europe/London |
 | `strength` | `local_date`, plus `duration_s` or a non-unknown `status` | `timezone`, `observed_at`, `lower_body_emphasis` (`yes`/`no`/`unknown`), `exercises`, `ratings`, `soreness_reported_at`, `notes` |
@@ -143,7 +143,7 @@ that uncertainty rather than treating it as a timestamped observation.
 `context-policy-v1` retains all observations. A single valid observation in a group
 is reported directly; multiple valid observations are `MULTIPLE_OBSERVATIONS` with
 no silently chosen daily value. An explicitly selected policy may use `median` for
-numeric groups. Groups require the same date, timezone, metric, unit, source, method,
+numeric groups. Groups require the same date, timezone, metric, unit, source, method, calibration,
 value type and interpretation. No cross-unit/method/source aggregation or categorical
 median is performed. Exact decimal arithmetic is retained in even-sized medians.
 This daily selection is an engineering policy; baseline medians/deltas are G5 work.
