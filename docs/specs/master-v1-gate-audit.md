@@ -296,6 +296,21 @@ physiological validation remain **UNVERIFIED**, personal predictive validity
 **UNTESTED**, and prescription authority false. No personal CS-to-marathon
 regression, combined model or calibrated confidence interval is supplied.
 
+## Source acquisition and identity history · issue #45
+
+1. **Scope.** The G6 input now records source discovery, ownership and identity reviews on the existing Garmin/FIT paths. #32 owns the complete fitness snapshot and its prediction ledger.
+2. **Storage.** Raw staging keeps its own receipt. Accepted membership and review decisions commit alongside canonical updates. Equivalent retries keep the first receipt and previous group revision.
+3. **Clocks.** Reports distinguish claimed activity start, claimed acquisition, earliest supported source evidence and earliest supported ownership. Strict cutoff reads normalize explicit offsets to UTC microseconds.
+4. **Legacy evidence.** Immutable canonical versions and selection events, recorded workload inventories, decoded source versions and sealed import reports support only the facts they contain. A coarse terminal clock becomes usable at its conservative upper bound or an earlier recorded inventory witness. Historical ownership can be UNKNOWN.
+5. **Caller interface.** `source_history.read_in_db(db, knowledge_cutoff)` returns groups, acquisition receipts and review history in the caller's transaction. `canonical.load_version(db, version_id)` loads the retained payload and QC configuration independently of the current owner.
+6. **Normal routes.** From an activity, open **Inspect source and identity history**. The page and its JSON link use the same cutoff. `GET /api/source-history` includes unassigned receipts. `GET /api/canonical/versions/{version_id}` loads an exact version.
+7. **Fixtures.** Tests cover ordinary FIT, two equivalent device recordings, an explicitly merged donor, a pre-FIT schema, and the synthetic SQLite export produced at the merged G2 commit. The coordinator separately checked older local history through the normal API.
+8. **Replay and recovery.** Checks cover cutoffs one microsecond apart, byte-equivalent responses after reimport and restart, an earlier claimed acquisition time, an interrupted ownership transaction and staging/retry without a second actual.
+9. **Browser and integration.** Chromium exercises actual upload, activity navigation, keyboard cutoff editing, narrow-screen layout and the historical JSON link. The integrated app retains availability, fueling, workload and estimator routes.
+10. **Acceptance boundary.** The focused pull request records exact-head CI and independent review. The ledger supplies software provenance. Manual source comparisons and prospective physiological or predictive validation have their own evidence requirements.
+
+Review corrections for #45 cover an actual pre-#45 Garmin ZIP imported at `ba3ed18` and captured through the workload API. A partial inventory preserves its previously evidenced embedded FIT until a complete ownership decision supersedes it. New Garmin original and member bytes receive independent archive receipts before decoding and assignment. A rolled-back assignment preserves both receipts across retry, including damaged members and invalid containers.
+
 ## Contextual fitness software — issue #31
 
 The Fitness profile combines supported all-time and recent observations, provisional G4 candidates, source-linked endurance, G3 workload, wellness/feedback/strength and six quality dimensions. T13 keeps running evidence available when sleep or HRV is missing. Editable descriptor versions can produce real matched-run medians, sustained segments and late blocks. Each saved state retains separate event, knowledge and creation times with raw references, original context and explained changes.
