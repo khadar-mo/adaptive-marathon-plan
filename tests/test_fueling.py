@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from urllib.parse import urlencode
 
 import pytest
 
@@ -48,9 +49,15 @@ async def test_optional_unknown_and_verbatim_entry_leave_activity_and_efforts_un
         await upload(client, ("made-up.fit", raw))
         capture_time=context.now()
         monkeypatch.setattr(canonical,'knowledge_time',lambda:capture_time)
-        before = {path: (await client.get(path)).json() for path in (
+        paths = (
             "/api/activities/1", "/api/activities/1/canonical", "/api/activities/1/efforts",
-            "/api/estimators?cutoff=2026-10-26T00:00:00Z")}
+            "/api/estimators?cutoff=2026-10-26T00:00:00Z",
+            "/api/workload?" + urlencode({'as_of':'2026-10-26T00:00:00Z','knowledge_cutoff':capture_time}))
+        before = {}
+        for path in paths:
+            response=await client.get(path)
+            assert response.status_code==200,response.text
+            before[path]=response.json()
         missing = await read(client)
         assert missing["state"] == "MISSING" and missing["reports"] == []
         assert missing["practice_status"] == missing["tolerance_status"] == "UNKNOWN"

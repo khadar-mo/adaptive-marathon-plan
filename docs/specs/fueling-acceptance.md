@@ -9,6 +9,10 @@ workout provenance #41 at `454896ddbd6dd05be3246602cc0d97abec3b714e` before its 
 working checkpoint. Final integration also includes merged G4 #40 at
 `5dffef9d46fd7bcdd782559bb3d7619a8c2d5d02`; all API registrations and both audit
 sections are retained. No unmerged fitness or planning dependency is used.
+Merged G3 #42 at `c59c1f4f997f66f19cf4b0d9debdf153b63e8d27` is also integrated;
+the app conflict retained both workload and fueling imports/router registrations.
+The isolation regression verifies successful workload and estimator endpoints, with
+identical outputs before and after fueling entry at the same evidence cutoffs.
 
 ## 2. Exact issue criteria
 
