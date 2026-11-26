@@ -92,7 +92,7 @@ async def test_known_at_and_event_cutoffs_do_not_leak_later_corrections(history,
         first = (await client.post('/api/activities/1/workout', json=choice(row))).json()['workout']
         monkeypatch.setattr(canonical, 'knowledge_time', lambda: '2027-01-02T00:00:00+00:00')
         await client.post('/api/activities/1/workout', json=choice(first, primary='LONG_RUN'))
-        past = (await client.get('/api/activities/1/workout?as_of=2027-01-01T12:00:00Z')).json()
+        past = (await client.get('/api/activities/1/workout',params={'as_of':'2027-01-01T12:00:00Z','knowledge_as_of':'2027-01-01T12:00:00Z'})).json()
         assert past['effective'] == 'EASY_AEROBIC' and len(past['history']) == 1
         assert past['withheld'][0]['reason'] == 'LATER_KNOWLEDGE'
         current = (await client.get('/api/activities/1/workout')).json()
@@ -333,3 +333,61 @@ async def test_workout_names_do_not_change_continuity_or_observed_best(history,n
         await client.post('/api/activities/1/workout',json=choice(row,primary='LONG_RUN'))
         after = efforts.bests(app.app.state.store,'2027-01-01T00:00:00Z')
         assert before == after
+
+
+@pytest.mark.parametrize('structure,reason', [
+    ([(27,{'wkt_step_name':'LONG_RUN'}),(19,{'total_elapsed_time':20})], 'MISSING_STEP_INDEX'),
+    ([(27,{'message_index':0,'wkt_step_name':'LONG_RUN'}),(19,{'total_elapsed_time':20})], 'MISSING_LAP_STEP_INDEX'),
+    ([(27,{'message_index':0,'wkt_step_name':'LONG_RUN'}),(27,{'message_index':0,'wkt_step_name':'TEMPO_THRESHOLD'}),(19,{'wkt_step_index':0,'total_elapsed_time':20})], 'AMBIGUOUS_STEP_INDEX'),
+    ([(27,{'message_index':0,'wkt_step_name':'LONG_RUN'}),(27,{'message_index':0,'wkt_step_name':'LONG_RUN'}),(19,{'wkt_step_index':0,'total_elapsed_time':20})], 'AMBIGUOUS_STEP_INDEX'),
+])
+async def test_incomplete_or_duplicate_executed_step_links_remain_unknown(history,structure,reason):
+    raw=trace_fit(dense([(0,0),(300,1000)]),extra=structure)
+    async with server() as client:
+        row=await setup(client,raw)
+        response=await client.post('/api/activities/1/workout/infer',json={'canonical_version_id':row['canonical_version_id_now']})
+        value=response.json()['workout']['layers']['inferred']['payload']
+        assert value['primary']=='UNKNOWN'
+        assert reason in {r['reason'] for r in value['link_diagnostics']}
+        source=value['evidence']['fit'][0]
+        assert len([m for m in source['messages'] if m['message_group']=='workout_step_mesgs'])==sum(number==27 for number,_ in structure)
+
+
+async def test_event_and_knowledge_cutoffs_are_independent_on_both_public_paths(history,monkeypatch):
+    async with server() as client:
+        row=await setup(client)
+        extraction=(await client.get('/api/activities/1/efforts')).json()
+        c=distance(extraction,400)['best']
+        effort_url=f'/api/activities/1/efforts/{extraction["version_id"]}/{c["id"]}'
+        monkeypatch.setattr(canonical,'knowledge_time',lambda:'2027-01-01T00:00:00+00:00')
+        first=(await client.post('/api/activities/1/workout',json=choice(row,primary='EASY_AEROBIC'))).json()['workout']
+        context1=(await client.post(effort_url+'/context',json={'category':'TRAINING_FAST','tags':[],'actor':'A','note':'First context'})).json()['candidate']
+        monkeypatch.setattr(canonical,'knowledge_time',lambda:'2027-01-02T00:00:00+00:00')
+        future=(await client.post('/api/activities/1/workout',json=choice(first,primary='LONG_RUN',event_utc='2028-01-01T00:00:00Z'))).json()['workout']
+        context2=(await client.post(effort_url+'/context',json={'category':'RACE','tags':[],'actor':'A','note':'Later context'})).json()['candidate']
+        reviewed=(await client.post(effort_url+'/review',json={'action':'reject','actor':'A','note':'Later review'})).json()['candidate']
+        review_id=reviewed['reviews'][-1]['id']
+        k={'knowledge_as_of':'2027-01-03T00:00:00Z'}
+        workout=(await client.get('/api/activities/1/workout',params=k)).json()
+        effort=(await client.get(effort_url,params=k)).json()['candidate']
+        assert workout['effective']==effort['provenance']['session_classification']['effective']=='LONG_RUN'
+        assert workout['as_of'] is None and effort['context_event_as_of'] is None
+        t={'as_of':'2027-01-01T12:00:00Z'}
+        workout=(await client.get('/api/activities/1/workout',params=t)).json()
+        effort=(await client.get(effort_url,params=t)).json()['candidate']
+        assert workout['effective']==effort['provenance']['session_classification']['effective']=='EASY_AEROBIC'
+        assert effort['provenance']['category']=='RACE'  # old event, later known context is allowed with T only
+        assert workout['knowledge_as_of'] is None and effort['context_knowledge_as_of'] is None
+        assert {'id':review_id,'reason':'FUTURE_EVENT','reasons':['FUTURE_EVENT']} in effort['context_exclusions']['reviews']
+        earlier={'knowledge_as_of':'2027-01-01T12:00:00Z'}
+        workout=(await client.get('/api/activities/1/workout',params=earlier)).json()
+        effort=(await client.get(effort_url,params=earlier)).json()['candidate']
+        assert effort['provenance']['qualification']['context_id']==context1['acknowledged_context_id']
+        exclusions=effort['context_exclusions']
+        assert {'id':context2['acknowledged_context_id'],'reason':'LATER_KNOWLEDGE','reasons':['LATER_KNOWLEDGE']} in exclusions['contexts']
+        assert {'id':review_id,'reason':'LATER_KNOWLEDGE','reasons':['LATER_KNOWLEDGE']} in exclusions['reviews']
+        assert exclusions['labels']==workout['withheld']
+        assert exclusions['labels'][0]['id']==future['layers']['corrected']['id']
+        before_event=(await client.get(effort_url,params={'as_of':'2024-01-01T00:00:00Z'})).json()['candidate']
+        assert {r['id'] for r in before_event['context_exclusions']['contexts']}=={context1['acknowledged_context_id'],context2['acknowledged_context_id']}
+        assert all(r['reason']=='FUTURE_EVENT' for r in before_event['context_exclusions']['contexts'])

@@ -51,3 +51,13 @@ in-memory mutations were detected and restored: ignoring historical cutoffs and
 turning legacy unconfirmed maximality into NOT_MAXIMAL. The final broad run adds
 the independent race-maximality regression. Exact final-head broad-test, CI and
 independent-review results are recorded in the pull request before merge.
+
+Independent review corrections: five public API cases reproduced absent/duplicate
+FIT step links and the knowledge-only cutoff disagreement before the fixes; a real
+browser regression reproduced unpopulated edit state. The corrected affected suite
+passes 70 tests, including the existing G2 tests and six related browser flows.
+The new browser case proves note-only edits retain planned-session links, multiple
+supporting efforts and source/document/attestation evidence, then proves explicit
+removal works. Missing/ambiguous step links remain UNKNOWN with raw rows retained;
+unique positive matches still work. Event and knowledge cutoffs are independent,
+with excluded IDs/reasons exposed separately from selected input fingerprints.

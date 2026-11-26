@@ -16,7 +16,10 @@ not an inferred rest day. BENCHMARK_TAG and marathon contexts can be secondary t
 
 The configured initial mapping recognizes the canonical taxonomy strings in
 **completed** FIT step names. A recorded lap must link its `wkt_step_index` to the
-step's `message_index` and have positive recorded elapsed time. A source title or
+step's `message_index` and have positive recorded elapsed time. Both indices must
+exist and identify exactly one step. The FIT selected flag is separate from the
+12-bit index; missing/invalid links and duplicate step identities remain UNKNOWN
+with raw-row diagnostics, including identical duplicate names. A source title or
 unexecuted step is only a hint. Mixed mapped categories stay UNKNOWN. This is a
 deterministic software-label rule, with no pace/HR/RPE or physiological cutoffs.
 The API and UI support immutable custom mappings. Original lap/step/session fields,
@@ -26,7 +29,11 @@ Source changes are visible rather than silently relabeling prior observations.
 Inference is explicitly recomputed from the current canonical version. Same
 evidence/config/code is idempotent. Corrections require both the current canonical
 version and the current layer's `supersedes` ID. Aliases resolve to the current
-owner while each entry retains its activity/canonical ID at entry. Historical
+owner while each entry retains its activity/canonical ID at entry. Note-only edits
+prefill and preserve the selected revision, including planned-session and supporting
+effort references. Effort edits preserve category, protocol, qualification and the
+complete source/document/attestation list. Editable lists and explicit removal
+controls change references only when requested. Historical
 identity reconstruction is not asserted from a present-day redirect table.
 
 Strength remains a separate context modality with category STRENGTH_CONDITIONING.
@@ -35,9 +42,11 @@ Running-label writes cannot turn a recorded run into strength or change its tota
 ## API and import
 
 - `GET /api/activities/{id}/workout`: layers, effective classification, history,
-  source-change state and input version. Optional `as_of` filters events and, by
-  default, knowledge; `knowledge_as_of` can explicitly select another knowledge
-  cutoff. Later entries appear only as excluded IDs/reasons.
+  source-change state and input version. Optional `as_of` filters event times only;
+  `knowledge_as_of` filters known-at times only. Neither supplies an omitted other
+  cutoff. Supply both for both constraints. A future-dated but already-known record
+  remains visible with only a knowledge cutoff. Later entries appear as excluded
+  IDs/reasons; the two constraints apply identically to workout and effort views.
 - `POST /api/activities/{id}/workout`: append planned/corrected label. Required:
   layer, canonical_version_id, primary, actor, explanation, source,
   source_reference. Existing layer updates also require supersedes. Optional:
@@ -121,6 +130,9 @@ evaluation. G2's selection_id still describes its G2 selection, not the whole ne
 context snapshot. Changing labels changes context_input_version, not candidate IDs.
 
 Explicit effort-inspection API/pages accept as_of and knowledge_as_of for declarations
-and reviewer records. They do not claim to freeze source availability, identity or
+and reviewer records independently. Context event time is the effort observation;
+the original review ledger records its decision instant as both event and known-at
+time. Excluded context, review and label IDs/reasons are inspection diagnostics and
+do not enter the selected input fingerprint. These views do not claim to freeze source availability, identity or
 extraction knowledge. G6 owns that complete prospective protocol. These metadata
 changes cannot establish calibrated prediction errors, injury risk or medical clearance.

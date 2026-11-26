@@ -113,12 +113,15 @@ document.querySelectorAll('form[data-label]').forEach(form => form.addEventListe
  else {if('tags' in fields)fields.tags=fields.tags.split(',').map(x=>x.trim()).filter(Boolean);
  if('supersedes' in fields&&!fields.supersedes)fields.supersedes=null;
  if('event_utc' in fields&&!fields.event_utc)fields.event_utc=null;
+ if('planned_session_ref' in fields&&!fields.planned_session_ref)fields.planned_session_ref=null;
  if('supporting_efforts' in fields)fields.supporting_efforts=JSON.parse(fields.supporting_efforts||'[]');body=JSON.stringify(fields);}
  const response=await fetch(url,{method:'POST',headers,body});const result=await response.json();
  if(!response.ok)throw new Error(typeof result.detail==='string'?result.detail:'Check the document fields.');
  if(result.html_url)location.assign(result.html_url);else location.reload();
  }catch(error){status.textContent=error.message;button.disabled=false;}
-}));</script>"""
+}));
+document.querySelectorAll('[data-clear-references]').forEach(button=>button.addEventListener('click',()=>{document.getElementById(button.dataset.clearReferences).value='[]';}));
+</script>"""
 
 
 @router.get("/workouts", response_class=HTMLResponse)
@@ -160,11 +163,15 @@ def page(request: Request, activity_id: str, as_of: str | None = None, knowledge
             for key, val in {'layer': layer, 'canonical_version_id': row['canonical_version_id_now'], 'supersedes': entry['id'] if entry else ''}.items():
                 content += f'<input type="hidden" name="{key}" value="{val}">'
             content += select('primary', title + ' type', [v for v in labels.TYPES if v != 'STRENGTH_CONDITIONING'], value.get('primary'))
-            content += field('tags', title + ' tags', ', '.join(value.get('tags', []))) + field('actor', title + ' recorded by', required=True)
+            content += field('tags', title + ' tags', ', '.join(value.get('tags', []))) + field('actor', title + ' recorded by', value.get('actor',''), required=True)
             content += field('source', title + ' source', value.get('source', 'athlete'), True) + field('source_reference', title + ' source reference', value.get('source_reference', ''), True)
             content += field('event_utc', title + ' observation time UTC', entry['event_utc'] if entry else '')
-            content += f'<label>{title} explanation<textarea name="explanation" required maxlength="4000"></textarea></label>'
-            content += '<label>Supporting effort references (JSON)<textarea name="supporting_efforts">[]</textarea></label>'
+            content += field('planned_session_ref', title + ' session reference', value.get('planned_session_ref',''))
+            content += '<p>Keep the session reference unchanged, or clear it to remove the link.</p>'
+            content += f'<label>{title} explanation<textarea name="explanation" required maxlength="4000">{escape(value.get("explanation", ""))}</textarea></label>'
+            references = [{k:r[k] for k in ('version_id','candidate_id')} for r in value.get('supporting_efforts', [])]
+            content += f'<label>{title} supporting effort references (JSON)<textarea id="{layer}-supporting-efforts" name="supporting_efforts">' + escape(json.dumps(references,indent=2)) + '</textarea></label>'
+            content += f'<p>Edit these owned version/candidate references to change the links.</p><button type="button" data-clear-references="{layer}-supporting-efforts">Remove {title.lower()} supporting efforts</button>'
             content += f'<button>Save {title.lower()}</button></fieldset></form>'
     content += effort_views.details(row['history'], 'All label revisions') + effort_views.details(row['withheld'], 'Records excluded by cutoffs')
     query = escape(urlencode({k:v for k,v in {'as_of':as_of,'knowledge_as_of':knowledge_as_of}.items() if v}))

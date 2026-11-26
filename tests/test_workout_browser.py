@@ -114,7 +114,7 @@ def test_label_import_config_and_stale_edit_error_are_visible(tmp_path):
                 changed={**document['label'],'supersedes':current['layers']['planned']['id'],'primary':'RECOVERY_EASY'}
                 assert client.post('/api/activities/1/workout',json=changed).status_code==200
             page.get_by_label('Planned intent recorded by',exact=True).fill('Stale editor')
-            page.get_by_label('Planned intent explanation',exact=True).fill('Stale revision must not replace the newer label.')
+            page.get_by_role('textbox',name='Planned intent explanation',exact=True).fill('Stale revision must not replace the newer label.')
             expected_http['active']=True
             page.get_by_role('button',name='Save planned intent',exact=True).press('Enter')
             expect(page.locator('#workout-status')).to_contain_text('This label changed; reload')
@@ -122,5 +122,85 @@ def test_label_import_config_and_stale_edit_error_are_visible(tmp_path):
             expected_http['active']=False
             page.reload()
             expect(page.locator('#planned-label')).to_have_text('RECOVERY_EASY')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert errors==[]
+
+
+def test_note_only_edits_preserve_all_references_and_explicit_removal_works(tmp_path):
+    chrome=chrome_executable()
+    with serve_database(tmp_path/'runs.sqlite3') as port, sync_playwright() as driver:
+        base=f'http://127.0.0.1:{port}'
+        with httpx.Client(base_url=base) as client:
+            response=client.post('/api/imports/fit',files=[('files',('synthetic.fit',structured_fit()))])
+            response.raise_for_status()
+            for _ in range(100):
+                if client.get(response.headers['location']).json()['state']=='complete':
+                    break
+                time.sleep(.05)
+            workout=client.get('/api/activities/1/workout').json()
+            extraction=client.get('/api/activities/1/efforts').json()
+            candidates=[r['best'] for r in extraction['inspected_source']['result']['distances'] if r['distance_m'] in (400,800)]
+            refs=[{'version_id':extraction['version_id'],'candidate_id':c['id']} for c in candidates]
+            label={'layer':'planned','primary':'LONG_RUN','canonical_version_id':workout['canonical_version_id_now'],
+                'actor':'Synthetic runner','explanation':'Original planned note','source':'owned-plan','source_reference':'Original source note',
+                'tags':['BENCHMARK_TAG'],'planned_session_ref':'synthetic-plan/session-42','supporting_efforts':refs}
+            assert client.post('/api/activities/1/workout',json=label).status_code==200
+            effort_url=f'/activities/1/efforts/{extraction["version_id"]}/{candidates[0]["id"]}'
+            declaration={'category':'RACE','tags':['FATIGUED_BLOCK','Synthetic-tag'],'actor':'Synthetic runner','note':'Original context note',
+                'protocol':'Original race conditions','qualification':{'maximality':'NOT_MAXIMAL','rest_state':'FATIGUED','control_state':'CONTROLLED',
+                'race_distance_verification':'DOCUMENTED','race_time_verification':'ATTESTED','evidence_refs':[
+                    {'kind':'source','method':'Original recorded sample','raw_sha256':extraction['selected_fit_sha256'],'message_group':'record_mesgs','index':0},
+                    {'kind':'document','method':'Checked recorded result','reference':'Synthetic race result'},
+                    {'kind':'athlete_attestation','method':'Runner statement','reference':'Synthetic tired effort statement'}]}}
+            saved=client.post('/api'+effort_url+'/context',json=declaration)
+            assert saved.status_code==200,saved.text
+            original=saved.json()['candidate']['context_history'][-1]
+        with driver.chromium.launch(executable_path=chrome) as browser:
+            page=browser.new_page(viewport={'width':375,'height':900})
+            page.set_default_timeout(5000)
+            errors=[]
+            page.on('pageerror',lambda error:errors.append(str(error)))
+            page.on('console',lambda message:errors.append(message.text) if message.type in ('error','warning') else None)
+            page.on('requestfailed',lambda request:errors.append(request.url))
+            page.on('response',lambda response:errors.append(response.url) if response.status>=400 else None)
+            page.goto(base+'/activities/1/workout')
+            expect(page.get_by_label('Planned intent recorded by',exact=True)).to_have_value(label['actor'])
+            page.get_by_role('textbox',name='Planned intent explanation',exact=True).fill('Only the planned note changed')
+            with page.expect_navigation(wait_until='domcontentloaded'):
+                page.get_by_role('button',name='Save planned intent',exact=True).press('Enter')
+            expect(page.get_by_role('textbox',name='Planned intent explanation',exact=True)).to_have_value('Only the planned note changed')
+            with httpx.Client(base_url=base) as client:
+                planned=client.get('/api/activities/1/workout').json()['layers']['planned']['payload']
+                assert planned['planned_session_ref']==label['planned_session_ref']
+                assert [{k:r[k] for k in ('version_id','candidate_id')} for r in planned['supporting_efforts']]==refs
+                assert all(planned[k]==label[k] for k in ('primary','tags','actor','source','source_reference'))
+            page.get_by_role('button',name='Remove planned intent supporting efforts',exact=True).click()
+            page.get_by_label('Planned intent session reference',exact=True).fill('')
+            with page.expect_navigation(wait_until='domcontentloaded'):
+                page.get_by_role('button',name='Save planned intent',exact=True).press('Enter')
+            expect(page.get_by_label('Planned intent session reference',exact=True)).to_have_value('')
+            with httpx.Client(base_url=base) as client:
+                planned=client.get('/api/activities/1/workout').json()['layers']['planned']['payload']
+                assert planned['supporting_efforts']==[] and planned['planned_session_ref'] is None
+            page.goto(base+effort_url)
+            expect(page.get_by_role('combobox',name='Effort category',exact=True)).to_have_value('RACE')
+            expect(page.get_by_role('combobox',name='Explicit maximal confirmation',exact=True)).to_have_value('known_no')
+            page.get_by_role('textbox',name='Context note',exact=True).fill('Only the context note changed')
+            with page.expect_navigation(wait_until='domcontentloaded'):
+                page.get_by_role('button',name='Save effort context',exact=True).press('Enter')
+            expect(page.get_by_role('textbox',name='Context note',exact=True)).to_have_value('Only the context note changed')
+            with httpx.Client(base_url=base) as client:
+                after=client.get('/api'+effort_url).json()['candidate']['context_history'][-1]
+                assert all(after[k]==original[k] for k in ('category','tags','actor','protocol','maximal_confirmed','qualification'))
+                assert len(after['qualification']['evidence_refs'])==3
+            page.get_by_role('button',name='Remove all effort evidence references',exact=True).click()
+            for label_name in ('Race distance evidence','Race elapsed-time evidence'):
+                page.get_by_role('combobox',name=label_name,exact=True).select_option('UNKNOWN')
+            with page.expect_navigation(wait_until='domcontentloaded'):
+                page.get_by_role('button',name='Save effort context',exact=True).press('Enter')
+            expect(page.locator('#effort-qualification')).to_contain_text('Race evidence: UNVERIFIED')
+            with httpx.Client(base_url=base) as client:
+                after=client.get('/api'+effort_url).json()['candidate']['context_history'][-1]
+                assert after['qualification']['evidence_refs']==[] and after['category']=='RACE'
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert errors==[]

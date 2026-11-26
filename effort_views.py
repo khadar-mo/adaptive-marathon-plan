@@ -25,25 +25,30 @@ SCRIPT = """<script>
 document.querySelectorAll('form[data-json]').forEach(form => form.addEventListener('submit', async event => {
  event.preventDefault(); const button = event.submitter; button.disabled = true;
  const status = document.getElementById('effort-status'); status.textContent = 'Saving…';
+ try {
  const body = Object.fromEntries(new FormData(form));
  for (const key of ['start_distance_m','distance_m']) if (key in body) body[key] = Number(body[key]);
  if ('tags' in body) body.tags = body.tags.split(',').map(value => value.trim()).filter(Boolean);
  if ('maximal_confirmed' in body) {
   const declaration=body.maximal_confirmed;
   body.maximal_confirmed = declaration === 'yes';
+  if(body.protocol===''&&form.dataset.protocolNull==='yes')body.protocol=null;
   body.qualification={maximality:declaration==='yes'?'CONFIRMED':declaration==='known_no'?'NOT_MAXIMAL':'UNKNOWN'};
   for(const key of ['rest_state','control_state','race_distance_verification','race_time_verification']){body.qualification[key]=body[key]||'UNKNOWN';delete body[key];}
-  body.qualification.evidence_refs=[];
+  body.qualification.evidence_refs=JSON.parse(body.evidence_refs||'[]');
+  if(!Array.isArray(body.qualification.evidence_refs))throw new Error('Evidence references must be a JSON array.');
+  delete body.evidence_refs;
   if(body.evidence_reference||body.evidence_method)body.qualification.evidence_refs.push({kind:body.evidence_kind,reference:body.evidence_reference,method:body.evidence_method});
   for(const key of ['evidence_reference','evidence_method','evidence_kind'])delete body[key];
  }
  if (button.name) body[button.name] = button.value;
- try { const response = await fetch(form.getAttribute('action'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const response = await fetch(form.getAttribute('action'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const result = await response.json();
   if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Check the values and try again.');
   if (result.html_url) location.assign(result.html_url); else location.reload();
  } catch(error) {status.textContent = error.message; button.disabled = false;}
 }));
+document.querySelectorAll('[data-clear-evidence]').forEach(button=>button.addEventListener('click',()=>{document.getElementById(button.dataset.clearEvidence).value='[]';}));
 </script>"""
 NOTICE = ('<p>Observed continuous performances from recorded elapsed time. Current capability is not estimated. '
           'Engineering QC is provisional; human comparison and scientific validation remain unverified. '
@@ -174,16 +179,23 @@ def inspection(row):
     q = c['provenance'].get('qualification', {})
     content += f'<p id="effort-qualification">Declared category: {show(c["provenance"]["category"])}. Test evidence: <strong>{show(q.get("test_evidence_status", "UNVERIFIED"))}</strong>. Race evidence: <strong>{show(q.get("race_evidence_status", "UNVERIFIED"))}</strong>. Attestations/documents are not independent scientific validation.</p>'
     content += details(c['provenance'], 'Workout classification and effort qualification')
-    content += f'<form data-json method="post" action="/api{base}/context"><fieldset><legend>Record context or correction</legend><label>Effort category<select name="category">'
-    content += ''.join(f'<option>{category}</option>' for category in ('EASY_OR_UNKNOWN', 'TRAINING_FAST', 'FATIGUED_BLOCK', 'RACE', 'VERIFIED_TEST')) + '</select></label>'
-    content += '<label>Tags, separated by commas<input name="tags"></label><label>Recorded by<input name="actor" required maxlength="120"></label><label>Context note<textarea name="note" required maxlength="4000"></textarea></label>'
-    content += '<label>Benchmark protocol<textarea name="protocol" maxlength="4000"></textarea></label><label>Explicit maximal confirmation<select name="maximal_confirmed"><option value="no">Unknown / unconfirmed</option><option value="yes">Yes, explicitly confirmed</option><option value="known_no">Explicitly not maximal</option></select></label>'
+    selected_context = c['context_history'][-1] if c['context_history'] else {}
+    protocol_null = 'yes' if selected_context.get('protocol') is None else 'no'
+    content += f'<form data-json data-protocol-null="{protocol_null}" method="post" action="/api{base}/context"><fieldset><legend>Record context or correction</legend><label>Effort category<select name="category">'
+    content += ''.join(f'<option' + (' selected' if category==c['provenance']['category'] else '') + f'>{category}</option>' for category in ('EASY_OR_UNKNOWN', 'TRAINING_FAST', 'FATIGUED_BLOCK', 'RACE', 'VERIFIED_TEST')) + '</select></label>'
+    content += '<label>Tags, separated by commas<input name="tags" value="' + escape(', '.join(c['provenance'].get('tags',[]))) + '"></label><label>Recorded by<input name="actor" required maxlength="120" value="' + escape(selected_context.get('actor','')) + '"></label><label>Context note<textarea name="note" required maxlength="4000">' + escape(selected_context.get('note','')) + '</textarea></label>'
+    content += '<label>Benchmark protocol<textarea name="protocol" maxlength="4000">' + escape(selected_context.get('protocol') or '') + '</textarea></label><label>Explicit maximal confirmation<select name="maximal_confirmed">'
+    maximal = {'CONFIRMED':'yes','NOT_MAXIMAL':'known_no'}.get(q.get('maximality'),'no')
+    content += ''.join(f'<option value="{value}"' + (' selected' if value==maximal else '') + f'>{label}</option>' for value,label in (('no','Unknown / unconfirmed'),('yes','Yes, explicitly confirmed'),('known_no','Explicitly not maximal'))) + '</select></label>'
     for name, label, options in (('rest_state','Rest or fatigue context',('UNKNOWN','RESTED','FATIGUED')),('control_state','Controlled test context',('UNKNOWN','CONTROLLED','UNCONTROLLED')),('race_distance_verification','Race distance evidence',('UNKNOWN','ATTESTED','DOCUMENTED')),('race_time_verification','Race elapsed-time evidence',('UNKNOWN','ATTESTED','DOCUMENTED'))):
-        content += f'<label>{label}<select name="{name}">' + ''.join(f'<option>{v}</option>' for v in options) + '</select></label>'
-    content += '<label>Evidence kind<select name="evidence_kind"><option value="athlete_attestation">Athlete attestation</option><option value="document">Recorded document</option></select></label><label>Evidence reference<textarea name="evidence_reference" maxlength="2000"></textarea></label><label>Verification method<textarea name="evidence_method" maxlength="1000"></textarea></label>'
+        content += f'<label>{label}<select name="{name}">' + ''.join(f'<option' + (' selected' if v==q.get(name,'UNKNOWN') else '') + f'>{v}</option>' for v in options) + '</select></label>'
+    content += '<label>Saved effort evidence references (JSON)<textarea id="effort-evidence-refs" name="evidence_refs" rows="8">' + escape(json.dumps(q.get('evidence_refs',[]),indent=2)) + '</textarea></label>'
+    content += '<p>All source, document and attestation references are retained here. Edit this list to change individual references; new references below are appended.</p><button type="button" data-clear-evidence="effort-evidence-refs">Remove all effort evidence references</button>'
+    content += '<fieldset><legend>Add an evidence reference</legend><label>Evidence kind<select name="evidence_kind"><option value="athlete_attestation">Athlete attestation</option><option value="document">Recorded document</option></select></label><label>Evidence reference<textarea name="evidence_reference" maxlength="2000"></textarea></label><label>Verification method<textarea name="evidence_method" maxlength="1000"></textarea></label></fieldset>'
     content += f'<input type="hidden" name="supersedes" value="{show(c["context_history"][-1]["id"]) if c["context_history"] else ""}">'
     content += '<button>Save effort context</button></fieldset></form>'
     content += details(c["context_history"], "Context history and availability timestamps")
+    content += details(c.get('context_exclusions',{}), 'Context, review and label records excluded by cutoffs')
     provenance = {k: v for k, v in row.items() if k not in {"candidate", "samples", "source", "events"}}
     provenance["source"] = {k: v for k, v in row["source"].items() if k not in {"result", "qc"}}
     content += details(provenance, "Reproducibility and source header")

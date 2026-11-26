@@ -158,6 +158,14 @@ def evidence(store, db, aid, canonical_id, payload):
     return result
 
 
+def step_index(value):
+    # Both FIT fields use message_index: the low 12 bits identify the row;
+    # selected is a flag, while the reserved bits cannot establish an identity.
+    if type(value) is not int or not 0 <= value < 65535 or value & 0x7000:
+        return None
+    return value & 0x0fff
+
+
 def infer(store, activity_id, *, canonical_version_id, config_version=DEFAULT_CONFIG_VERSION):
     with store.connect(write=True, create=True) as db:
         aid = owner(db, activity_id)
@@ -169,23 +177,44 @@ def infer(store, activity_id, *, canonical_version_id, config_version=DEFAULT_CO
         if config is None:
             raise ValueError("Unknown classification configuration.")
         source = evidence(store, db, aid, current, payload)
-        matches = []
+        matches, diagnostics = [], []
         # A planned workout step alone is not evidence it was executed. Match only
         # recorded lap links with positive elapsed time, preserving every raw index.
         selected = next((s for s in source["fit"] if s["fit_sha256"] == payload["selected_fit_sha256"]), None)
         if selected and payload['running_sport']:
-            steps = {r["fields"].get("message_index"): r for r in selected["messages"] if r["message_group"] == "workout_step_mesgs"}
+            steps = {}
+            for row in (r for r in selected['messages'] if r['message_group'] == 'workout_step_mesgs'):
+                index = step_index(row['fields'].get('message_index'))
+                if index is None:
+                    diagnostics.append({'reason':'MISSING_STEP_INDEX' if row['fields'].get('message_index') is None else 'INVALID_STEP_INDEX','raw_references':[row]})
+                else:
+                    steps.setdefault(index, []).append(row)
+            for index, rows in steps.items():
+                if len(rows) != 1:
+                    diagnostics.append({'reason':'AMBIGUOUS_STEP_INDEX','step_index':index,'raw_references':rows})
             for lap in (r for r in selected["messages"] if r["message_group"] == "lap_mesgs"):
                 fields = lap["fields"]
-                step = steps.get(fields.get("wkt_step_index"))
-                if step and isinstance(fields.get("total_elapsed_time"), (int, float)) and fields["total_elapsed_time"] > 0:
+                index = step_index(fields.get('wkt_step_index'))
+                if index is None:
+                    diagnostics.append({'reason':'MISSING_LAP_STEP_INDEX' if fields.get('wkt_step_index') is None else 'INVALID_LAP_STEP_INDEX','raw_references':[lap]})
+                    continue
+                linked = steps.get(index, [])
+                if not linked:
+                    diagnostics.append({'reason':'STEP_INDEX_NOT_FOUND','step_index':index,'raw_references':[lap]})
+                    continue
+                if len(linked) != 1:
+                    continue
+                step = linked[0]
+                if type(fields.get("total_elapsed_time")) in (int, float) and fields["total_elapsed_time"] > 0:
                     name = step["fields"].get("wkt_step_name")
                     if name in config["completed_step_names"]:
                         matches.append({"primary": config["completed_step_names"][name], "step": step, "lap": lap})
         categories = sorted({r["primary"] for r in matches})
-        value = {"primary": categories[0] if len(categories) == 1 else "UNKNOWN", "tags": [], "status": "MAPPED_SOURCE_LABEL" if len(categories) == 1 else "UNKNOWN",
-                 "explanation": "Exact configured names on steps linked by completed laps; these are software labels, not calibrated intensity." if matches else "No supported completed-step mapping. Titles and pace do not establish a workout category.",
+        supported = len(categories) == 1 and not diagnostics
+        value = {"primary": categories[0] if supported else "UNKNOWN", "tags": [], "status": "MAPPED_SOURCE_LABEL" if supported else "UNKNOWN",
+                 "explanation": "Incomplete or ambiguous executed-step links; see original rows and link diagnostics." if diagnostics else "Exact configured names on steps linked by completed laps; these are software labels, not calibrated intensity." if matches else "No supported completed-step mapping. Titles and pace do not establish a workout category.",
                  "actor": "classifier", "config_version": config_version, "config": config, "evidence": source, "matches": matches,
+                 "link_diagnostics": diagnostics,
                  "conflicting_categories": categories if len(categories) > 1 else [], "physiological_validation": "UNVERIFIED"}
         previous = latest_id(db, owner_ids(db, aid), "inferred")
         if previous:
@@ -227,15 +256,15 @@ def save(store, activity_id, raw, *, import_sha256=None):
 def read_in_db(db, activity_id, *, as_of=None, knowledge_as_of=None):
     aid = owner(db, activity_id)
     event_cutoff = context_data.moment(as_of) if as_of else None
-    cutoff = context_data.moment(knowledge_as_of or as_of) if knowledge_as_of or as_of else None
+    cutoff = context_data.moment(knowledge_as_of) if knowledge_as_of else None
     current, canonical_payload = head(db, aid)
     rows, withheld = [], []
     if exists(db):
         for row in db.execute("SELECT * FROM workout_labels WHERE activity_id IN (SELECT value FROM json_each(?)) ORDER BY rowid", (json.dumps(owner_ids(db, aid)),)):
             value = {k: row[k] for k in row.keys() if k != "payload"} | {"payload": json.loads(row["payload"])}
-            reason = "LATER_KNOWLEDGE" if cutoff and context_data.moment(row["known_at"]) > cutoff else "FUTURE_EVENT" if event_cutoff and row["event_utc"] and context_data.moment(row["event_utc"]) > event_cutoff else None
-            if reason:
-                withheld.append({"id": row["id"], "reason": reason})
+            excluded = exclusion(row['id'], row['event_utc'], row['known_at'], event_cutoff, cutoff)
+            if excluded:
+                withheld.append(excluded)
             else:
                 rows.append(value)
     layers = {layer: next((r for r in reversed(rows) if r["layer"] == layer), None) for layer in ("planned", "inferred", "corrected")}
@@ -254,20 +283,33 @@ def read(store, activity_id, **kwargs):
         return read_in_db(db, activity_id, **kwargs)
 
 
+def exclusion(identity, event_utc, known_at, event_cutoff, knowledge_cutoff):
+    reasons = []
+    if knowledge_cutoff and context_data.moment(known_at) > knowledge_cutoff:
+        reasons.append('LATER_KNOWLEDGE')
+    if event_cutoff and event_utc and context_data.moment(event_utc) > event_cutoff:
+        reasons.append('FUTURE_EVENT')
+    return {'id':identity,'reason':reasons[0],'reasons':reasons} if reasons else None
+
+
 def enrich_candidate(db, candidate, version, activity_id, *, as_of=None, knowledge_as_of=None):
     """Enrich in the caller's existing transaction; callers freeze the returned payload."""
     c = deepcopy(candidate)
-    cutoff = context_data.moment(knowledge_as_of or as_of) if knowledge_as_of or as_of else None
-    event_cutoff = context_data.moment(as_of or knowledge_as_of) if as_of or knowledge_as_of else None
-    contexts = [{**json.loads(r["payload"]), "id": r["id"], "known_at": r["known_at"], "previous_context_id": r["previous_context_id"]}
-                for r in db.execute("SELECT * FROM effort_contexts WHERE version_id=? AND candidate_id=? ORDER BY rowid", (version, c["id"]))
-                if not cutoff or context_data.moment(r["known_at"]) <= cutoff]
-    contexts = [r for r in contexts if not event_cutoff or context_data.moment(r.get('event_utc') or c['end_utc']) <= event_cutoff]
+    cutoff = context_data.moment(knowledge_as_of) if knowledge_as_of else None
+    event_cutoff = context_data.moment(as_of) if as_of else None
+    contexts, excluded_contexts, reviews, excluded_reviews = [], [], [], []
+    for row in db.execute("SELECT * FROM effort_contexts WHERE version_id=? AND candidate_id=? ORDER BY rowid", (version, c['id'])):
+        value = {**json.loads(row['payload']), 'id':row['id'], 'known_at':row['known_at'], 'previous_context_id':row['previous_context_id']}
+        excluded = exclusion(row['id'], value.get('event_utc') or c['end_utc'], row['known_at'], event_cutoff, cutoff)
+        (excluded_contexts if excluded else contexts).append(excluded or value)
     c["context_history"] = contexts
     base = deepcopy(c.get("computed_provenance", c["provenance"]))
     c["computed_provenance"] = deepcopy(base)
-    reviews = [dict(r) for r in db.execute("SELECT * FROM effort_reviews WHERE version_id=? AND candidate_id=? ORDER BY id", (version, c["id"]))
-               if not cutoff or context_data.moment(r["created_at"]) <= cutoff]
+    for row in db.execute("SELECT * FROM effort_reviews WHERE version_id=? AND candidate_id=? ORDER BY id", (version, c['id'])):
+        # The original review ledger records the decision instant, not a separately
+        # reported observation time. That instant is both event and known-at time.
+        excluded = exclusion(row['id'], row['created_at'], row['created_at'], event_cutoff, cutoff)
+        (excluded_reviews if excluded else reviews).append(excluded or dict(row))
     decision = next((r for r in reversed(reviews) if r["action"] != "annotate"), None)
     c["reviews"] = reviews
     c["review_verdict"] = decision["action"] if decision else "UNREVIEWED"
@@ -287,6 +329,9 @@ def enrich_candidate(db, candidate, version, activity_id, *, as_of=None, knowled
     c["provenance"] = base
     c["context_input_version"] = canonical.fingerprint({"context": latest, "qualification": base['qualification'], "classification": base['session_classification']})
     c["context_knowledge_as_of"] = cutoff
+    c['context_event_as_of'] = event_cutoff
+    # Exclusions are inspection diagnostics, not selected model inputs/fingerprints.
+    c['context_exclusions'] = {'contexts':excluded_contexts,'reviews':excluded_reviews,'labels':classification['withheld']}
     return c
 
 
@@ -340,7 +385,7 @@ def save_effort_context(store, activity_id, version, candidate_id, *, category, 
         cid = canonical.fingerprint({"version": version, "candidate": candidate_id, "payload": payload, "known_at": known, "previous": previous[0] if previous else None})
         db.execute("INSERT INTO effort_contexts VALUES (?,?,?,?,?,?,?)", (cid, version, candidate_id, source["fit_sha256"], context_data.encoded(payload), known, previous[0] if previous else None))
         record_change(db, "EFFORT_CONTEXT", result["activity_id"], cid, c["end_utc"], known, {"extraction_version_id": version, "candidate_id": candidate_id})
-        acknowledged = enrich_candidate(db, c, version, result["activity_id"], as_of=max(context_data.moment(known),context_data.moment(c['end_utc'])), knowledge_as_of=known)
+        acknowledged = enrich_candidate(db, c, version, result["activity_id"], knowledge_as_of=known)
         acknowledged["acknowledged_context_id"] = cid
         return acknowledged
 
