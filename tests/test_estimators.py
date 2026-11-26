@@ -4,6 +4,7 @@ from datetime import timedelta
 import json
 import math
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,7 @@ from demo_efforts import dense, recording
 from demo_estimators import CUTOFF, examples
 from demo_recordings import START
 from test_fit_import import upload
-from test_imports import history, server, digest
+from test_imports import history, server, digest, submit
 
 
 @pytest.fixture
@@ -117,13 +118,22 @@ def test_labels_reviews_and_unsupported_legacy_attestations_remain_separate():
     p = {'category': 'VERIFIED_TEST', 'verified_maximal': True, 'protocol': 'Track test', 'declaration_basis': 'EXPLICIT_USER_ATTESTATION'}
     assert not maths.qualification(p)['comparison_eligible']
     q = {'schema_version': 'effort-qualification-v1', 'maximality': 'CONFIRMED', 'rest_state': 'RESTED',
-         'control_state': 'CONTROLLED', 'test_evidence_status': 'SUPPORTED_ATTESTATION'}
+         'control_state': 'CONTROLLED', 'test_evidence_status': 'SUPPORTED_ATTESTATION', 'context_id': 'synthetic-context',
+         'evidence_refs': [{'kind': 'athlete_attestation', 'method': 'Controlled test', 'reference': 'Synthetic fixture'}]}
     assert maths.qualification({**p, 'qualification': q})['credible_maximal_trial']
-    assert not maths.qualification({**p, 'qualification': {**q, 'rest_state': 'UNKNOWN'}})['credible_maximal_trial']
+    assert maths.qualification({**p, 'qualification': {**q, 'rest_state': 'UNKNOWN'}})['credible_maximal_trial']
+    assert maths.qualification({**p, 'qualification': {**q, 'control_state': 'UNKNOWN'}})['credible_maximal_trial']
+    assert not maths.qualification({**p, 'qualification': {**q, 'rest_state': 'UNKNOWN', 'control_state': 'UNKNOWN'}})['credible_maximal_trial']
+    assert not maths.qualification({**p, 'qualification': {**q, 'test_evidence_status': 'CONFLICTED'}})['credible_maximal_trial']
+    assert not maths.qualification({**p, 'qualification': {**q, 'evidence_refs': []}})['credible_maximal_trial']
     race = {'schema_version': 'effort-qualification-v1', 'maximality': 'UNKNOWN', 'race_distance_verification': 'DOCUMENTED',
-            'race_time_verification': 'ATTESTED', 'race_evidence_status': 'SUPPORTED_ATTESTATION'}
+            'race_time_verification': 'ATTESTED', 'race_evidence_status': 'SUPPORTED_ATTESTATION', 'context_id': 'synthetic-race',
+            'evidence_refs': [{'kind': 'document', 'method': 'Results sheet', 'reference': 'Synthetic fixture'}]}
     assert maths.qualification({'category': 'RACE', 'qualification': race})['comparison_eligible']
     assert not maths.qualification({'category': 'RACE', 'qualification': race})['credible_maximal_trial']
+    submaximal = maths.qualification({'category': 'RACE', 'qualification': {**race, 'maximality': 'NOT_MAXIMAL'}})
+    assert submaximal['race_evidence_supported'] and submaximal['comparison_basis'] == 'SUPPORTED_RACE_ATTESTATION'
+    assert not submaximal['comparison_eligible']
 
 
 async def import_trials(client):
@@ -290,7 +300,8 @@ async def test_boundary_winner_without_durable_g2_id_is_fully_copied(history):
 
 
 @pytest.mark.anyio
-async def test_qualification_context_extension_is_copied_conservatively_with_known_at(history):
+async def test_raw_qualification_declarations_remain_unknown_without_normalizing_adapter(history, monkeypatch):
+    monkeypatch.setattr(estimators, 'workout_labels', None)
     async with server() as client:
         await import_trials(client)
         preview = (await client.get('/api/estimators', params={'cutoff': CUTOFF})).json()
@@ -298,11 +309,9 @@ async def test_qualification_context_extension_is_copied_conservatively_with_kno
         # Exercise the agreed additive #30 storage contract without importing an
         # unmerged worker module or mutating any existing context event.
         known = canonical.knowledge_time()
-        qualification = {'schema_version': 'effort-qualification-v1', 'context_id': 'synthetic-q', 'known_at': known,
-            'actor': 'Synthetic runner', 'explanation': 'Controlled synthetic fixture', 'evidence_refs': [],
+        qualification = {'evidence_refs': [{'kind': 'athlete_attestation', 'method': 'Controlled test', 'reference': 'Synthetic fixture'}],
             'maximality': 'CONFIRMED', 'rest_state': 'RESTED', 'control_state': 'CONTROLLED',
-            'race_distance_verification': 'UNKNOWN', 'race_time_verification': 'UNKNOWN',
-            'test_evidence_status': 'SUPPORTED_ATTESTATION', 'race_evidence_status': 'UNVERIFIED'}
+            'race_distance_verification': 'UNKNOWN', 'race_time_verification': 'UNKNOWN'}
         payload = {'category': 'VERIFIED_TEST', 'tags': [], 'actor': 'Synthetic runner', 'note': 'Synthetic test',
                    'protocol': 'Rested track protocol', 'maximal_confirmed': True, 'qualification': qualification}
         with app.app.state.store.connect(write=True) as db:
@@ -312,9 +321,10 @@ async def test_qualification_context_extension_is_copied_conservatively_with_kno
         assert response.status_code == 200, response.text
         result = response.json()['evaluation']
         comparisons = result['riegel']['comparisons']
-        assert all(r['comparison_state'] == 'PREDICTION_COMPARISON' for r in comparisons)
+        assert all(r['comparison_state'] == 'EXPLORATORY' for r in comparisons)
         o = next(o for o in result['evidence']['observations'] if o['id'] == comparisons[0]['source_observation_id'])
-        assert o['candidate']['provenance']['qualification'] == qualification
+        assert o['candidate']['context_history'][-1]['qualification'] == qualification
+        assert o['qualification']['comparison_basis'] == 'UNVERIFIED'
         assert o['candidate']['context_history'][-1]['known_at'] == known
         assert result['knowledge_time_frozen'] is False and result['validation']['personal_predictive'] == 'UNTESTED'
 
@@ -374,3 +384,121 @@ async def test_capture_copies_context_in_one_transaction_and_later_change_is_a_n
         new = (await client.post('/api/estimators', json={'cutoff': CUTOFF})).json()['evaluation']
         assert new['input_hash'] != old['input_hash']
         assert (await client.get(response.json()['url'])).json() == old
+
+
+@pytest.mark.anyio
+async def test_current_non_pb_is_eligible_but_summary_correction_and_cycling_exclude_old_refs(history):
+    from test_canonical import trace_fit
+    from test_fit_import import zipped
+    history.original = zipped(trace_fit(dense([(0, 0), (1500, 5000)])))
+    history.detail['summaryDTO']['distance'] = 5000
+    async with server() as client:
+        await submit(client)
+        current = (await client.get('/api/activities/1/efforts')).json()
+        selected = await client.post('/api/activities/1/efforts/inspect', json={'version': current['version_id'],
+            'source': current['selected_fit_sha256'], 'start_distance_m': 100, 'distance_m': 400})
+        selected.raise_for_status()
+        candidate = selected.json()['candidate']
+        ref = {'activity_id': 1, 'version_id': current['version_id'], 'source_sha256': current['selected_fit_sha256'], 'candidate_id': candidate['id']}
+        request = {'cutoff': '2024-03-01T00:00:00Z', 'riegel_sources': [ref], 'cs_sources': [ref]}
+        initial = (await client.post('/api/estimators', json=request)).json()
+        assert len(initial['evaluation']['riegel']['comparisons']) == 4
+        history.detail['summaryDTO']['distance'] = 6000
+        await submit(client)
+        corrected = (await client.post('/api/estimators', json=request)).json()['evaluation']
+        assert corrected['riegel']['comparisons'] == []
+        assert 'SUPERSEDED_EXTRACTION_VERSION' in corrected['riegel']['excluded'][0]['reasons']
+        assert all(w['primary']['observation_ids'] == [] for w in corrected['critical_speed']['windows'])
+        history.detail['activityTypeDTO'] = {'typeKey': 'cycling'}
+        await submit(client)
+        cycling = (await client.post('/api/estimators', json=request)).json()['evaluation']
+        assert cycling['riegel']['comparisons'] == []
+        assert 'CURRENT_ACTIVITY_NOT_RUNNING' in cycling['riegel']['excluded'][0]['reasons']
+        catalog = (await client.get('/api/estimators', params={'cutoff': request['cutoff']})).json()['catalog']
+        assert next(o for o in catalog if o['ref'] == ref)['unavailable_reasons']
+        assert (await client.get(initial['url'])).json() == initial['evaluation']
+
+
+@pytest.mark.anyio
+async def test_explicit_recency_uses_exact_g2_end_coordinate_and_inclusive_equality(history):
+    from fit_data import absolute_time
+    async with server() as client:
+        await upload(client, ('exact-window.fit', recording(dense([(0, 0), (200, 600)]))))
+        current = (await client.get('/api/activities/1/efforts')).json()
+        refs = []
+        for start in (100, 100.000001):
+            response = await client.post('/api/activities/1/efforts/inspect', json={'version': current['version_id'],
+                'source': current['selected_fit_sha256'], 'start_distance_m': start, 'distance_m': 400})
+            response.raise_for_status()
+            c = response.json()['candidate']
+            refs.append({'activity_id': 1, 'version_id': current['version_id'], 'source_sha256': current['selected_fit_sha256'], 'candidate_id': c['id']})
+        cutoff = (absolute_time(START) + timedelta(seconds=166, microseconds=666667, days=112)).isoformat()
+        old = (await client.post('/api/estimators', json={'cutoff': cutoff, 'riegel_sources': [refs[0]], 'cs_sources': [refs[0]]})).json()['evaluation']
+        assert old['riegel']['comparisons'] == []
+        assert 'STALE_OUTSIDE_SELECTED_WINDOW' in old['riegel']['excluded'][0]['reasons']
+        assert window(old)['primary']['observation_ids'] == []
+        equality = (await client.post('/api/estimators', json={'cutoff': cutoff, 'riegel_sources': [refs[1]], 'cs_sources': [refs[1]]})).json()['evaluation']
+        assert len(equality['riegel']['comparisons']) == 4
+        assert len(window(equality)['primary']['observation_ids']) == 1
+
+
+@pytest.mark.anyio
+async def test_optional_adapter_shares_transaction_and_execution_bound_is_not_input_identity(history, monkeypatch):
+    async with server() as client:
+        await import_trials(client)
+        seen = {}
+        original = efforts.bests
+        def selector(view, *args, **kwargs):
+            seen['db'] = view.db
+            return original(view, *args, **kwargs)
+        q = {'schema_version': 'effort-qualification-v1', 'context_id': 'synthetic-qualified', 'known_at': canonical.knowledge_time(),
+             'maximality': 'CONFIRMED', 'rest_state': 'UNKNOWN', 'control_state': 'CONTROLLED',
+             'test_evidence_status': 'SUPPORTED_ATTESTATION', 'race_evidence_status': 'UNVERIFIED',
+             'evidence_refs': [{'kind': 'athlete_attestation', 'method': 'Controlled test', 'reference': 'Synthetic fixture'}]}
+        def enrich(db, candidate, version, activity_id, *, as_of, knowledge_as_of):
+            assert db is seen['db'] and db.in_transaction
+            assert effort_math.stamp(as_of) == effort_math.stamp(CUTOFF)
+            assert knowledge_as_of >= q['known_at']
+            c = deepcopy(candidate)
+            c['provenance'].update(category='VERIFIED_TEST', verified_maximal=True, protocol='Controlled fixture', qualification=q)
+            c['context_knowledge_as_of'] = knowledge_as_of
+            return c
+        monkeypatch.setattr(efforts, 'bests', selector)
+        monkeypatch.setattr(estimators, 'workout_labels', SimpleNamespace(enrich_candidate=enrich))
+        before = (await client.get('/api/estimators', params={'cutoff': CUTOFF})).json()['preview']
+        saved = (await client.post('/api/estimators', json={'cutoff': CUTOFF})).json()['evaluation']
+        assert before['context_capture_known_at_utc'] != saved['context_capture_known_at_utc']
+        assert before['input_hash'] == saved['input_hash']
+        assert all(p['comparison_state'] == 'PREDICTION_COMPARISON' for p in saved['riegel']['comparisons'])
+        assert saved['evidence']['observations'][0]['candidate']['provenance']['qualification'] == q
+        assert saved['knowledge_cutoff_utc'] is None and saved['knowledge_time_frozen'] is False
+
+
+@pytest.mark.anyio
+async def test_current_alternate_source_and_rejected_current_inspection_are_excluded(history):
+    from test_canonical import trace_fit
+    async with server() as client:
+        await upload(client, ('first.fit', trace_fit(dense([(0, 0), (1500, 5000)]))))
+        await upload(client, ('second.fit', trace_fit(dense([(0, 0), (1600, 5000)]), file_number=2)))
+        current = (await client.get('/api/activities/1/efforts')).json()
+        alternative = next(s for s in current['sources'] if s['fit_sha256'] != current['selected_fit_sha256'])
+        candidate = next(r['best'] for r in alternative['result']['distances'] if r['distance_m'] == 400)
+        ref = {'activity_id': 1, 'version_id': current['version_id'], 'source_sha256': alternative['fit_sha256'], 'candidate_id': candidate['id']}
+        request = {'cutoff': '2024-03-01T00:00:00Z', 'riegel_sources': [ref], 'cs_sources': [ref]}
+        alternate = (await client.post('/api/estimators', json=request)).json()['evaluation']
+        assert alternate['riegel']['comparisons'] == []
+        assert 'SOURCE_NOT_CURRENTLY_SELECTED' in alternate['riegel']['excluded'][0]['reasons']
+        selected = await client.post('/api/activities/1/efforts/inspect', json={'version': current['version_id'],
+            'source': current['selected_fit_sha256'], 'start_distance_m': 100, 'distance_m': 400})
+        selected.raise_for_status()
+        ref = {**ref, 'source_sha256': current['selected_fit_sha256'], 'candidate_id': selected.json()['candidate']['id']}
+        request.update(riegel_sources=[ref], cs_sources=[ref])
+        original = (await client.post('/api/estimators', json=request)).json()
+        assert len(original['evaluation']['riegel']['comparisons']) == 4
+        rejected = await client.post(f'/api/activities/1/efforts/{ref["version_id"]}/{ref["candidate_id"]}/review',
+            json={'action': 'reject', 'actor': 'Synthetic reviewer', 'note': 'Reject this interval'})
+        rejected.raise_for_status()
+        new = (await client.post('/api/estimators', json=request)).json()['evaluation']
+        assert new['riegel']['comparisons'] == []
+        assert 'CURRENT_REVIEW_REJECTION' in new['riegel']['excluded'][0]['reasons']
+        assert (await client.get(original['url'])).json() == original['evaluation']

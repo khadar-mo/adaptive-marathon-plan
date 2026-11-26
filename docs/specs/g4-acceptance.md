@@ -66,6 +66,10 @@ it does not establish a scientifically calibrated limit. Negative D′ is never 
 
 Explicit CS requests select one source per distance; duplicates are rejected with
 an actionable response. Default scenarios use G2's own winner for each window.
+Fresh calculations also require the current extraction version, selected source,
+running classification, QC and reviewer eligibility. Superseded/alternate sources
+remain inspectable with exclusion reasons; current valid non-PB inspections remain
+selectable. Existing saved evaluations do not resolve or adopt these later changes.
 All supported subsets of size three through N are enumerated without ranking by
 plausibility. The 400/800/5000 grouping is marked only when available. Sensitivity
 distributions retain every calculated value, including conflicting fits.
@@ -88,7 +92,8 @@ The Riegel expectation uses an independent exponential/log formulation.
 
 ## 5. Test results and regression sensitivity
 
-The focused numerical/public suite passes **22 tests**. Both Chromium workflows
+The focused numerical/public suite passes **26 tests** after the independent-review
+corrections. Both Chromium workflows
 have passed on the assigned headless Chromium executable, including desktop
 1280 px/mobile 375 px, keyboard operations, no overflow and no console warnings.
 The repository defines pytest CI, with no separate lint/typecheck job. The full
@@ -101,6 +106,12 @@ regression. Both copied files were restored byte-for-byte, and the active checko
 was never mutated for these checks. Adversarial validation also reproduced a
 year-0001 window-underflow exception; it now returns 422. Huge JSON integers and
 underflowing numeric diagnostics are handled without unhandled exceptions/NaN.
+The summary-correction/cycling and exact-clock window regressions both failed on
+the reviewed head before the fixes. New current-alternate-source/reviewer-rejection
+checks preserve old evaluations while withholding fresh predictions. The optional
+qualification adapter is tested in the same read transaction, with execution-time
+selectors excluded from otherwise stable input identity. Actual #30 HTTP
+integration is verified after that independently reviewed prerequisite merges.
 
 ## 6. Public API and CLI inspection
 
@@ -172,14 +183,28 @@ hash contains the captured evidence/selection/configuration, not execution or
 artifact creation time. Original saved reads do not resolve today's G2 state,
 even after recomputation, rejection or a late context correction.
 
-Optional #30 qualification is copied exactly from `provenance.qualification` or
-the latest context event. Supported rested/controlled test attestation requires
-explicit maximal confirmation and protocol plus the matching qualification
-fields. Supported race comparison requires its separate distance/time evidence.
+Recent-window comparisons use the G2 running-block origin and rational end-clock
+coordinate, not rounded display UTC or floating age in days. An interval ending
+at 500/3 seconds is excluded when the lower boundary is 166.666667 seconds;
+an exactly equal endpoint remains included. Both Riegel and CS use this check.
+Missing exact endpoint evidence is explicitly unavailable, without a rounded-clock
+fallback. The corrected capture policy is algorithm version v2.
+
+When #30 is installed, G4 calls `workout_labels.enrich_candidate` with its already
+open SQLite transaction. Stored context declarations alone are not normalized
+qualification. The adapter supplies schema/context identity, evidence status and
+known-at provenance; its complete returned candidate is copied. The adapter's
+execution-time knowledge bound is retained separately from event time and excluded
+from the deterministic input hash; actual declaration known-at times remain hashed.
+Without the adapter, unsupported declarations stay UNKNOWN/UNVERIFIED.
+Supported test attestation requires explicit maximal confirmation, protocol and
+supporting evidence plus rested **or** controlled context. Supported race evidence
+retains separate distance/time and maximality fields; an explicitly nonmaximal race
+can retain supported measurement evidence while its comparison remains exploratory.
 Category/QC acceptance/unsupported legacy declarations never imply those fields.
 Absent qualification stays UNVERIFIED. Even supported attestation retains
-physiological UNVERIFIED and predictive UNTESTED. This branch tests the additive
-storage contract synthetically; integrated #30 verification follows its merge.
+physiological UNVERIFIED and predictive UNTESTED. Integrated #30 verification
+uses its real declaration and inspection endpoints after its merge.
 
 ## 9. Manual and scientific limitations
 

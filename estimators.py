@@ -13,6 +13,13 @@ import effort_math
 import efforts
 import estimator_math as maths
 
+try:
+    import workout_labels
+except ModuleNotFoundError as exc:
+    if exc.name != "workout_labels":
+        raise
+    workout_labels = None  # Standalone G4 before the additive #30 module is installed.
+
 
 DEFAULT_CONFIG_VERSION = "g4-comparisons-v1"
 VERSION_PATTERN = r"^[A-Za-z0-9._-]{1,80}$"
@@ -173,10 +180,40 @@ def report_candidates(report):
 class Capture:
     def __init__(self, db, archive, cutoff):
         self.db, self.archive, self.cutoff = db, archive, effort_math.stamp(cutoff)
+        self.context_read_at = canonical.knowledge_time()
         self.report = efforts.bests(TransactionView(db, archive), cutoff, 112)
         self.dynamic = {canonical.fingerprint(reference(c)): c for c in report_candidates(self.report)}
         self.loaded, self.observations, self.source_records, self.canonical_records = {}, {}, {}, {}
         self.archive_available = {}
+
+    def current_eligibility(self, ref, candidate, source):
+        """Historical evidence stays inspectable, but cannot bypass current eligibility."""
+        current = self.load(ref["activity_id"])
+        head = self.db.execute("SELECT version_id FROM canonical_activity_heads WHERE activity_id=?", (ref["activity_id"],)).fetchone()
+        state = {"activity_id": ref["activity_id"], "canonical_head_version_id": head[0] if head else None,
+                 "extraction": deepcopy({k: v for k, v in current.items() if k not in {"sources", "versions"}})}
+        reasons = []
+        if current["state"] != "PROCESSED":
+            return state, ["CURRENT_EFFORTS_NOT_PROCESSED"]
+        selected = efforts.select_source(current)
+        state["selected_source"] = deepcopy({k: v for k, v in (selected or {}).items() if k != "result"})
+        state["canonical"] = json.loads(self.db.execute("SELECT payload FROM canonical_activity_versions WHERE id=?",
+            (current["canonical_version_id"],)).fetchone()[0])
+        if current["version_id"] != ref["version_id"]:
+            reasons.append("SUPERSEDED_EXTRACTION_VERSION")
+        if (current["selected_fit_sha256"] != ref["source_sha256"] or
+                current["selected_source_version_id"] != source["source_version_id"]):
+            reasons.append("SOURCE_NOT_CURRENTLY_SELECTED")
+        if not current["running_sport"]:
+            reasons.append("CURRENT_ACTIVITY_NOT_RUNNING")
+        if current["recompute_required"] or not head or head[0] != current["canonical_version_id"]:
+            reasons.append("CURRENT_SOURCE_REBUILD_REQUIRED")
+        if selected and current["version_id"] == ref["version_id"] and selected["fit_sha256"] == ref["source_sha256"]:
+            rejected = efforts.rejected_intervals(self.db, current, selected)
+            state["rejected_intervals"] = sorted(rejected)
+            if effort_math.interval_key(candidate) in rejected:
+                reasons.append("CURRENT_REVIEW_REJECTION")
+        return state, reasons
 
     def load(self, aid, version=None):
         key = (aid, version)
@@ -200,10 +237,13 @@ class Capture:
                 raise efforts.NotFound("The effort does not belong to this source.")
             candidate = deepcopy(candidate)
         efforts.reviewed(self.db, candidate, ref["version_id"])
-        # #30 adds qualification to the existing append-only context ledger.
-        # Preserve the exact event; absent legacy qualification stays unknown.
-        if candidate.get("context_history") and "qualification" in candidate["context_history"][-1]:
-            candidate["provenance"]["qualification"] = deepcopy(candidate["context_history"][-1]["qualification"])
+        if workout_labels is not None:
+            # Declarations in effort_contexts are not normalized qualification.
+            # The shared adapter preserves evidence, context IDs and known-at in
+            # this same transaction. This is current-knowledge reconstruction,
+            # not an assertion that a later declaration was known at event T.
+            candidate = workout_labels.enrich_candidate(self.db, candidate, ref["version_id"], ref["activity_id"],
+                as_of=self.cutoff.isoformat(), knowledge_as_of=self.context_read_at)
         canonical_id = result["canonical_version_id"]
         if canonical_id not in self.canonical_records:
             self.canonical_records[canonical_id] = json.loads(self.db.execute(
@@ -220,6 +260,9 @@ class Capture:
             "selection_basis": "CURRENT_SOURCE" if result["current_version_id"] == ref["version_id"] and result["selected_fit_sha256"] == ref["source_sha256"] else "EXPLICIT_HISTORICAL_OR_ALTERNATE_SOURCE",
             "qualification": maths.qualification(candidate["provenance"]), "unavailable_reasons": []}
         reasons = evidence["unavailable_reasons"]
+        current_state, current_reasons = self.current_eligibility(ref, candidate, source)
+        evidence["current_eligibility"] = current_state
+        reasons.extend(current_reasons)
         if result["recompute_required"]:
             reasons.append("SOURCE_NORMALIZATION_REBUILD_REQUIRED")
         if candidate.get("attainment") != "ATTAINED":
@@ -236,13 +279,28 @@ class Capture:
         end = header.get("end_utc")
         if not end:
             reasons.append("MISSING_SOURCE_ACTIVITY_END")
-        elif any(effort_math.stamp(t) > self.cutoff for t in (end, source.get("last_sample_utc"), candidate["end_utc"]) if t):
+        elif any(effort_math.stamp(t) > self.cutoff for t in (end, source.get("last_sample_utc")) if t):
             reasons.append("FUTURE_ACTIVITY_OR_SAMPLE")
-        if effort_math.stamp(candidate["start_utc"]) >= effort_math.stamp(candidate["end_utc"]):
-            reasons.append("CONTRADICTORY_EFFORT_DATES")
+        evidence.update(age_days=None, age_coordinate_s=None, exact_end_clock=None)
+        record = self.source_records[source_id]
+        block = next((b for b in record["qc"]["blocks"] if b["block_index"] == candidate["block_index"]), None)
+        if block and candidate["start"].get("elapsed_coordinate_s") is not None and candidate["end"].get("elapsed_coordinate_s") is not None:
+            first_index = block["sample_indices"][0]
+            origin = record["canonical_source"]["trace"]["samples"]["rows"][first_index]["timestamp_utc"]
+            start_clock = effort_math.coordinate(candidate["start"]["elapsed_coordinate_s"])
+            end_clock = effort_math.coordinate(candidate["end"]["elapsed_coordinate_s"])
+            age = effort_math.duration(self.cutoff - effort_math.stamp(origin)) - end_clock
+            evidence.update(age_days=float(age / 86400), age_coordinate_s=str(age), exact_end_clock={
+                "origin_utc": origin, "origin_record_index": first_index, "elapsed_coordinate_s": str(end_clock),
+                "basis": "G2_EXACT_RUNNING_BLOCK_CLOCK"})
+            if start_clock >= end_clock:
+                reasons.append("CONTRADICTORY_EFFORT_DATES")
+            if age < 0 and "FUTURE_ACTIVITY_OR_SAMPLE" not in reasons:
+                reasons.append("FUTURE_ACTIVITY_OR_SAMPLE")
+        else:
+            reasons.append("EXACT_ENDPOINT_CLOCK_UNAVAILABLE")
         if not maths.positive(candidate["distance_m"]) or not maths.positive(candidate["elapsed_seconds"]):
             reasons.append("NONPOSITIVE_OR_NONFINITE_INPUT")
-        evidence["age_days"] = (self.cutoff - effort_math.stamp(candidate["end_utc"])).total_seconds() / 86400
         self.observations[oid] = evidence
         return evidence
 
@@ -276,7 +334,7 @@ class Capture:
 
 def window_reasons(observation, days):
     reasons = list(observation["unavailable_reasons"])
-    if observation["age_days"] > days:
+    if observation["age_coordinate_s"] is not None and effort_math.coordinate(observation["age_coordinate_s"]) > days * 86400:
         reasons.append("STALE_OUTSIDE_SELECTED_WINDOW")
     return reasons
 
@@ -352,8 +410,15 @@ def build(capture, request, config):
         "source_versions": {key: capture.source_records[key] for key in sorted({o["source_version_id"] for o in ledger})}}
     # No execution/capture timestamp is part of this hash. Evidence timestamps are
     # retained as evidence, including known-at times later than the event cutoff.
-    input_hash = canonical.fingerprint(evidence)
+    hash_evidence = deepcopy(evidence)
+    for observation in hash_evidence["observations"]:
+        # This is the adapter's execution-time query bound, not a context event's
+        # known_at. Retain the full payload in saved evidence, but exclude the
+        # changing read timestamp so unchanged inputs have a stable identity.
+        observation["candidate"].pop("context_knowledge_as_of", None)
+    input_hash = canonical.fingerprint(hash_evidence)
     return {"input_hash": input_hash, "event_cutoff_utc": request.cutoff, "knowledge_cutoff_utc": None,
+        "context_capture_known_at_utc": capture.context_read_at,
         "time_basis": "EVENT_TIME_RECONSTRUCTION", "knowledge_time_frozen": False,
         "algorithm_version": maths.ALGORITHM_VERSION, "code_sha256": CODE_SHA256,
         "config_version": request.config_version, "config": config, "observed_profile": profile,

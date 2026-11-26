@@ -6,7 +6,7 @@ import math
 
 CS_DISTANCES = (400, 800, 1000, 1500, 3000, 5000)
 WINDOWS = (56, 84, 112, 168)
-ALGORITHM_VERSION = "g4-centered-ols-riegel-v1"
+ALGORITHM_VERSION = "g4-centered-ols-riegel-v2"
 SENSITIVITY_LABEL = "Method sensitivity; NOT A 95% PERSONAL CONFIDENCE INTERVAL"
 
 
@@ -20,20 +20,23 @@ def positive(value):
 def qualification(provenance):
     """Consume #30 additively; never promote a category or QC verdict to a test."""
     q = provenance.get("qualification") or {}
-    supported = q.get("schema_version") == "effort-qualification-v1"
+    supported = (q.get("schema_version") == "effort-qualification-v1" and bool(q.get("context_id"))
+                 and bool(q.get("evidence_refs")))
     protocol = isinstance(provenance.get("protocol"), str) and bool(provenance["protocol"].strip())
-    test = (supported and provenance.get("verified_maximal") is True and protocol
-            and q.get("maximality") == "CONFIRMED" and q.get("rest_state") == "RESTED"
-            and q.get("control_state") == "CONTROLLED"
+    test = (supported and provenance.get("category") == "VERIFIED_TEST" and provenance.get("verified_maximal") is True and protocol
+            and q.get("maximality") == "CONFIRMED"
+            and (q.get("rest_state") == "RESTED" or q.get("control_state") == "CONTROLLED")
             and q.get("test_evidence_status") == "SUPPORTED_ATTESTATION")
-    race = (supported and q.get("race_evidence_status") == "SUPPORTED_ATTESTATION"
+    race = (supported and provenance.get("category") == "RACE" and q.get("race_evidence_status") == "SUPPORTED_ATTESTATION"
             and q.get("race_distance_verification") in {"ATTESTED", "DOCUMENTED"}
-            and q.get("race_time_verification") in {"ATTESTED", "DOCUMENTED"}
-            and q.get("maximality") != "NOT_MAXIMAL")
+            and q.get("race_time_verification") in {"ATTESTED", "DOCUMENTED"})
+    eligible = test or (race and q.get("maximality") != "NOT_MAXIMAL")
     return {"comparison_basis": "SUPPORTED_TEST_ATTESTATION" if test else "SUPPORTED_RACE_ATTESTATION" if race else "UNVERIFIED",
-            "credible_maximal_trial": bool(test), "comparison_eligible": bool(test or race),
+            "credible_maximal_trial": bool(test), "comparison_eligible": bool(eligible),
+            "race_evidence_supported": bool(race), "maximality": q.get("maximality", "UNKNOWN"),
             "qualification": q or None, "legacy_declaration": provenance.get("verified_maximal", False),
-            "reason": None if test or race else "No supported test/race qualification; labels and legacy declarations alone do not establish maximality."}
+            "reason": None if eligible else "Race distance/time evidence is supported, but the effort is explicitly nonmaximal; comparison remains exploratory." if race else
+                      "No supported test/race qualification; labels and legacy declarations alone do not establish maximality."}
 
 
 def overlap(rows):
