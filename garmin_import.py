@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 
-from fit_data import FitError
+from fit_data import FitError, original_format
 from fit_import import index_originals, unpack_original
 from garmin_activity import RUN_TYPES, activity_fields, local_timestamp
 import garmin_coverage
@@ -42,7 +42,25 @@ def cached_source(archive, digest):
         return None
 
 
-def original_sources(client, store, archive, garmin_id, scan_id):
+def read_archived_original(store, archive, import_id, garmin_id, digest, data, error_format):
+    # Acquisition is already observable even if decoder or identity work fails.
+    # Both writes run outside the later canonical/ownership transaction.
+    fmt = original_format(data)
+    kind = "original_error" if fmt == "unknown" else "original"
+    store.record_raw_source(import_id, kind, digest, fmt, provider_id=garmin_id)
+
+    def member_stored(sha):
+        store.record_raw_source(import_id, "fit", sha, "fit", provider_id=garmin_id)
+
+    try:
+        return unpack_original(archive, data, member_stored=member_stored)
+    except FitError:
+        store.record_raw_source(import_id, "original_error", digest, error_format, provider_id=garmin_id)
+        raise
+
+
+def original_sources(client, store, archive, garmin_id, scan):
+    scan_id, import_id = scan["id"], scan["import_id"]
     sources = []
     for digest, file_format in store.originals(garmin_id):
         try:
@@ -54,7 +72,7 @@ def original_sources(client, store, archive, garmin_id, scan_id):
             sources.append(("original_unavailable", digest, file_format))
         else:
             try:
-                file_format, fit = unpack_original(archive, cached)
+                file_format, fit = read_archived_original(store, archive, import_id, garmin_id, digest, cached, file_format)
                 return [*sources, ("original", digest, file_format)], None, fit
             except FitError:
                 sources.append(("original_error", digest, file_format))
@@ -70,7 +88,7 @@ def original_sources(client, store, archive, garmin_id, scan_id):
         return sources, "Original unavailable. Garmin returned an empty file. Retry these dates.", None
     try:
         digest = archive.put(data)
-        file_format, fit = unpack_original(archive, data)
+        file_format, fit = read_archived_original(store, archive, import_id, garmin_id, digest, data, "unknown")
     except FitError as err:
         return [*sources, ("original_error", digest, "unknown")], f"Original unavailable. {err} Retry these dates.", None
     except OSError:
@@ -102,6 +120,7 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, ver
     if data is None:
         data = client.get(f"/activity-service/activity/{garmin_id}", "Garmin activity detail", raw=True)
     detail_digest = archive.put(data)
+    store.record_raw_source(scan["import_id"], "detail", detail_digest, "json", provider_id=garmin_id)
     detail = decode(data, "detail", dict)
     fields = activity_fields(garmin_id, listed, detail)
     day = fields["local_date"]
@@ -126,7 +145,7 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, ver
         sources.insert(0, ("list", page_digest, "json"))
     warning = fit = None
     if status == "saved":
-        originals, warning, fit = original_sources(client, store, archive, garmin_id, scan_id)
+        originals, warning, fit = original_sources(client, store, archive, garmin_id, scan)
         sources.extend(originals)
     # Keep the wire bytes even when only their JSON serialization changed.
     detail_changed = detail_digest not in versions and not any(
@@ -171,6 +190,7 @@ def scan_range(client, store, archive, scan, problems=None):
         try:
             data = client.search({"startDate": start, "endDate": end, "start": offset, "limit": PAGE_SIZE}, raw=True)
             page_digest = archive.put(data)
+            store.record_raw_source(import_id, "list", page_digest, "json")
             page = decode(data, "activity list", list)
         except runs.ConnectionProblem as err:
             if problems is not None:

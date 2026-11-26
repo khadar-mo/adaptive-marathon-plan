@@ -3,7 +3,7 @@ from datetime import timedelta
 from io import BytesIO
 import json
 import math
-from zipfile import ZipFile
+from zipfile import ZipFile, is_zipfile
 
 from garmin_fit_sdk import Decoder, Profile, Stream, convert_timestamp_to_datetime
 
@@ -18,6 +18,12 @@ DECODE_OPTIONS = {
     "expand_sub_fields": False,
     "merge_heart_rates": False,
 }
+
+
+def original_format(data):
+    if data[8:12] == b".FIT":
+        return "fit"
+    return "zip" if is_zipfile(BytesIO(data)) else "unknown"
 
 
 def fit_member(data):
