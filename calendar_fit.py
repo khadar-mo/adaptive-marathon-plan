@@ -1,7 +1,7 @@
 """Place fixed running sessions in immutable London calendar windows."""
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import re
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
@@ -192,6 +192,13 @@ def check_calendar(db, query):
             if high is None:
                 missing.append({"session_id": fixed.session_id, "kind": "MISSING_PACE_EVIDENCE",
                                 "block_ids": dose["missing_pace_block_ids"]})
+                # Missing positive running time is strictly above zero. Keep
+                # all supported movement and rest in this necessary lower bound.
+                with localcontext() as ctx:
+                    ctx.prec = 130
+                    known = Decimal(dose["rest_s"]) + sum(Decimal(b["running_lower_s"]) for b in dose["blocks"]
+                                                          if b["running_lower_s"] is not None)
+                    row["structural_minimum_seconds"] = int(known.to_integral_value(rounding=ROUND_FLOOR)) + 1
         sessions.append(row)
     result = {"status": "FEASIBILITY_UNCERTAIN", "policy_version": POLICY, "week": query.week,
               "availability_version_id": query.availability_version_id, "sessions": sessions, "placements": [],
@@ -203,21 +210,24 @@ def check_calendar(db, query):
               "conservative_fit": {"status": "UNDETERMINED"}, "search_nodes": 0}
     if calendar is None:
         missing.append({"kind": "AVAILABILITY_VERSION_UNAVAILABLE"})
-    else:
-        cutoff = calendar["received_at"]
-        if query.preferences_version_id:
-            preference = runner_settings.read_record(db, "preferences", version_id=query.preferences_version_id)
-            if preference is None:
-                missing.append({"kind": "PREFERENCES_VERSION_UNAVAILABLE", "version_id": query.preferences_version_id})
-            else:
-                cutoff = max(cutoff, preference["decided_at"] or cutoff)
-        if not missing:
-            limits = runner_settings.calendar_limits(db, query.week, preferences_version=query.preferences_version_id,
-                                                     availability_version=query.availability_version_id, as_of=cutoff)
-            result["assumptions"].update(preferences_version_id=limits["preferences_version"],
-                                         preferences_daily_cap=limits["preferences_cap"])
-    if missing:
         return {**result, "reason": "MISSING_INPUT", "missing": missing}
+    cutoff = calendar["received_at"]
+    selected_preference = query.preferences_version_id
+    preference_missing = False
+    if query.preferences_version_id:
+        preference = runner_settings.read_record(db, "preferences", version_id=query.preferences_version_id)
+        if preference is None:
+            missing.append({"kind": "PREFERENCES_VERSION_UNAVAILABLE", "version_id": query.preferences_version_id})
+            # The original settings add no daily cap. They can bound failure
+            # irrespective of the missing preference but cannot certify a fit.
+            selected_preference = runner_settings.baseline(db, "preferences")["version_id"]
+            preference_missing = True
+        else:
+            cutoff = max(cutoff, preference["decided_at"] or cutoff)
+    limits = runner_settings.calendar_limits(db, query.week, preferences_version=selected_preference,
+                                             availability_version=query.availability_version_id, as_of=cutoff)
+    result["assumptions"].update(preferences_version_id=None if preference_missing else limits["preferences_version"],
+                                 preferences_daily_cap=limits["preferences_cap"])
     windows = [(datetime.fromisoformat(w["start_utc"]), datetime.fromisoformat(w["end_utc"])) for w in calendar["union_windows"]]
     midnights = [datetime.combine(first + timedelta(days=i), time(), LONDON).astimezone(timezone.utc) for i in range(8)]
     days = []
@@ -232,6 +242,30 @@ def check_calendar(db, query):
     result["start_day_limits"] = [{**d, "occupied_running_starts": used[d["date"]],
                                    "remaining_starts": day[2] if d["state"] != "UNKNOWN" else None}
                                   for d, day in zip(limits["days"], days)]
+    # Unknown windows may extend into later dates. Test the broadest permitted
+    # calendar before declaring failure independent of the missing facts.
+    possible, optimistic = free, list(days)
+    if unknown:
+        result["unknown_dates"] = [calendar["days"][i]["date"] for i in unknown]
+        max_starts = limits["preferences_cap"] if limits["preferences_cap"] is not None else 10
+        for i in unknown:
+            a, b, _ = days[i]
+            optimistic[i] = a, b, max(0, max_starts - used[calendar["days"][i]["date"]])
+        possible = free_intervals([*windows, (midnights[unknown[0]], week_end)], busy, earliest)
+    broadest = "OPTIMISTIC_UNKNOWN_DAYS" if unknown else "DECLARED_WINDOWS"
+    if missing:
+        result.update(missing=missing, reason="MISSING_INPUT")
+        # Every positive running session consumes a start and at least one
+        # whole scheduling second, whatever its still-unknown pace.
+        minimum = [{**s, "duration_lower_seconds": s.get("duration_lower_seconds") or s.get("structural_minimum_seconds", 1)}
+                   for s in sessions]
+        place, reason, nodes, proof = search(minimum, possible, optimistic, query.search_budget, fastest=True)
+        result["search_nodes"] = nodes
+        if place is None and reason != "SEARCH_BUDGET":
+            proof["duration_basis"] = "STRUCTURAL_MINIMUM"
+            result.update(status="IMPOSSIBLE", reason=reason, proof=proof, proof_calendar=broadest)
+            result["conservative_fit"] = {"status": "UNSATISFIED_IN_DECLARED_WINDOWS", "reason": reason, "proof": proof}
+        return result
     placement, reason, nodes, proof = search(sessions, free, days, query.search_budget)
     result.update(reason=reason, search_nodes=nodes, proof=proof)
     conservative = "SATISFIED" if placement is not None else "UNDETERMINED" if reason == "SEARCH_BUDGET" else "UNSATISFIED_IN_DECLARED_WINDOWS"
@@ -247,24 +281,26 @@ def check_calendar(db, query):
                                  "start_local_date": a.astimezone(LONDON).date().isoformat(),
                                  "source_window_ids": [sid for sid, start, end in sources if start < b and end > a]}
                                 for key, a, b in placement]
-    elif reason != "SEARCH_BUDGET" and (unknown or any(s["duration_lower_seconds"] != s["duration_upper_seconds"] for s in sessions)):
-        # Unknown windows may span later dates. Give an optimistic calendar
-        # every instant from the first unknown day and the schema maximum
-        # of ten starts on each unknown day. Only its failure can prove impossibility.
-        optimistic = list(days)
-        max_starts = limits["preferences_cap"] if limits["preferences_cap"] is not None else 10
-        for i in unknown:
-            a, b, _ = days[i]
-            optimistic[i] = a, b, max(0, max_starts - used[calendar["days"][i]["date"]])
-        possible = free_intervals([*windows, (midnights[unknown[0]], week_end)], busy, earliest) if unknown else free
-        maybe, reason, more, optimistic_proof = search(sessions, possible, optimistic, query.search_budget - nodes, fastest=True)
+        return result
+    if reason == "SEARCH_BUDGET":
+        return result
+    if any(s["duration_lower_seconds"] != s["duration_upper_seconds"] for s in sessions):
+        fast, reason, more, proof = search(sessions, free, days, query.search_budget - nodes, fastest=True)
         result["search_nodes"] += more
-        result["unknown_dates"] = [calendar["days"][i]["date"] for i in unknown]
-        if maybe is None and reason != "SEARCH_BUDGET":
-            result.update(status="IMPOSSIBLE", reason=reason, proof=optimistic_proof,
-                          proof_calendar="OPTIMISTIC_UNKNOWN_DAYS" if unknown else "DECLARED_WINDOWS")
-        else:
-            result["reason"] = ("UNKNOWN_AVAILABILITY" if unknown else "PACE_RANGE_STRADDLES_CALENDAR") if maybe is not None else "SEARCH_BUDGET"
-    elif reason != "SEARCH_BUDGET":
-        result.update(status="IMPOSSIBLE", proof_calendar="DECLARED_WINDOWS")
+        if fast is not None:
+            result["reason"] = "PACE_RANGE_STRADDLES_CALENDAR"
+            return result
+        if reason == "SEARCH_BUDGET":
+            result["reason"] = reason
+            return result
+    if unknown:
+        maybe, reason, more, proof = search(sessions, possible, optimistic, query.search_budget - result["search_nodes"], fastest=True)
+        result["search_nodes"] += more
+        if maybe is not None:
+            result["reason"] = "UNKNOWN_AVAILABILITY"
+            return result
+        if reason == "SEARCH_BUDGET":
+            result["reason"] = reason
+            return result
+    result.update(status="IMPOSSIBLE", reason=reason, proof=proof, proof_calendar=broadest)
     return result

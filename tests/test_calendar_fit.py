@@ -201,6 +201,48 @@ def test_budget_exhaustion_and_exhaustive_nonpacking_proof(client):
     assert not full["placements"]
 
 
+def test_missing_pace_cannot_mask_impossible_calendar_structure(client):
+    fixed = save_session(client, "unpaced", [block("run", "EASY_VOLUME", 1000)])
+    closed = save_week(client, week_input(WEEK))
+    q = request_for(closed, [fixed])
+    result = post(client, "/api/calendar-fit", q)
+    assert result["status"] == "IMPOSSIBLE" and result["reason"] == "TOTAL_FREE_TIME"
+    assert result["proof"]["available_whole_seconds"] == result["proof"]["maximum_starts"] == 0
+    assert result["proof"]["duration_basis"] == "STRUCTURAL_MINIMUM"
+    assert result["missing"] == [{"session_id":"unpaced", "kind":"MISSING_PACE_EVIDENCE", "block_ids":["run"]}]
+    unknown_cap = post(client, "/api/calendar-fit", {**q, "preferences_version_id":"0"*64})
+    assert unknown_cap["status"] == "IMPOSSIBLE"
+    assert {r["kind"] for r in unknown_cap["missing"]} == {"MISSING_PACE_EVIDENCE", "PREFERENCES_VERSION_UNAVAILABLE"}
+    doc = week_input(WEEK, request_id="one-slot", expected_revision=closed["version_id"])
+    available(doc, 0, [window(WEEK+"T08:00", WEEK+"T09:00")])
+    row = save_week(client, doc)
+    q = request_for(row, [fixed])
+    assert post(client, "/api/calendar-fit", q)["status"] == "FEASIBILITY_UNCERTAIN"
+    rested = save_session(client, "rests", [block("run", "EASY_VOLUME", 1000, rest_after_s="3600")])
+    result = post(client, "/api/calendar-fit", request_for(row, [rested]))
+    assert result["status"] == "IMPOSSIBLE" and result["proof"]["required_whole_seconds"] == 3601
+    q["occupied"] = [{"id":"early-run", "kind":"RUNNING", "start_utc":WEEK+"T06:00Z", "end_utc":WEEK+"T07:00Z"}]
+    result = post(client, "/api/calendar-fit", q)
+    assert result["status"] == "IMPOSSIBLE" and result["reason"] == "START_DAY_LIMITS" and result["missing"]
+
+
+def test_pace_and_unknown_days_are_independently_explained(client):
+    doc = available(week_input(WEEK), 0, [window(WEEK+"T08:00", WEEK+"T08:00:10")])
+    sunday = doc["days"][6]["date"]
+    doc["days"][6].update(state="UNKNOWN", max_sessions=None)
+    row = save_week(client, doc)
+    occupied = [{"id":"away", "kind":"NON_RUNNING", "start_utc":sunday+"T00:00Z", "end_utc":"2026-11-30T00:00Z"}]
+    q = request_for(row, [timed(client, "nine-eleven", 9, 11)], occupied=occupied)
+    ans = post(client, "/api/calendar-fit", q)
+    assert (ans["status"], ans["reason"], ans["unknown_dates"]) == ("FEASIBILITY_UNCERTAIN", "PACE_RANGE_STRADDLES_CALENDAR", [sunday])
+    assert ans["conservative_fit"]["status"] == "UNSATISFIED_IN_DECLARED_WINDOWS" and not ans["placements"]
+    # With no Monday fit even at the fastest pace, Sunday's declaration can
+    # matter precisely when its time is not already occupied.
+    q["sessions"] = [timed(client, "eleven-twelve", 11, 12)]
+    assert post(client, "/api/calendar-fit", q)["status"] == "IMPOSSIBLE"
+    assert post(client, "/api/calendar-fit", {**q, "occupied":[]})["reason"] == "UNKNOWN_AVAILABILITY"
+
+
 def test_immutable_template_and_preference_replay(client):
     row = monday(client, [("08:00", "09:00")], limit=2)
     fixed = save_session(client, "fixed", [fixed_block("easy", "EASY_VOLUME", 1000, min_m=900, max_m=1100)])

@@ -364,8 +364,11 @@ of `sessions`. Each session has a distinct `session_id`, `template_id`,
 `earliest_start_utc` and occupied `{id,kind,start_utc,end_utc}` intervals use
 absolute timestamps. `RUNNING` occupancy consumes a start on its actual London
 start date. `NON_RUNNING` occupancy blocks time. Both retain their supplied
-IDs. Weekly limits are intersected with the runner preference known when
-availability was recorded, or an explicitly supplied `preferences_version_id`.
+IDs. The browser checks the runner’s current daily preference at submission and
+displays the exact revision used. Select an earlier preference revision to
+replay its cap. API callers can pin `preferences_version_id` directly. When
+omitted from the JSON request, the API uses the preference known when that
+immutable availability revision was recorded.
 
 `FEASIBLE` supplies a placement at each workout’s conservative upper duration.
 The check rounds once after summing all moving blocks and stationary rests.

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 import availability
 from availability_web import e, invalid, reject_constant, unique_object
 from calendar_fit import Check, LONDON, check_calendar
+import runner_settings
 import views
 import workout_templates as templates
 
@@ -75,8 +76,15 @@ document.getElementById("fit-form").addEventListener("submit", async event => {
 </script>"""
 
 
+def preference_label(record):
+    cap = record["max_sessions_per_day"]
+    limit = "weekly limits only" if cap is None else f"maximum {cap} per day"
+    return f'Revision {record["revision"]} · {limit}'
+
+
 @router.get("/calendar-fit", response_class=HTMLResponse)
-def diagnostic(request: Request, week: str | None = None, availability_version_id: templates.Hash | None = None):
+def diagnostic(request: Request, week: str | None = None, availability_version_id: templates.Hash | None = None,
+               preferences_version_id: templates.Hash | None = None):
     if week is None:
         today = datetime.now(LONDON).date()
         week = (today - timedelta(days=today.weekday())).isoformat()
@@ -85,9 +93,13 @@ def diagnostic(request: Request, week: str | None = None, availability_version_i
         state = availability.read(store, week)
         if availability_version_id and all(v["id"] != availability_version_id for v in state["versions"]):
             raise ValueError("That availability revision does not belong to this week.")
+        prefs = runner_settings.read(store, "preferences")
+        if preferences_version_id and all(p["version_id"] != preferences_version_id for p in prefs["versions"]):
+            raise ValueError("The selected runner preference revision is unavailable.")
         with store.history() as db:
             revisions = [v for template in templates.index(db)
                          for v in templates.index(db, template_id=template["template_id"])]
+            pref_revisions = [runner_settings.read_record(db, "preferences", version_id=p["version_id"]) for p in prefs["versions"]]
     except (ValueError, OverflowError) as exc:
         invalid(exc)
     body = (f'<form method="get"><label>Week beginning Monday<input type="date" name="week" value="{e(week)}" required></label>'
@@ -105,8 +117,12 @@ def diagnostic(request: Request, week: str | None = None, availability_version_i
                        f'Revision {v["revision"]} · {e(v["received_at"])}</option>' for v in state["versions"])
     options = ''.join(f'<option value="{e(v["template_id"])}/{e(v["version_id"])}">'
                       f'{e(v["name"])} · revision {v["revision"]} · {e(v["template_id"])}</option>' for v in revisions)
+    choices = f'<option value="current">Current at check time · {e(preference_label(prefs["current"]))}</option>'
+    choices += ''.join(f'<option value="{e(p["version_id"])}" {"selected" if p["version_id"] == preferences_version_id else ""}>'
+                       f'{e(preference_label(p))} · {e(p["decided_at"] or "original")}</option>' for p in pref_revisions)
     body += (f'<form id="fit-form" method="post" action="/calendar-fit"><input type="hidden" name="week" value="{e(week)}">'
              f'<label>Availability revision<select name="availability_version_id">{versions}</select></label>'
+             f'<label>Runner preference revision<select name="preferences_version_id">{choices}</select></label>'
              '<div id="sessions">' + session_row(options) + '</div><button type="button" id="add-session">Add workout</button>'
              '<label>Earliest allowed start (optional, with UTC offset)<input name="earliest" placeholder="2026-01-12T08:00:00+00:00"></label>'
              '<label>Occupied intervals (optional JSON list)<textarea name="occupied" rows="3" placeholder="[]"></textarea></label>'
@@ -147,10 +163,13 @@ async def form_result(request: Request):
             key, version = ref.split("/", 1)
             sessions.append({"session_id": f"session-{i}", "template_id": key, "template_version_id": version,
                              "distances_m": unpack(fixed, "{}")})
-        query = Check.model_validate({"week": form.get("week"), "availability_version_id": form.get("availability_version_id"),
-                                      "sessions": sessions, "occupied": unpack(form.get("occupied"), "[]"),
-                                      "earliest_start_utc": form.get("earliest") or None})
         with request.app.state.store.history() as db:
+            chosen = form.get("preferences_version_id") or "current"
+            if chosen == "current":
+                chosen = runner_settings.read_record(db, "preferences")["version_id"]
+            query = Check.model_validate({"week": form.get("week"), "availability_version_id": form.get("availability_version_id"),
+                                          "preferences_version_id": chosen, "sessions": sessions,
+                                          "occupied": unpack(form.get("occupied"), "[]"), "earliest_start_utc": form.get("earliest") or None})
             answer = check_calendar(db, query)
     except (ValueError, OverflowError, RecursionError) as exc:
         return HTMLResponse(views.page("Check workout time", f'<p role="alert">{e(exc)}</p>'
@@ -159,6 +178,11 @@ async def form_result(request: Request):
             f'<p>Conservative upper duration · {e(answer["conservative_fit"]["status"])}</p>')
     if answer["fixed_total_m"] is not None:
         body += f'<p>Fixed running distance · {answer["fixed_total_m"]:,} m</p>'
+    preference = answer["assumptions"].get("preferences_version_id")
+    if preference:
+        cap = answer["assumptions"]["preferences_daily_cap"]
+        label = f"maximum {cap} per day" if cap is not None else "weekly limits only"
+        body += f'<p>Runner preference · <a href="/runner-settings/preferences/versions/{e(preference)}">{e(label)}</a></p>'
     sessions = {s["session_id"]: s for s in answer["sessions"]}
     if answer["placements"]:
         body += '<ol>'
@@ -170,7 +194,8 @@ async def form_result(request: Request):
         body += '</ol>'
     for reason in answer.get("missing", []):
         body += f'<p>{e(reason.get("session_id", "Calendar"))} · {e(reason["kind"])} · {e(", ".join(reason.get("block_ids", [])))}</p>'
-    args = urlencode({"week": query.week, "availability_version_id": query.availability_version_id})
+    args = urlencode({"week": query.week, "availability_version_id": query.availability_version_id,
+                      "preferences_version_id": query.preferences_version_id})
     body += (f'<p><a href="/calendar-fit?{e(args)}">Check another placement</a></p>'
              f'<details><summary>Exact UTC intervals, source revisions and assumptions</summary>'
              f'<pre style="white-space:pre-wrap">{e(json.dumps(answer, ensure_ascii=False, indent=2))}</pre></details>')
