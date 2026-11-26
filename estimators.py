@@ -99,9 +99,12 @@ class Calculation(Model):
 
     @model_validator(mode="after")
     def timestamp(self):
-        self.cutoff = effort_math.stamp(self.cutoff).astimezone(timezone.utc).isoformat()
-        # The longest required window must be representable, even for malformed dates.
-        effort_math.stamp(self.cutoff) - timedelta(days=max(maths.WINDOWS))
+        try:
+            self.cutoff = effort_math.stamp(self.cutoff).astimezone(timezone.utc).isoformat()
+            # Keep date-window failures in validation, not an unhandled 500.
+            effort_math.stamp(self.cutoff) - timedelta(days=max(maths.WINDOWS))
+        except OverflowError:
+            raise ValueError("The event cutoff must support all requested lookback windows in UTC.") from None
         for sources in (self.riegel_sources, self.cs_sources):
             if sources is not None and len({canonical.fingerprint(r.model_dump()) for r in sources}) != len(sources):
                 raise ValueError("Do not select an identical source effort twice.")

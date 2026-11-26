@@ -67,6 +67,7 @@ def test_T07_T08_two_distances_and_perfect_easy_inputs_do_not_validate_physiolog
     ([observation(d, t) for d, t in ((400, 0), (800, 300), (1000, 400))], 'NONPOSITIVE_OR_NONFINITE_INPUT'),
     ([observation(d, t) for d, t in ((400, math.inf), (800, 300), (1000, 400))], 'NONPOSITIVE_OR_NONFINITE_INPUT'),
     ([observation(d, t) for d, t in ((400, 1e308), (800, 1), (1000, 2))], 'NONCOMPUTABLE_NUMERICAL_FIT'),
+    ([observation(d, d * 1e-306) for d in (400, 800, 1000)], 'NONCOMPUTABLE_NUMERICAL_FIT'),
 ])
 def test_undefined_fits_are_inspectable_without_nan_or_invented_points(rows, reason):
     fit = maths.ols(rows, POLICY)
@@ -324,7 +325,8 @@ async def test_configuration_immutable_validation_and_empty_install_read_only(hi
         assert (await client.get('/estimators')).status_code == 200
         assert not (tmp_path / 'runs.sqlite3').exists()
         assert (await client.post('/api/estimators', json={'cutoff': '2026-01-01'})).status_code == 422
-        for config in ({'riegel_k': True}, {'riegel_k': 0}, {'target_distances_m': [True]}, {'cs_distances_m': [1609.344]},
+        assert (await client.post('/api/estimators', json={'cutoff': '0001-01-01T00:00:00Z'})).status_code == 422
+        for config in ({'riegel_k': True}, {'riegel_k': 0}, {'target_distances_m': [True]}, {'target_distances_m': [10 ** 1000]}, {'cs_distances_m': [1609.344]},
                        {'recent_days': 113}, {'review_policy': {'d_prime_min_m': 200, 'd_prime_max_m': 100}}):
             assert (await client.post('/api/estimators/configurations', json={'version': 'bad', 'config': config})).status_code == 422
         await three_config(client)

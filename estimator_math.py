@@ -11,7 +11,10 @@ SENSITIVITY_LABEL = "Method sensitivity; NOT A 95% PERSONAL CONFIDENCE INTERVAL"
 
 
 def positive(value):
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    try:
+        return type(value) in (int, float) and math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 def qualification(provenance):
@@ -71,6 +74,8 @@ def ols(rows, policy):
         mt, md = sum(qt) / len(qt), sum(qd) / len(qd)
         dt, dd = [t - mt for t in qt], [d - md for d in qd]
         denominator = sum(x * x for x in dt)
+        if denominator and not float(denominator):
+            raise ArithmeticError("Centered diagnostic would underflow binary64.")
         result["centered_sums"] = {"mean_time_s": float(mt), "mean_distance_m": float(md), "time_sum_squares": float(denominator),
                                    "arithmetic": "Exact rational centered sums of supplied numeric values; binary64 output"}
         if not denominator:

@@ -88,11 +88,19 @@ The Riegel expectation uses an independent exponential/log formulation.
 
 ## 5. Test results and regression sensitivity
 
-The focused numerical/public suite passes **21 tests**. Both Chromium workflows
+The focused numerical/public suite passes **22 tests**. Both Chromium workflows
 have passed on the assigned headless Chromium executable, including desktop
 1280 px/mobile 375 px, keyboard operations, no overflow and no console warnings.
-Final broad-suite and deliberate-regression results are recorded below after the
-final check. The repository defines pytest CI, with no separate lint/typecheck job.
+The repository defines pytest CI, with no separate lint/typecheck job. The full
+repository suite is running; its final result is recorded in the PR before merge.
+
+Two deliberate regressions in an isolated archive of the working checkpoint were
+caught by their public-interface tests: forcing the OLS slope to zero broke T06;
+keeping only the fastest projection per target broke the slower-source Riegel
+regression. Both copied files were restored byte-for-byte, and the active checkout
+was never mutated for these checks. Adversarial validation also reproduced a
+year-0001 window-underflow exception; it now returns 422. Huge JSON integers and
+underflowing numeric diagnostics are handled without unhandled exceptions/NaN.
 
 ## 6. Public API and CLI inspection
 
