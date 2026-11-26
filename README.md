@@ -416,6 +416,8 @@ Open **Fitness profile** from History to inspect observed bests, recent windows,
 
 Use `GET /api/fitness` to read the same evidence. `POST /api/fitness/capture` freezes it. An ordinary run can change the workload while a historical best and its source remain intact. The [fitness profile contract](docs/specs/g5-acceptance.md) documents versioned inputs, intervals, baselines, archive references and replay.
 
+Open **Fitness snapshots and benchmarks** at `/validation` to inspect the history known at a cutoff, compare revisions, schedule a frozen forecast, and record a qualifying later result. The [snapshot and benchmark contract](docs/specs/g6-acceptance.md) describes the update, replay and scoring interfaces.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.
