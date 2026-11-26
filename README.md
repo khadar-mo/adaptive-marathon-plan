@@ -216,8 +216,25 @@ The verification page records **Accept**, **Reject** and **Annotate** with actor
 note and timestamp. Acceptance does not clear computed QC; rejection excludes the
 reviewed interval from selection. **Recorded effort context** stores explicit
 categories, tags and corrections separately. A race label is not maximality proof;
-an explicit maximal declaration requires a recorded test protocol and remains a
-user attestation, not scientific validation.
+a verified-test declaration requires a recorded test protocol. A race's maximality
+stays independent of its distance/time verification. These are recorded declarations,
+not scientific validation.
+
+**Workout labels** records planned intent, inferred completed structure and runner
+corrections independently. Open it from an activity or the main navigation. The
+inference uses exact configured workout-step names only where recorded laps link
+to those steps; unsupported/mixed patterns stay UNKNOWN. Titles alone are hints.
+Corrections retain the original evidence and require the current revision.
+Upload an owned label JSON document or edit the forms; classifier mappings are
+editable immutable versions. Strength remains in Context and adds no running km.
+
+Effort verification also records separate rest/control state, explicit maximal or
+nonmaximal declarations, race distance/time evidence and supporting references.
+A legacy or unsupported VERIFIED_TEST/RACE label remains an unverified declaration.
+ATTESTED and DOCUMENTED remain distinct; neither means independent scientific
+validation. Historical context controls separate event time from knowledge time.
+See [workout-label contracts](docs/specs/workout-provenance.md) and the
+[acceptance record](docs/specs/workout-provenance-acceptance.md).
 
 Recent windows use segment end inclusively in `[T−W,T]` and require the whole source
 activity to end by T. The 112-day default and 56/84/168-day comparisons are provisional.
