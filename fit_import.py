@@ -1,6 +1,8 @@
 """Archive uploaded files before replying and import their recorded sessions offline."""
 import sqlite3
 
+import source_receipts
+
 from fit_data import FitError, decode_fit, fit_member
 from fit_store import store_laps
 
@@ -64,6 +66,8 @@ def stage_uploads(store, archive, import_id, files):
             digest = archive.put_file(file.file)
             with store.connect(write=True) as db:
                 db.execute("UPDATE fit_uploads SET sha256=? WHERE import_id=? AND ordinal=?", (digest, import_id, ordinal))
+                source_receipts.record_sources(db, [("fit", digest, "fit")], "FIT_UPLOAD_ARCHIVED",
+                                               import_id=import_id, ordinal=ordinal)
         except (OSError, sqlite3.Error):
             store.issue(import_id, name, "Archive upload", "Check private archive and database permissions and upload again.")
 

@@ -23,6 +23,7 @@ import fit_store
 import garmin_activity
 import garmin_coverage
 import provider_modes
+import source_receipts
 import workload_inputs
 import workout_labels
 
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + workload_inputs.SCHEMA
+""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + workload_inputs.SCHEMA + source_receipts.SCHEMA
 
 
 def prepare_schema(db):
@@ -276,6 +277,8 @@ class Store:
                         SELECT a.garmin_id, s.sha256 FROM activity_sources s JOIN activities a ON a.id=s.activity_id
                         WHERE a.garmin_id IS NOT NULL AND s.kind IN ('original', 'original_unavailable')
                         AND NOT EXISTS (SELECT 1 FROM garmin_original_versions v WHERE v.original_sha=s.sha256)""")
+                if create:
+                    source_receipts.initialize(db)
                 yield db
 
     @contextmanager
@@ -348,6 +351,11 @@ class Store:
         with self.connect() as db:
             return [i for i in garmin_coverage.outstanding_items(db)
                     if (span := garmin_coverage.item_range(i))[0] <= end and start <= span[1]]
+
+    def record_raw_source(self, import_id, kind, sha, fmt, *, provider_id=None):
+        with self.connect(write=True) as db:
+            source_receipts.record_sources(db, [(kind, sha, fmt)], "GARMIN_ARCHIVE",
+                                           import_id=import_id, provider_id=provider_id)
 
     def observe(self, scan_id, garmin_id, local_date, page_sha, record_sha, from_search):
         with self.connect(write=True) as db:
@@ -435,6 +443,10 @@ class Store:
              scan_id=None, detail_sha=None, detail_changed=False, status="saved"):
         gid = fields["garmin_id"]
         with self.connect(write=True) as db:
+            observed = list(sources)
+            if fit:
+                observed.append(("fit", fit["sha256"], "fit"))
+            source_receipts.record_sources(db, observed, "IMPORT_SOURCE_REFERENCE", import_id=import_id, provider_id=gid)
             if scan_id is not None:
                 fit_store.reconcile_scan_edits(db, fields, fit, sources, status, now())
             if status != "saved":
@@ -456,6 +468,7 @@ class Store:
                 if owner:
                     fit_store.save_sources(db, owner["id"], sources, now())
                     canonical.persist(db, self.archive, owner["id"])
+                source_receipts.finish(db, [owner["id"] if owner else None], import_id, "IMPORT_CLASSIFICATION")
                 return None
             payload = {"fields": fields, "sources": sources, "warning": warning, "fit": fit,
                        "item": item or gid, "detail_changed": detail_changed}
@@ -466,6 +479,7 @@ class Store:
                            ("saved" if target is not None else "pending_identity", detail_sha, warning is None, scan_id, gid))
             if target is not None:
                 canonical.persist(db, self.archive, target)
+            source_receipts.finish(db, [target], import_id, "IMPORT_IDENTITY")
             return target
 
     def resolve(self, import_id, issue_id, action, activity_id, date):
@@ -486,6 +500,8 @@ class Store:
             # and possibly its headline. Deleted merge donors retain old versions.
             if previous and previous["id"] != target:
                 canonical.persist(db, self.archive, previous["id"])
+            source_receipts.finish(db, [target, previous["id"] if previous else None],
+                                   import_id, "REVIEW_RESOLUTION", review_issue=issue_id)
             return target
 
     @staticmethod

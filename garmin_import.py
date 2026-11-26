@@ -102,6 +102,7 @@ def import_one(client, store, archive, scan, garmin_id, listed, page_digest, ver
     if data is None:
         data = client.get(f"/activity-service/activity/{garmin_id}", "Garmin activity detail", raw=True)
     detail_digest = archive.put(data)
+    store.record_raw_source(scan["import_id"], "detail", detail_digest, "json", provider_id=garmin_id)
     detail = decode(data, "detail", dict)
     fields = activity_fields(garmin_id, listed, detail)
     day = fields["local_date"]
@@ -171,6 +172,7 @@ def scan_range(client, store, archive, scan, problems=None):
         try:
             data = client.search({"startDate": start, "endDate": end, "start": offset, "limit": PAGE_SIZE}, raw=True)
             page_digest = archive.put(data)
+            store.record_raw_source(import_id, "list", page_digest, "json")
             page = decode(data, "activity list", list)
         except runs.ConnectionProblem as err:
             if problems is not None:

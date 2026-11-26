@@ -284,12 +284,11 @@ def read(store, activity_id, version_id=None, source=None, *, offset=0, limit=20
         if chosen not in {v["id"] for v in versions}:
             raise UnknownVersion("That canonical version does not belong to this activity.")
         payload = load_version(db, chosen)
-        config = payload["qc_config"]
         selected = next((s for s in payload["sources"] if s["fit_sha256"] == (source or payload["selected_fit_sha256"])), None)
         if source and selected is None:
             raise UnknownVersion("That recording does not belong to this canonical version.")
         result = {**payload, "activity_id": owner, "version_id": chosen, "current_version_id": head[0] if head else None,
-                  "versions": versions, "qc_config": config, "state": "PROCESSED", "trace": None,
+                  "versions": versions, "state": "PROCESSED", "trace": None,
                   "inspected_fit_sha256": selected["fit_sha256"] if selected else None,
                   "qc": {"state": "INSUFFICIENT", "timer_event_coverage": "NOT_PROVIDED", "flags": [], "blocks": []},
                   "message": "No verified original trace in this version; valid summary data is retained."}

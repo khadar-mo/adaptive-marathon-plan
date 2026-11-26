@@ -1,81 +1,179 @@
-"""As-of provenance for source acquisition and activity ownership."""
+"""Query archived knowledge of acquisition and ownership without opening a second connection."""
+from collections import defaultdict
 import json
 
-import canonical
 import workload_inputs as inputs
+from source_receipts import group
 from workload_processing import clock_evidence
 
 
 VERSION = "source-identity-history-v1"
+LAST_ROW = 2**63 - 1
 
 
 def ref(kind, key, known_at, **details):
     return {"basis": kind, "id": str(key), "known_at": known_at, **details}
 
 
-def group(owner, members, providers, sources, start):
-    return {"owner_id": owner, "member_ids": sorted(set([owner, *members])),
-            "provider_ids": providers, "claimed_event_start_utc": start,
-            "sources": [{"kind": s["kind"], "sha256": s["sha256"], "format": s["format"],
-                         "claimed_acquired_at": s.get("acquired_at")} for s in sources]}
+def source_key(s):
+    return s["kind"], s["sha256"], s["format"]
 
 
-def legacy_evidence(db, cutoff):
-    """Read affirmative observations, independently of current heads and redirects."""
+def available_by(clock):
+    try:
+        return clock_evidence(clock)["available_by"]
+    except (ValueError, OverflowError):
+        return None
+
+
+def legacy_groups(db, cutoff, epoch):
+    """Immutable payloads establish specific earlier facts on an older store."""
     if inputs.table(db, "canonical_activity_versions"):
+        cap = epoch["last_legacy_version"] if epoch else LAST_ROW
         rows = db.execute("""SELECT id,activity_id,created_at,payload FROM canonical_activity_versions
-            WHERE created_at<=? ORDER BY rowid""", (cutoff,))
+            WHERE rowid<=? AND created_at<=? ORDER BY rowid""", (cap, cutoff))
         versions = {}
         for row in rows:
+            known = available_by(row["created_at"])
             payload = json.loads(row["payload"])
             value = group(row["activity_id"], payload["merged_activity_ids"], payload["provider_ids"],
-                          payload["raw_sources"], payload["summary"]["start_utc"])
+                          payload["raw_sources"], payload["summary"]["start_utc"],
+                          recordings=[s["fit_sha256"] for s in payload["sources"]])
             versions[row["id"]] = value
-            yield ref("CANONICAL_VERSION", row["id"], inputs.utc(row["created_at"])), value
+            if known and known <= cutoff:
+                yield ref("CANONICAL_VERSION", row["id"], known), value
         if inputs.table(db, "canonical_selections"):
-            rows = db.execute("SELECT * FROM canonical_selections WHERE selected_at<=? ORDER BY id", (cutoff,))
+            cap = epoch["last_legacy_selection"] if epoch else LAST_ROW
+            rows = db.execute("SELECT * FROM canonical_selections WHERE id<=? AND selected_at<=? ORDER BY id", (cap, cutoff))
             for row in rows:
-                if row["version_id"] in versions:
-                    yield ref("CANONICAL_SELECTION", row["id"], inputs.utc(row["selected_at"]),
+                known = available_by(row["selected_at"])
+                if known and known <= cutoff and row["version_id"] in versions:
+                    yield ref("CANONICAL_SELECTION", row["id"], known,
                               version_id=row["version_id"]), versions[row["version_id"]]
     if inputs.table(db, "workload_processing_inventories"):
-        for row in db.execute("SELECT * FROM workload_processing_inventories WHERE known_at<=? ORDER BY rowid", (cutoff,)):
+        # After installation each normal identity change already has a complete
+        # group receipt. A local G3 inventory omits provider aliases and embedded
+        # FIT members and must never replace that stronger observation.
+        limit = min(cutoff, epoch["known_at"]) if epoch else cutoff
+        for row in db.execute("SELECT * FROM workload_processing_inventories WHERE known_at<=? ORDER BY rowid", (limit,)):
             for activity in json.loads(row["payload"])["activities"]:
                 key = ref("PROCESSING_INVENTORY", row["id"], inputs.utc(row["known_at"]))
                 yield key, group(activity["activity_id"], [], None, activity["source_refs_at_observation"],
                                  activity["summary_at_observation"]["start_utc"])
 
 
+def acquisition_evidence(db, cutoff, epoch):
+    if inputs.table(db, "canonical_source_versions"):
+        cap = epoch["last_legacy_trace"] if epoch else LAST_ROW
+        rows = db.execute("""SELECT id,raw_sha256,created_at FROM canonical_source_versions
+            WHERE rowid<=? AND created_at<=? ORDER BY rowid""", (cap, cutoff))
+        for row in rows:
+            known = available_by(row["created_at"])
+            if known and known <= cutoff:
+                yield ("fit", row["raw_sha256"], "fit"), ref("DECODED_SOURCE_VERSION", row["id"], known)
+    if inputs.table(db, "fit_uploads"):
+        # The staged checksum is write-once, and the import terminal clock is
+        # an upper bound. Owners in fit_uploads may be rewritten by later links.
+        cap = epoch["last_legacy_upload"] if epoch else LAST_ROW
+        rows = db.execute("""SELECT u.sha256,u.ordinal,i.id,i.finished_at FROM fit_uploads u
+            JOIN imports i ON i.id=u.import_id WHERE u.rowid<=? AND u.sha256 IS NOT NULL AND i.finished_at IS NOT NULL
+            ORDER BY i.id,u.ordinal""", (cap,))
+        observed = {}
+        if inputs.table(db, "workload_processing_inventories"):
+            for entry in db.execute("SELECT * FROM workload_processing_inventories WHERE known_at<=? ORDER BY known_at", (cutoff,)):
+                for item in json.loads(entry["payload"])["import_boundary"]:
+                    if item.get("finished_at"):
+                        observed.setdefault((item["id"], item["finished_at"]), entry["known_at"])
+        for row in rows:
+            try:
+                clock = clock_evidence(row["finished_at"], observed.get((row["id"], row["finished_at"])))
+            except (ValueError, OverflowError):
+                continue
+            if clock["available_by"] <= cutoff:
+                yield ("fit", row["sha256"], "fit"), ref("COMPLETED_FIT_UPLOAD", f'{row["id"]}/{row["ordinal"]}',
+                      clock["available_by"], import_id=row["id"], upload_ordinal=row["ordinal"], clock=clock)
+    if inputs.table(db, "source_acquisitions"):
+        for row in db.execute("SELECT * FROM source_acquisitions WHERE known_at<=? ORDER BY known_at,id", (cutoff,)):
+            yield source_key(row), {**json.loads(row["evidence"]), "id": row["id"]}
+
+
+def keep_earliest(evidence, key, receipt):
+    # On a tie a direct acquisition receipt, inserted first, is more specific
+    # than the presence of a checksum in a group observed at that same instant.
+    if key not in evidence or receipt["known_at"] < evidence[key]["known_at"]:
+        evidence[key] = receipt
+
+
+def group_evidence(db, cutoff, epoch):
+    observations = list(legacy_groups(db, cutoff, epoch))
+    if inputs.table(db, "source_group_history"):
+        rows = db.execute("SELECT * FROM source_group_history WHERE known_at<=? ORDER BY sequence", (cutoff,))
+        for row in rows:
+            receipt = {**json.loads(row["evidence"]), "id": row["id"], "known_at": row["known_at"],
+                       "previous_group_id": row["previous_id"]}
+            observations.append((receipt, json.loads(row["payload"])))
+    # Python's stable sort preserves recorded selection/receipt order on ties.
+    return sorted(observations, key=lambda item: item[0]["known_at"])
+
+
 def read_in_db(db, knowledge_cutoff, *, activity_id=None):
-    """A single-transaction view. Its contents depend only on facts known by K."""
+    """Assemble the answer for K solely from committed, dated observations."""
     cutoff = inputs.utc(knowledge_cutoff)
-    observations = list(legacy_evidence(db, cutoff))
-    observations.sort(key=lambda item: item[0]["known_at"])
+    epoch = None
+    if inputs.table(db, "source_history_epoch"):
+        epoch = db.execute("SELECT * FROM source_history_epoch WHERE version=1").fetchone()
     groups, acquisitions, ownership = {}, {}, {}
-    for evidence, value in observations:
+    for key, evidence in acquisition_evidence(db, cutoff, epoch):
+        keep_earliest(acquisitions, key, evidence)
+    history = []
+    for evidence, value in group_evidence(db, cutoff, epoch):
         owner = value["owner_id"]
+        history.append({"evidence": evidence, "group": value})
         for source in value["sources"]:
-            identity = (source["kind"], source["sha256"], source["format"])
-            acquisitions.setdefault(identity, evidence)
-            ownership.setdefault((owner, identity), evidence)
+            key = source_key(source)
+            keep_earliest(acquisitions, key, evidence)
+            keep_earliest(ownership, (owner, key), evidence)
         previous = groups.get(owner)
-        if value["provider_ids"] is None and previous:
-            value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"]}
+        identity_evidence = evidence
+        if value["provider_ids"] is None:
+            # G3 inventories observe local ownership only. They cannot date a
+            # provider alias or disprove an already observed local merge.
+            identity_evidence = previous["identity_evidence"] if previous else None
+            if previous:
+                # Inventories contain local source references. Keep stronger
+                # earlier evidence such as an archived ZIP's embedded FIT.
+                sources = {source_key(s): s for s in previous["sources"]}
+                for source in value["sources"]:
+                    sources.setdefault(source_key(source), source)
+                value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"],
+                         "sources": [sources[k] for k in sorted(sources)]}
         for member in value["member_ids"]:
             if member != owner:
                 groups.pop(member, None)
-        groups[owner] = {**value, "membership_evidence": evidence,
-                         "identity_evidence": previous["identity_evidence"] if previous and evidence["basis"]=="PROCESSING_INVENTORY" else evidence if value["provider_ids"] is not None else None}
-    selected = []
+        groups[owner] = {**value, "membership_evidence": evidence, "identity_evidence": identity_evidence}
+
+    selected, owners_by_source = [], defaultdict(list)
     for owner, value in sorted(groups.items()):
-        if activity_id is not None and activity_id not in value["member_ids"]:
-            continue
-        sources = []
         for s in value["sources"]:
-            identity = (s["kind"], s["sha256"], s["format"])
-            sources.append({**s, "first_source_evidence": acquisitions[identity],
-                            "first_owner_evidence": ownership[(owner, identity)]})
-        selected.append({**value, "sources": sources})
-    return {"version": VERSION, "knowledge_cutoff": cutoff, "requested_activity_id": activity_id,
-            "state": "OBSERVED" if selected else "UNKNOWN", "groups": selected,
-            "missing_reason": None if selected else "No timestamped evidence establishes this ownership at the cutoff."}
+            owners_by_source[source_key(s)].append(owner)
+        if activity_id is None or activity_id in value["member_ids"]:
+            sources = [{**s, "first_source_evidence": acquisitions[source_key(s)],
+                        "first_owner_evidence": ownership[(owner, source_key(s))]} for s in value["sources"]]
+            selected.append({**value, "sources": sources})
+    members = {m for g in selected for m in g["member_ids"]}
+    if activity_id is not None:
+        members.add(activity_id)
+    decisions = []
+    if inputs.table(db, "source_identity_reviews"):
+        for row in db.execute("SELECT * FROM source_identity_reviews WHERE known_at<=? ORDER BY known_at,rowid", (cutoff,)):
+            item = {**json.loads(row["evidence"]), "id": row["id"]}
+            if activity_id is None or item["owner_id"] in members or members.intersection(item["candidates_at_observation"]):
+                decisions.append(item)
+    result = {"version": VERSION, "knowledge_cutoff": cutoff, "requested_activity_id": activity_id,
+              "state": "OBSERVED" if selected else "UNKNOWN", "groups": selected, "review_events": decisions,
+              "group_history": [h for h in history if activity_id is None or members.intersection(h["group"]["member_ids"])],
+              "missing_reason": None if selected else "No timestamped evidence establishes this ownership at the cutoff."}
+    if activity_id is None:
+        result["source_receipts"] = [{"kind": k[0], "sha256": k[1], "format": k[2], "first_source_evidence": receipt,
+                                      "observed_owners": owners_by_source[k]} for k, receipt in sorted(acquisitions.items())]
+    return result
