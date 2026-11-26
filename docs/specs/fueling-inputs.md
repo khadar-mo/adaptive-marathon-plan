@@ -76,3 +76,8 @@ For #25, retain the `record_id` plus exact `version_id` in the future planned-se
 link. This input does not assign a planned session or authorize a fueling protocol.
 Context tables and archives are reused without altering canonical activities,
 effort extraction, workout labels or numerical training history.
+
+Existing pre-G1 databases remain readable without creating canonical tables during
+inspection. Their known activity/source identity is used with a null canonical
+version; unknown completion times stay unknown. The first explicit entry adds only
+the normal additive schema and contextual report. It does not recompute the run.

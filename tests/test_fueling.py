@@ -10,9 +10,9 @@ import pytest
 import app
 import context_data as context
 from storage import Archive
-from test_canonical import trace_fit
-from test_fit_import import upload
-from test_imports import history, server
+from test_canonical import trace_fit, add_run
+from test_fit_import import upload, resolve, zipped, legacy_archive
+from test_imports import history, server, submit
 
 pytestmark = pytest.mark.anyio
 
@@ -91,3 +91,198 @@ async def test_existing_g2_database_preserves_independent_distance_and_saved_eff
         await upload(client, ('existing-format.fit', bytes.fromhex(fixture['raw_hex'])))
         assert len((await read(client))['reports']) == 1
         assert (await client.get('/api/activities/1/efforts')).json()['version_id'] == fixture['version_id']
+
+
+async def test_genuine_g0_store_missing_canonical_tables_read_entry_correction_replay(history, tmp_path):
+    fixture=json.loads(gzip.decompress((Path(__file__).parent/'fixtures'/'fueling-g0-4a0630f.json.gz').read_bytes()))
+    assert fixture['base_commit']=='4a0630f65885b1515e59302075e37c5632bcb2da'
+    path=tmp_path/'runs.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.executescript(fixture['sql'])
+        assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='canonical_activity_heads'").fetchone()
+    archive=Archive(tmp_path/'archive')
+    archive.put(bytes.fromhex(fixture['raw_hex']))
+    async with server() as client:
+        before=(await client.get('/api/activities/1')).json()
+        assert before['distance_m']==10000 and before['elapsed_seconds']==3600
+        old_bytes=path.read_bytes()
+        absent=await read(client)
+        assert absent['state']=='MISSING' and absent['practice_status']==absent['tolerance_status']=='UNKNOWN'
+        assert absent['target_now']['canonical_version_id'] is None
+        assert (await client.get('/activities/1/fueling')).status_code==200
+        assert path.read_bytes()==old_bytes  # inspection neither upgrades nor repairs old data
+        first=(await enter(client,report(user_strategy='  old source note  ')))['records'][0]
+        initial=(await client.get('/api/fueling/versions/'+first['version_id'])).json()
+        assert initial['target_at_entry']['canonical_version_id'] is None
+        assert any(s['sha256']==fixture['source_sha256'] for s in initial['target_at_entry']['sources'])
+        second=await enter(client,report(notes='Corrected on legacy source',supersedes=first['version_id'],correction_reason='Added a note'))
+        assert second['records'][0]['revision']==2
+        assert (await enter(client,report(user_strategy='  old source note  ')))['replayed']
+        assert (await read(client))['reports'][0]['version_id']==second['records'][0]['version_id']
+        assert (await client.get('/api/fueling/versions/'+first['version_id'])).json()==initial
+        assert (await client.get('/api/activities/1')).json()==before
+    async with server() as client:
+        assert (await read(client))['reports'][0]['version_id']==second['records'][0]['version_id']
+        assert (await client.get('/api/activities/1')).json()==before
+
+
+@pytest.mark.parametrize('status', ['NOT_PLANNED', 'OFFERED', 'PLANNED', 'COMPLETED', 'UNKNOWN'])
+async def test_master_statuses_do_not_invent_tolerance_or_planning_decisions(history, status):
+    async with server() as client:
+        await upload(client, ('run.fit', trace_fit()))
+        await enter(client, report(practice_status=status))
+        data = await read(client)
+        assert data['practice_status'] == status and data['tolerance_status'] == 'UNKNOWN'
+        assert data['reports'][0]['user_strategy'] is None
+        assert data['research_status'] == 'RESEARCH_PENDING'
+        assert (await client.get('/api/context')).json()['attention_signals'] == []
+
+
+async def test_correction_receipt_cutoff_exact_revision_and_replay(history, tmp_path, monkeypatch):
+    clock = ['2026-11-01T10:00:00.000000+00:00']
+    monkeypatch.setattr(context, 'now', lambda: clock[0])
+    async with server() as client:
+        await upload(client, ('run.fit', trace_fit()))
+        initial = await enter(client, report(user_strategy='  original\r\nstrategy  ', notes='\n  Original notes\n'))
+        first = initial['records'][0]
+        frozen = await read(client, as_of=clock[0])
+        exact_before = (await client.get('/api/fueling/versions/'+first['version_id'],params={'as_of':clock[0]})).json()
+        clock[0] = '2026-11-02T10:00:00.000000+00:00'
+        correction = report(practice_status='UNKNOWN', tolerance='Nausea described by the runner', tolerance_reported_at='2026-10-25T13:00:00Z',
+                            supersedes=first['version_id'], correction_reason='More complete recollection', source_updated_at='2026-10-25T13:30:00Z')
+        second = (await enter(client, correction))['records'][0]
+        current, = (await read(client))['reports']
+        assert current['version_id'] == second['version_id'] and current['previous_version_id'] == first['version_id']
+        assert current['first_known_at'] == frozen['as_of'] and current['known_at'] == clock[0]
+        assert current['source_updated_at'] == correction['source_updated_at']
+        assert await read(client, as_of=frozen['as_of']) == frozen
+        assert (await client.get('/api/fueling/versions/'+first['version_id'],params={'as_of':frozen['as_of']})).json() == exact_before
+        assert (await client.get('/api/fueling/versions/'+second['version_id'],params={'as_of':frozen['as_of']})).status_code == 404
+        assert (await enter(client, report(user_strategy='  original\r\nstrategy  ', notes='\n  Original notes\n')))['replayed']
+        assert (await read(client))['reports'][0]['version_id'] == second['version_id']
+        await enter(client, {**correction, 'notes':'stale correction'},409)
+        revisions = (await client.get('/api/context/records/'+first['record_id'])).json()['versions']
+        assert len(revisions) == 2 and revisions[0]['notes'] == '\n  Original notes\n'
+        events = (await client.get('/api/context/events')).json()['events']
+        assert len(events) == 2 and all(e['kind'] == 'FUELING_PRACTICE' for e in events)
+        assert current['target_at_entry'] == frozen['reports'][0]['target_at_entry']
+        assert 'source_updated_at' in current and all((tmp_path/'archive'/r['sources'][0]['raw_sha256']).exists() for r in revisions)
+
+
+async def test_future_report_withheld_without_leaking_correction_or_fabricating_outcome(history, monkeypatch):
+    monkeypatch.setattr(context, 'now', lambda:'2026-11-01T10:00:00.000000+00:00')
+    async with server() as client:
+        await upload(client, ('run.fit', trace_fit()))
+        saved = await enter(client, report(reported_at='2026-11-02T12:00:00Z', observed_at='2026-11-02T11:00:00Z'))
+        data = await read(client)
+        assert data['state']=='MISSING' and data['practice_status']==data['tolerance_status']=='UNKNOWN'
+        assert data['reports']==[] and len(data['withheld'])==1
+        exact=(await client.get('/api/fueling/versions/'+saved['records'][0]['version_id'])).json()
+        assert exact['eligible_at_cutoff'] is False
+        assert (await read(client,as_of='2026-11-03T00:00:00Z'))['practice_status']=='COMPLETED'
+
+
+@pytest.mark.parametrize('change', [
+    {'kind':[]}, {'kind':{}}, {'actor':''}, {'reported_at':'2026-10-25T12:00:00'},
+    {'observed_at':'2026-10-26T00:00:00Z'}, {'practice_status':'DONE'}, {'research_status':'VALIDATED'},
+    {'tolerance':'Fine'}, {'tolerance_reported_at':'2026-10-25T13:00:00Z'},
+    {'tolerance':'nausea','tolerance_reported_at':'2026-10-26T01:00:00Z'},
+    {'known_at':'2020-01-01T00:00:00Z'}, {'activity_id':9223372036854775808}, {'activity_id':True},
+    {'activity_id':999}, {'user_strategy':123}, {'carbohydrate_g_h':60}, {'notes':'x'*10001}
+])
+async def test_invalid_inputs_return_422_atomically(history, change):
+    async with server() as client:
+        await upload(client, ('run.fit', trace_fit()))
+        bad = report(**change)
+        await enter(client, bad,422)
+        # The generic import path uses the identical contract and transaction.
+        raw=context.encoded([report(source_id='must-rollback'),bad]).encode()
+        response=await client.post('/api/context/import',files={'file':('bad.json',raw)})
+        assert response.status_code == 422,response.text
+        assert (await read(client))['reports']==[]
+        assert (await client.get('/api/context/events')).json()['events']==[]
+
+
+async def test_csv_import_readonly_restart_retains_unicode_strategy_and_unknown_status(history, tmp_path):
+    import csv
+    import io
+    value=report(user_strategy='\n  runner: 60 g/h, 500 ml/h\r\nwater ♥  ',notes='  Written by runner  ')
+    value.pop('practice_status')
+    output=io.StringIO(newline='')
+    writer=csv.DictWriter(output,fieldnames=value.keys()); writer.writeheader(); writer.writerow(value)
+    raw=output.getvalue().encode()
+    async with server() as client:
+        await upload(client,('run.fit',trace_fit()))
+        response=await client.post('/api/context/import?format=csv',files={'file':('synthetic.csv',raw)})
+        assert response.status_code==200,response.text
+        row,=(await read(client))['reports']
+        assert row['practice_status']=='UNKNOWN' and row['tolerance_status']=='UNKNOWN'
+        assert row['user_strategy']==value['user_strategy'] and row['notes']==value['notes']
+        assert (tmp_path/'archive'/response.json()['raw_sha256']).read_bytes()==raw
+    async with server() as client:
+        before=(tmp_path/'runs.sqlite3').read_bytes()
+        assert (await read(client))['reports'][0]['version_id']==row['version_id']
+        assert (await client.get('/fueling/versions/'+row['version_id'])).status_code==200
+        assert (await client.get('/context?edit='+row['record_id'])).status_code==303
+        assert (tmp_path/'runs.sqlite3').read_bytes()==before
+
+
+async def test_donor_redirect_and_corrections_keep_original_reference(history):
+    from runs import ConnectionProblem
+    from fit_fixture import START
+    history.original_error=ConnectionProblem('Synthetic original unavailable')
+    async with server() as client:
+        await submit(client)
+        initial=(await enter(client,report()))['records'][0]
+        original=(await read(client))['reports'][0]['target_at_entry']
+        raw=trace_fit(start=START+300)
+        await upload(client,('manual.fit',raw))
+        history.original_error=None; history.original=zipped(raw)
+        pending=await submit(client)
+        assert (await resolve(client,pending,{'action':'link','activity_id':2})).status_code==200
+        row,=(await read(client,activity_id=2))['reports']
+        assert row['activity_id']==1 and row['target_at_entry']==original and row['target_now']['activity_id']==2
+        corrected=await enter(client,report(notes='After merge',supersedes=initial['version_id'],correction_reason='Additional note'),activity_id=2)
+        assert corrected['records'][0]['revision']==2
+        assert (await read(client,activity_id=2))['reports'][0]['target_at_entry']==original
+        await enter(client,report(activity_id=2,notes='retarget',supersedes=corrected['records'][0]['version_id'],correction_reason='wrong target'),409,activity_id=2)
+
+
+async def test_reclassification_keeps_original_run_history_and_allows_correction(history):
+    week={'from':'2026-10-19','to':'2026-10-25'}
+    history.listed=[]; add_run(history,91,'2026-10-20'); history.original=zipped(trace_fit())
+    async with server() as client:
+        await submit(client,week)
+        saved=(await enter(client,report()))['records'][0]
+        original=(await read(client))['reports'][0]['target_at_entry']
+        history.listed=[]; add_run(history,91,'2026-10-20',sport='cycling'); await submit(client,week)
+        row,=(await read(client))['reports']
+        assert row['target_at_entry']==original and row['target_now']['sport']=='cycling'
+        await enter(client,report(notes='Preserved correction',supersedes=saved['version_id'],correction_reason='Added note'))
+        await enter(client,report(source_id='new-cycling-report'),422)
+        assert (await read(client))['reports'][0]['target_at_entry']==original
+
+
+async def test_pre_fit_database_with_missing_completion_time_remains_honest(history, tmp_path):
+    legacy_archive(tmp_path)
+    async with server() as client:
+        before=(await client.get('/api/activities/731')).json()
+        await enter(client,report(activity_id=731),activity_id=731)
+        row,=(await read(client,activity_id=731))['reports']
+        assert row['target_at_entry']['completion_time_state']=='UNKNOWN'
+        assert row['target_at_entry']['activity_end_utc'] is None
+        assert row['target_at_entry']['sources']
+        assert (await client.get('/api/activities/731')).json()==before
+
+
+async def test_future_activity_and_foreign_target_are_rejected(history):
+    from fit_fixture import START
+    async with server() as client:
+        await upload(client,('future.fit',trace_fit(start=START+10*365*86400)))
+        await enter(client,report(),422)
+        await upload(client,('current.fit',trace_fit()))
+        await enter(client,report(activity_id=2),422)
+        assert (await read(client,activity_id=2))['state']=='MISSING'
+        for invalid in ('0','-1','9223372036854775808'):
+            assert (await client.get('/api/activities/'+invalid+'/fueling')).status_code==422
+        assert (await client.get('/api/fueling/versions/'+'0'*64)).status_code==404

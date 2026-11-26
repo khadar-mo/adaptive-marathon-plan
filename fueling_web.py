@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import HTMLResponse
 
 import context_data as context
-from context_web import bounded_body, e, input_field, invalid, select, store, textarea, SCRIPT
+from context_web import bounded_body, e, input_field, invalid, select, store, SCRIPT
 import fueling
 from garmin_activity import RUN_TYPES
 import views
@@ -63,7 +63,8 @@ def form(activity_id, row=None):
     row = row or {}
     def field(name, label, default="", **kw):
         return input_field("fueling", name, label, row.get(name, default), **kw)
-    body = f'<form class="context-entry" data-kind="fueling" action="/api/activities/{activity_id}/fueling">'
+    original = {k: row[k] for k in ("user_strategy", "tolerance", "notes") if isinstance(row.get(k), str)}
+    body = f'<form class="context-entry" data-kind="fueling" data-original-text="{e(json.dumps(original, ensure_ascii=False))}" action="/api/activities/{activity_id}/fueling">'
     body += f'<input type="hidden" name="activity_id" value="{e(row.get("activity_id", activity_id))}">'
     if row:
         # Source identity and target are immutable; a correction only changes its report.
@@ -86,6 +87,14 @@ def form(activity_id, row=None):
     body += field("source_updated_at", "Original source update time", hint="Optional source timestamp with offset. It cannot backdate receipt or correction availability.")
     body += f'<button>{"Save fueling correction" if row else "Save fueling practice"}</button><p role="status" class="result"></p></form>'
     return body
+
+
+def textarea(prefix, name, label, value, hint):
+    identity = f"{prefix}-{name}"
+    # HTML removes one leading newline after the opening textarea tag. Supply
+    # that newline separately so a runner's own leading newline survives editing.
+    return (f'<div><label for="{identity}">{e(label)}</label><textarea id="{identity}" name="{name}" rows="3" '
+            f'aria-describedby="{identity}-hint">\n{e(value)}</textarea><small id="{identity}-hint">{e(hint)}</small></div>')
 
 
 def report_card(row):

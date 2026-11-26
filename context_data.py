@@ -422,6 +422,8 @@ def initialized(db):
 
 
 def owner(db, activity_id):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='activity_redirects'").fetchone():
+        return activity_id
     row = db.execute("SELECT activity_id FROM activity_redirects WHERE old_id=?", (activity_id,)).fetchone()
     return row[0] if row else activity_id
 
@@ -431,8 +433,10 @@ def target_state(db, activity_id):
     activity = db.execute("SELECT sport FROM activities WHERE id=?", (target,)).fetchone()
     if activity is None:
         return {"activity_id": target, "sport": None, "status": "UNAVAILABLE", "canonical_version_id": None}
-    canonical = db.execute("""SELECT v.id,v.payload FROM canonical_activity_heads h
-        JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?""", (target,)).fetchone()
+    canonical = None
+    if db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('canonical_activity_heads','canonical_activity_versions')").fetchone()[0] == 2:
+        canonical = db.execute("""SELECT v.id,v.payload FROM canonical_activity_heads h
+            JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?""", (target,)).fetchone()
     return {"activity_id": target, "sport": json.loads(canonical["payload"])["summary"]["sport"] if canonical else activity[0],
             "status": "PRESENT", "canonical_version_id": canonical["id"] if canonical else None}
 

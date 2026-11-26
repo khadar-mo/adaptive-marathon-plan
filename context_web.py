@@ -186,7 +186,7 @@ def form(kind, title, row, definitions):
     return f'<section><h2>{e(title)}</h2><form class="context-entry" data-kind="{kind}" action="/api/context/records">{content}<button type="submit">{"Save correction" if row else "Save " + title.lower()}</button><p role="status" class="result"></p></form></section>'
 
 
-SCRIPT = """
+SCRIPT = r"""
 <script>
 document.querySelectorAll('form.context-entry, form.context-definition, form.context-import').forEach(form => {
  form.addEventListener('submit', async event => {
@@ -196,6 +196,11 @@ document.querySelectorAll('form.context-entry, form.context-definition, form.con
    if(form.classList.contains('context-import')) { url += '?format='+encodeURIComponent(data.get('format')); data.delete('format'); body=data; }
    else {
     const fields=Object.fromEntries([...data].filter(([k,v]) => v !== ''));
+    if(form.dataset.kind==='fueling' && form.dataset.originalText) {
+     for(const [key,value] of Object.entries(JSON.parse(form.dataset.originalText))) {
+      if((fields[key]||'')===value.replace(/\r\n?/g,'\n')) fields[key]=value;
+     }
+    }
     const rawJSON={};
     if(form.classList.contains('context-definition')) {
      url='/api/context/definitions/'+encodeURIComponent(fields.kind)+'/'+encodeURIComponent(fields.version);
