@@ -20,9 +20,9 @@ ALGORITHM_VERSION = "context-ingestion-v1"
 MAX_SQLITE_INTEGER = 2**63 - 1
 DEFAULT_POLICY = "context-policy-v1"
 DEFAULT_SETTINGS = {"daily_aggregation": "retain_all", "expected_wellness_metrics": ["resting_hr", "hrv", "sleep_duration"]}
-KINDS = ("wellness", "post_run", "preweek", "strength", "coverage")
+KINDS = ("wellness", "post_run", "preweek", "strength", "coverage", "fueling")
 EVENTS = {"wellness": "WELLNESS", "post_run": "POST_RUN_FEEDBACK", "preweek": "PREWEEK_READINESS",
-          "strength": "STRENGTH", "coverage": "CONTEXT_COVERAGE"}
+          "strength": "STRENGTH", "coverage": "CONTEXT_COVERAGE", "fueling": "FUELING_PRACTICE"}
 DEVICE_METRICS = {"vo2max", "vo2_max", "hrv_status", "sleep_stages", "body_battery", "stress",
                   "maximum_hr", "max_hr", "readiness", "training_readiness", "sleep_score"}
 SCHEMA = """
@@ -271,6 +271,37 @@ class Feedback(BaseRecord):
         return self
 
 
+class Fueling(BaseRecord):
+    kind: Literal["fueling"]
+    activity_id: int = Field(gt=0, le=MAX_SQLITE_INTEGER, strict=True)
+    actor: str = Field(min_length=1, max_length=120)
+    reported_at: str
+    observed_at: str | None = None
+    practice_status: Literal["NOT_PLANNED", "OFFERED", "PLANNED", "COMPLETED", "UNKNOWN"] = "UNKNOWN"
+    user_strategy: str | None = Field(None, max_length=10000)
+    tolerance: str | None = Field(None, max_length=5000)
+    tolerance_reported_at: str | None = None
+    notes: str | None = Field(None, max_length=10000)
+    research_status: Literal["RESEARCH_PENDING"] = "RESEARCH_PENDING"
+
+    @field_validator("actor", "tolerance")
+    @classmethod
+    def meaningful_text(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("Supply meaningful text; omit unknown tolerance instead of blank-only text.")
+        return value
+
+    @model_validator(mode="after")
+    def timestamps(self):
+        report = moment(self.reported_at)
+        for value in (self.observed_at, self.tolerance_reported_at):
+            if value is not None and moment(value) > report:
+                raise ValueError("Observation and tolerance report times cannot follow this report timestamp.")
+        if bool(self.tolerance) != bool(self.tolerance_reported_at):
+            raise ValueError("Supply tolerance text and its report timestamp together, or leave both unknown.")
+        return self
+
+
 class Exercise(Model):
     name: str = Field(min_length=1, max_length=200)
     sets: int | None = Field(None, ge=0, le=10000, strict=True)
@@ -348,7 +379,7 @@ class Coverage(BaseRecord):
         return self
 
 
-MODELS = {"wellness": Wellness, "post_run": Feedback, "preweek": Feedback, "strength": Strength, "coverage": Coverage}
+MODELS = {"wellness": Wellness, "post_run": Feedback, "preweek": Feedback, "strength": Strength, "coverage": Coverage, "fueling": Fueling}
 DEFAULT_SCALES = {
     "rpe-0-10-v1": {"name": "RPE 0–10", "minimum": "0", "maximum": "10", "unit": "rating",
                     "description": "Runner-selected session exertion scale; not a clinical threshold.",
@@ -399,6 +430,8 @@ def initialized(db):
 
 
 def owner(db, activity_id):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='activity_redirects'").fetchone():
+        return activity_id
     row = db.execute("SELECT activity_id FROM activity_redirects WHERE old_id=?", (activity_id,)).fetchone()
     return row[0] if row else activity_id
 
@@ -408,8 +441,10 @@ def target_state(db, activity_id):
     activity = db.execute("SELECT sport FROM activities WHERE id=?", (target,)).fetchone()
     if activity is None:
         return {"activity_id": target, "sport": None, "status": "UNAVAILABLE", "canonical_version_id": None}
-    canonical = db.execute("""SELECT v.id,v.payload FROM canonical_activity_heads h
-        JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?""", (target,)).fetchone()
+    canonical = None
+    if db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('canonical_activity_heads','canonical_activity_versions')").fetchone()[0] == 2:
+        canonical = db.execute("""SELECT v.id,v.payload FROM canonical_activity_heads h
+            JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?""", (target,)).fetchone()
     return {"activity_id": target, "sport": json.loads(canonical["payload"])["summary"]["sport"] if canonical else activity[0],
             "status": "PRESENT", "canonical_version_id": canonical["id"] if canonical else None}
 
@@ -432,16 +467,19 @@ def normalize(db, raw, known_at):
     if record.kind in ("wellness", "strength"):
         value["event_utc"] = moment(record.observed_at) if record.observed_at else None
         value["time_precision"] = "instant" if record.observed_at else "local_date_only"
-    elif record.kind in ("post_run", "preweek", "coverage"):
+    elif record.kind in ("post_run", "preweek", "coverage", "fueling"):
         value["event_utc"] = moment(record.reported_at)
         value["time_precision"] = "instant"
-    if record.kind == "post_run":
+    if record.kind in ("post_run", "fueling"):
         target = target_state(db, record.activity_id)
         if target["status"] == "UNAVAILABLE":
             raise ValueError("The feedback activity does not exist.")
         # Preserve the user-selected session identity; provider IDs can move to
         # another activity and must never silently retarget a historical report.
         value["target_at_entry"] = target
+    if record.kind == "fueling":
+        value.update(fueling_contract_version="fueling-practice-v1",
+                     tolerance_status="REPORTED" if record.tolerance else "UNKNOWN")
     if record.kind == "wellness":
         value["interpretation"] = "DEVICE_OUTPUT" if record.origin == "device" or record.metric.lower() in DEVICE_METRICS else "REPORTED_OBSERVATION"
     if record.kind == "coverage" and record.status == "COMPLETE":
@@ -527,11 +565,14 @@ def ingest(store, raw, format_name="json"):
                         if same_target:
                             raise Conflict("This source already has a check-in for the target. Correct its existing source record ID.")
             # Entry-time target metadata is immutable even after alias movement.
-            if existing and record.kind == "post_run":
+            if existing and record.kind in ("post_run", "fueling"):
                 old = json.loads(existing["payload"])
                 if record.activity_id != old["activity_id"]:
                     raise Conflict("A feedback report cannot change its target. Create a distinct source_id for another activity.")
                 value["target_at_entry"] = old["target_at_entry"]
+            if not existing and record.kind == "fueling":
+                from fueling import entry_target
+                value["target_at_entry"] = entry_target(db, record.activity_id, known_at)
             if existing and encoded(value) == existing["payload"]:
                 version_id, revision, event_id = existing["id"], existing["revision"], digest({"version_id": existing["id"]})
                 result = "unchanged"
@@ -578,7 +619,7 @@ def decorate(db, row, cutoff):
               "first_known_at": db.execute("SELECT first_known_at FROM context_records WHERE id=?", (row["record_id"],)).fetchone()[0],
               "sources": refs, "eligible_at_cutoff": eligible(value, cutoff),
               "event_time_cutoff_status": "UNKNOWN_INSTANT" if value["time_precision"] == "local_date_only" else "TIMESTAMPED"}
-    if value["kind"] == "post_run":
+    if value["kind"] in ("post_run", "fueling"):
         result["target_now"] = {**target_state(db, value["activity_id"]), "time_basis": "current_identity_not_as_of_evidence"}
     if value.get("time_precision") == "local_date_only":
         result["event_time_uncertainty"] = "Measurement instant unknown; known-at eligibility is not proof of an event-time cutoff."

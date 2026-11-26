@@ -29,6 +29,8 @@ import provider_views
 from storage import ActiveImport, Archive, Store
 import views
 from context_web import router as context_router
+from fueling_web import router as fueling_router
+from availability_web import router as availability_router
 from workload_web import router as workload_router
 from fitness_web import router as fitness_router
 from workout_web import router as workout_router
@@ -50,6 +52,8 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(context_router)
+app.include_router(fueling_router)
+app.include_router(availability_router)
 app.include_router(workload_router)
 app.include_router(fitness_router)
 app.include_router(workout_router)
