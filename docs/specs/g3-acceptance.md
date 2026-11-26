@@ -23,7 +23,7 @@ established by these software tests.
 
 ## 2. Versioned calculation decisions
 
-`g3-exposure-v1` records the following rules in every input bundle:
+`g3-exposure-v2` records the following rules in every input bundle:
 
 - Rolling membership is the whole accepted session ending in `(T−W,T]`, using UTC
   elapsed days. G2's inclusive recent segment-end convention remains separate.
@@ -115,8 +115,38 @@ donor merge becomes effective when the surviving canonical selection records its
 merged IDs; the deleted donor's earlier payload remains usable before that time.
 An old version reselected later follows selection time, not creation time.
 Legacy rows with no timestamped selection cannot be assigned invented historical
-knowledge. Current operational backfill guidance is outside the frozen bundle and
-input hash. It is not used to alter historically known membership.
+knowledge. V2 also freezes a timestamped **processing inventory** and relevant
+unresolved processing gaps. A complete source census cannot make a partial
+canonical backfill authoritative: known subtotals remain visible, while complete
+measure/frequency values and the L30 ratio are withheld. Supported own START/END
+timing scopes a gap to affected windows; unknown instants remain explicit. Current
+GETs observe the present state without writing, so a fully processed store needs
+no extra step. Input writes and current captures persist immutable observations.
+
+Strict historical K uses only inventories recorded by K and canonical selections
+known by K. An unobserved later import state invalidates the older processing
+boundary without reading today's activity identities or aliases as historical
+truth. With no inventory at K, processing completeness is explicitly unknown.
+The older `current_diagnostics` field remains live operational guidance outside
+the hash; the processing evidence that withholds authority is now **inside** the
+frozen bundle/result. Recompute buttons use the existing canonical API. Original
+snapshots are never rewritten; the viewer warns that v1 artifacts did not establish
+processing completeness.
+
+The P1 regression
+`test_real_imported_g0_shape_partial_and_empty_backfill_capture_recovery` imports
+two synthetic provider runs through the real endpoint with only the later G1 hook
+suppressed, yielding an existing G0-shaped raw/archive store. With neither or only
+the 5 km run processed, complete END census still yields no authoritative value,
+frequency or L30 ratio. Recomputing both restores 15 km, two runs and 12/10 = 1.2;
+the earlier frozen gap and replay remain unchanged. Additional regressions cover
+window/week scoping, unknown instants, strict late imports and later merges, and
+an old inventory followed by another import boundary.
+The affected core/API/processing/real-browser suite passed **31 tests in 10.04
+seconds** on the v2 code. The coordinator independently replayed a genuinely
+G0-imported store through the public API and confirmed withheld pre-backfill
+authority, restored post-recompute values, preserved old capture, strict exclusion
+of a later import, and unchanged fully processed/covered-week arithmetic.
 
 `AS_KNOWN` requires K ≤ T and no future knowledge cutoff. Its artifact explicitly
 says it is a retrospective calculation with the recorded code, not a prediction

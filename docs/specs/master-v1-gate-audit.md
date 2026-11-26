@@ -121,6 +121,10 @@ actuals. See the [ten-part G3 report](g3-acceptance.md) for exact bounds, synthe
 test/API/browser evidence, manual limitations and final review/CI requirements.
 Software completion does not establish physiological safety or manual acceptance;
 G6 still owns prospective predictions and independent outcome validation.
+G3 v2's P1 review correction freezes timestamped canonical-processing inventories
+and scoped gaps separately from source census. Partial/absent backfill cannot yield
+authoritative totals, frequency or L30 even with complete census; normal recompute
+restores availability without rewriting snapshots or backdating identity knowledge.
 
 ## Baseline verification
 
