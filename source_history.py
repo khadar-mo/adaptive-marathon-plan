@@ -143,7 +143,7 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
     if inputs.table(db, "source_history_epoch"):
         row = db.execute("SELECT * FROM source_history_epoch WHERE version=1").fetchone()
         epoch = dict(row) if row else None
-    groups, acquisitions, ownership = {}, {}, {}
+    groups, acquisitions, ownership, last_owner_evidence = {}, {}, {}, {}
     for key, evidence in acquisition_evidence(db, cutoff, epoch):
         keep_earliest(acquisitions, key, evidence)
     history = []
@@ -154,6 +154,7 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
             key = source_key(source)
             keep_earliest(acquisitions, key, evidence)
             keep_earliest(ownership, (owner, key), evidence)
+            last_owner_evidence[(owner, key)] = evidence
         previous = groups.get(owner)
         identity_evidence = evidence
         if value["provider_ids"] is None:
@@ -161,11 +162,23 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
             # provider alias or disprove an already observed local merge.
             identity_evidence = previous["identity_evidence"] if previous else None
             if previous:
-                value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"]}
+                # This inventory enumerates activity_sources, while recorded FIT
+                # membership lives separately in fit_sources / original_members.
+                # Only carry recordings affirmed by the most recent complete
+                # observation. A later complete selection replaces that set.
+                recordings = set(previous.get("recording_sha256s", ()))
+                sources = {source_key(s): s for s in value["sources"]}
+                for source in previous["sources"]:
+                    if source["kind"] == "fit" and source["sha256"] in recordings:
+                        sources.setdefault(source_key(source), source)
+                value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"],
+                         "recording_sha256s": sorted(recordings), "sources": [sources[k] for k in sorted(sources)]}
         for member in value["member_ids"]:
             if member != owner:
                 groups.pop(member, None)
-        scope = "LOCAL_SOURCE_REFERENCES" if evidence["basis"] == "PROCESSING_INVENTORY" else "OBSERVED_GROUP_AND_RECORDINGS"
+        scope = "OBSERVED_GROUP_AND_RECORDINGS"
+        if evidence["basis"] == "PROCESSING_INVENTORY":
+            scope = "LOCAL_REFERENCES_WITH_RECORDED_FIT_MEMBERSHIP" if value["recording_sha256s"] else "LOCAL_SOURCE_REFERENCES"
         groups[owner] = {**value, "membership_evidence": evidence, "identity_evidence": identity_evidence,
                          "source_evidence_scope": scope}
 
@@ -175,7 +188,8 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
             owners_by_source[source_key(s)].append(owner)
         if activity_id is None or activity_id in value["member_ids"]:
             sources = [{**s, "first_source_evidence": acquisitions[source_key(s)],
-                        "first_owner_evidence": ownership[(owner, source_key(s))]} for s in value["sources"]]
+                        "first_owner_evidence": ownership[(owner, source_key(s))],
+                        "last_owner_evidence": last_owner_evidence[(owner, source_key(s))]} for s in value["sources"]]
             selected.append({**value, "sources": sources})
     members = {m for g in selected for m in g["member_ids"]}
     if activity_id is not None:

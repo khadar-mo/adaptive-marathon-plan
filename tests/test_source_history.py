@@ -111,6 +111,9 @@ async def test_real_review_changes_ownership_after_decision_and_keeps_original_v
         joined, = after["groups"]
         assert joined["owner_id"] == 2 and joined["member_ids"] == [1,2]
         assert joined["provider_ids"] == original["provider_ids"]
+        moved_detail = next(s for s in original["sources"] if s["kind"] == "detail")
+        all_sources = (await client.get("/api/source-history")).json()["source_receipts"]
+        assert next(s for s in all_sources if s["sha256"] == moved_detail["sha256"])["observed_owners"] == [2]
         receipt = joined["identity_evidence"]
         assert receipt["basis"] == "REVIEW_RESOLUTION" and receipt["import_id"] == pending["id"]
         decision, = [r for r in after["review_events"] if r["action"] == "link"]
@@ -289,3 +292,92 @@ async def test_legacy_wire_scan_proves_raw_versions_without_assigning_an_owner(h
         assert all(r["first_source_evidence"]["basis"] == "COMPLETED_GARMIN_SCAN" and
                    r["first_source_evidence"]["import_id"] == report["id"] and not r["observed_owners"]
                    for r in data["source_receipts"])
+
+
+async def test_legacy_inventory_keeps_owned_embedded_fit_until_full_group_supersedes(history, tmp_path):
+    fixture = json.loads(gzip.decompress((Path(__file__).parent / "fixtures/source-history-g3-ba3ed18.json.gz").read_bytes()))
+    assert fixture["base_commit"] == "ba3ed18a9a70a99f06f36800e5dce962915d26d8"
+    db_path = tmp_path / "runs.sqlite3"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(fixture["sql"])
+    async with server() as client:
+        async def view_at(instant):
+            response = await client.get("/api/source-history", params={"knowledge_cutoff":instant})
+            assert response.status_code == 200, response.text
+            return response.json()
+        prior = await view_at(fixture["canonical_at"])
+        later = await view_at(fixture["inventory_at"])
+        def source(view, sha):
+            return next(s for s in view["source_receipts"] if s["sha256"] == sha)
+        inner = fixture["inner_sha"]
+        assert source(later, fixture["outer_sha"])["observed_owners"] == [1]
+        assert source(prior, inner)["observed_owners"] == source(later, inner)["observed_owners"] == [1]
+        owned = lambda view: next(s for s in view["groups"][0]["sources"] if s["sha256"] == inner)
+        assert owned(prior)["first_owner_evidence"] == owned(later)["first_owner_evidence"]
+        assert owned(prior)["last_owner_evidence"] == owned(later)["last_owner_evidence"]
+        assert source(prior, inner)["first_source_evidence"] == source(later, inner)["first_source_evidence"]
+
+        # An explicit newer complete canonical selection removes the recording.
+        # The next inventory can only re-establish the references it observed.
+        import canonical
+        with sqlite3.connect(db_path) as db:
+            row = db.execute("SELECT activity_id,config_version,payload FROM canonical_activity_versions ORDER BY rowid DESC LIMIT 1").fetchone()
+            removed = json.loads(row[2])
+            removed["sources"] = []
+            removed["raw_sources"] = [s for s in removed["raw_sources"] if s["sha256"] != fixture["outer_sha"]]
+            removed["selected_fit_sha256"] = removed["selected_source_version_id"] = None
+            vid = canonical.fingerprint(removed)
+            when = "2025-05-04T10:00:01.100000+00:00"
+            db.execute("INSERT INTO canonical_activity_versions VALUES(?,?,?,?,?)", (vid,row[0],row[1],canonical.encoded(removed),when))
+            db.execute("INSERT INTO canonical_selections(activity_id,version_id,selected_at) VALUES(?,?,?)", (row[0],vid,when))
+            inventory = json.loads(db.execute("SELECT payload FROM workload_processing_inventories LIMIT 1").fetchone()[0])
+            inventory["activities"][0]["source_refs_at_observation"] = []
+            cutoff = "2025-05-04T10:00:01.900000+00:00"
+            db.execute("INSERT INTO workload_processing_inventories VALUES(?,?,?)", ("after-removal",cutoff,json.dumps(inventory)))
+        assert source(await view_at(cutoff), inner)["observed_owners"] == []
+        assert await view_at(fixture["inventory_at"]) == later
+
+
+@pytest.mark.parametrize("kind", ["valid", "invalid_member", "invalid_container"])
+async def test_garmin_archived_original_and_member_survive_rolled_back_ownership(history, tmp_path, monkeypatch, kind):
+    import source_receipts
+    from test_canonical import trace_fit
+    from test_fit_import import zipped
+    from test_imports import submit
+
+    raw = trace_fit([(0,0),(5,15),(10,30),(15,45)])
+    if kind == "invalid_member":
+        raw = raw[:-1] + bytes([raw[-1] ^ 1])
+    archive_bytes = b"not a zip or FIT" if kind == "invalid_container" else zipped(raw)
+    history.original = archive_bytes
+    outer, inner = hashlib.sha256(archive_bytes).hexdigest(), hashlib.sha256(raw).hexdigest()
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("Synthetic rolled-back activity ownership")
+
+    async with server() as client:
+        with monkeypatch.context() as patch:
+            patch.setattr(source_receipts, "observe_group", fail)
+            failed = await submit(client)
+        assert failed["activities"] == []
+        assert (tmp_path/"archive"/outer).read_bytes() == archive_bytes
+        failed_view = (await client.get("/api/source-history")).json()
+        assert not failed_view["groups"]
+        def receipt(view, sha, k):
+            return next((s for s in view["source_receipts"] if s["sha256"] == sha and s["kind"] == k), None)
+        expected = [(outer, "original_error" if kind != "valid" else "original")]
+        if kind != "invalid_container":
+            assert (tmp_path/"archive"/inner).read_bytes() == raw
+            expected.append((inner, "fit"))
+        for sha, role in expected:
+            ref = receipt(failed_view, sha, role)
+            assert ref is not None, (role,failed_view["source_receipts"])
+            assert ref["observed_owners"] == [] and ref["first_source_evidence"]["import_id"] == failed["id"]
+        retry = await submit(client)
+        assert len(retry["activities"]) == 1
+        accepted = (await client.get("/api/source-history")).json()
+        for sha, role in expected:
+            assert receipt(accepted,sha,role)["first_source_evidence"] == receipt(failed_view,sha,role)["first_source_evidence"]
+            if kind == "valid":
+                assert receipt(accepted,sha,role)["observed_owners"] == [1]
+        previous = await client.get("/api/source-history",params={"knowledge_cutoff":failed_view["knowledge_cutoff"]})
+        assert previous.json() == failed_view

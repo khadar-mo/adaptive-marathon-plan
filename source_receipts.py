@@ -37,11 +37,12 @@ def record_sources(db, sources, basis, *, import_id=None, provider_id=None, ordi
 
 
 def group(owner, members, providers, sources, start, *, recordings=()):
+    recordings = sorted(set(recordings))
     values = {(s["kind"], s["sha256"], s["format"]): s.get("acquired_at") for s in sources}
     for sha in recordings:
         values.setdefault(("fit", sha, "fit"), None)
     return {"owner_id": owner, "member_ids": sorted(set([owner, *members])), "provider_ids": providers,
-            "claimed_event_start_utc": start,
+            "claimed_event_start_utc": start, "recording_sha256s": recordings,
             "sources": [{"kind": k, "sha256": sha, "format": fmt, "claimed_acquired_at": value}
                         for (k, sha, fmt), value in sorted(values.items())]}
 

@@ -7,9 +7,11 @@ from fit_data import FitError, decode_fit, fit_member
 from fit_store import store_laps
 
 
-def unpack_original(archive, data):
+def unpack_original(archive, data, *, member_stored=None):
     file_format, member = fit_member(data)
     digest = archive.put(member)
+    if member_stored is not None:
+        member_stored(digest)
     return file_format, {**decode_fit(member), "sha256": digest}
 
 
