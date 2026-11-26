@@ -19,7 +19,7 @@ from fit_fixture import START
 from recording import inspect
 from storage import Archive, Store
 from test_canonical import trace_fit
-from test_fit_import import upload, resolve
+from test_fit_import import upload, resolve, legacy_archive
 from test_fit_import import zipped
 from test_imports import history, server, digest, submit, add_run, LISTED, DETAIL
 from runs import ConnectionProblem
@@ -720,3 +720,68 @@ async def test_nonrepresentable_positive_elapsed_returns_422_without_partial_wri
         assert computed.status_code == 422 and 'represent' in computed.json()['detail']
         assert digest((tmp_path / 'runs.sqlite3').read_bytes()) == before
         assert (await client.get('/api/activities/1/efforts')).json() == row
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scope", ["single", "mixed_legacy", "mixed_processed"])
+async def test_failed_legacy_backfill_rolls_back_entire_request_then_retries(history, tmp_path, scope):
+    raw = trace_fit([(i, i * 4) for i in range(101)], laps=[(400, 99, 100)])
+    _, original, directory = legacy_archive(tmp_path, raw)
+    original_path = directory / digest(original)
+    # The original becomes available after startup, as when restoring an archive.
+    # Its member index must participate in the requested backfill transaction.
+    original_path.unlink()
+    store = Store(tmp_path / 'runs.sqlite3', Archive(directory))
+    async with server() as client:
+        if scope != 'single':
+            with store.connect(write=True) as db:
+                db.execute("""INSERT INTO activities(id, garmin_id, name, sport, start_local,
+                    local_date, distance_m, metric_sources)
+                    VALUES (730, '41', 'Legacy summary only', 'running',
+                    '2024-02-28 00:15', '2024-02-28', 400, '{}')""")
+            if scope == 'mixed_processed':
+                response = await client.post('/api/activities/730/efforts/recompute', json={})
+                assert response.status_code == 200
+        original_path.write_bytes(original)
+        ids = [731] if scope == 'single' else [730, 731]
+        before = {(aid, kind): (await client.get(f'/api/activities/{aid}/{kind}')).json()
+                  for aid in ids for kind in ('canonical', 'efforts')}
+        assert before[731, 'canonical']['state'] == before[731, 'efforts']['state'] == 'NOT_PROCESSED'
+        activity = (await client.get('/api/activities/731')).json()
+        database_before = digest(store.path.read_bytes())
+        endpoint = '/api/activities/731/efforts/recompute' if scope == 'single' else '/api/efforts/recompute'
+        config = {**efforts.DEFAULT_CONFIG, 'distances_m': [5e-324]}
+        failed = await client.post(endpoint, json={'config_version': 'legacy-retry', 'config': config})
+        assert failed.status_code == 422 and 'represent' in failed.json()['detail']
+        assert digest(store.path.read_bytes()) == database_before
+        for (aid, kind), previous in before.items():
+            assert (await client.get(f'/api/activities/{aid}/{kind}')).json() == previous
+        assert (await client.get('/api/activities/731')).json() == activity
+        with store.history() as db:
+            assert not db.execute('SELECT 1 FROM original_members').fetchone()
+            assert not db.execute('SELECT 1 FROM laps').fetchone()
+            assert not db.execute("SELECT 1 FROM effort_configs WHERE version='legacy-retry'").fetchone()
+        # The failed request must not reserve its configuration name, commit a
+        # default extraction, or leave a mixed batch's earlier selections behind.
+        config['distances_m'] = [400]
+        retried = await client.post(endpoint, json={'config_version': 'legacy-retry', 'config': config})
+        assert retried.status_code == 200 and [a['activity_id'] for a in retried.json()['activities']] == ids
+        row = (await client.get('/api/activities/731/efforts')).json()
+        assert row['state'] == 'PROCESSED' and row['config_version'] == 'legacy-retry'
+        assert row['selected_fit_sha256'] == digest(raw)
+        assert distance(row, 400)['flagged_candidate']['elapsed_seconds'] == 100
+        with store.history() as db:
+            member = db.execute('SELECT fit_sha FROM original_members WHERE original_sha=?', (digest(original),)).fetchone()
+            assert member[0] == digest(raw)
+            assert db.execute('SELECT distance_m FROM laps WHERE activity_id=731').fetchone()[0] == 400
+        if scope != 'single':
+            summary = (await client.get('/api/activities/730/efforts')).json()
+            assert summary['state'] == 'PROCESSED' and summary['config_version'] == 'legacy-retry'
+            assert summary['selected_fit_sha256'] is None and summary['sources'] == []
+        restored = (await client.get('/api/activities/731')).json()
+        assert {key: value for key, value in restored.items() if key not in ('laps', 'warnings')} == {
+            key: value for key, value in activity.items() if key not in ('laps', 'warnings')}
+        assert restored['laps'][0]['distance_m'] == 400
+        assert restored['warnings'] == ['Recorded lap distances differ from the Garmin activity distance.']
+        assert original_path.read_bytes() == original and (directory / digest(raw)).read_bytes() == raw
+        assert history.calls == []

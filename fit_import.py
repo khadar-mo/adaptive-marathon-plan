@@ -11,15 +11,17 @@ def unpack_original(archive, data):
     return file_format, {**decode_fit(member), "sha256": digest}
 
 
-def index_originals(store, archive):
-    # PR #9 archived original bytes by the outer ZIP hash. Build their member index
-    # from local evidence, including recordings whose Garmin summary lacked UTC.
-    with store.history() as db:
-        if db is None:
-            return
-        originals = db.execute("""SELECT DISTINCT s.sha256 FROM activity_sources s
+def unindexed_originals(db):
+    return db.execute("""SELECT DISTINCT s.sha256 FROM activity_sources s
                  LEFT JOIN original_members m ON m.original_sha=s.sha256
                  WHERE s.kind IN ('original', 'original_unavailable') AND m.original_sha IS NULL ORDER BY s.rowid""").fetchall()
+
+
+def index_originals_in_db(db, archive, originals=None):
+    """Index local original members/laps inside the caller's transaction."""
+    # PR #9 archived original bytes by the outer ZIP hash. Include recordings
+    # whose Garmin summary lacked UTC; never open a nested SQLite handle.
+    originals = unindexed_originals(db) if originals is None else originals
     for (outer,) in originals:
         try:
             data = archive.read(outer)
@@ -31,16 +33,25 @@ def index_originals(store, archive):
             continue
         except FitError:
             fit = None
+        db.execute("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
+                   (outer, fit["sha256"] if fit else None, fit["identity"] if fit else None))
+        if fit:
+            owners = db.execute("""SELECT DISTINCT activity_id FROM activity_sources
+                                   WHERE kind IN ('original', 'original_unavailable') AND sha256=?""",
+                                (outer,)).fetchall()
+            for (owner,) in owners:
+                if not db.execute("SELECT 1 FROM fit_sources WHERE activity_id=?", (owner,)).fetchone():
+                    store_laps(db, owner, fit["laps"])
+
+
+def index_originals(store, archive):
+    with store.history() as db:
+        if db is None:
+            return
+        originals = unindexed_originals(db)
+    for original in originals:
         with store.connect(write=True) as db:
-            db.execute("INSERT OR IGNORE INTO original_members VALUES (?, ?, ?)",
-                       (outer, fit["sha256"] if fit else None, fit["identity"] if fit else None))
-            if fit:
-                owners = db.execute("""SELECT DISTINCT activity_id FROM activity_sources
-                                       WHERE kind IN ('original', 'original_unavailable') AND sha256=?""",
-                                    (outer,)).fetchall()
-                for (owner,) in owners:
-                    if not db.execute("SELECT 1 FROM fit_sources WHERE activity_id=?", (owner,)).fetchone():
-                        store_laps(db, owner, fit["laps"])
+            index_originals_in_db(db, archive, [original])
 
 
 def stage_uploads(store, archive, import_id, files):

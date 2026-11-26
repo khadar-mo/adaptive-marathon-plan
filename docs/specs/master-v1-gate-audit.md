@@ -94,6 +94,9 @@ and attained representatives in flat open cells without an earliest-start claim.
 Limits now carry direction-specific open-cell QC and exact recency support.
 Repeated rejected representatives, microsecond review-identity bins and exact
 coordinate form round-trips have causal regressions and an independent QC-cell oracle.
+Legacy member/lap indexing, canonical backfill and requested G2 extraction now share
+one SQLite transaction; public single/mixed-batch regressions and a real HTTP retry
+verify no committed heads, configuration or selections after extraction failure.
 
 **Human/scientific validation for G0/G1/G2 remains UNVERIFIED.** Software merge is
 not a claim that those validation gates passed. G3 workload, G4 candidate estimators

@@ -117,6 +117,13 @@ pause/plateau/gap audit, checksums and code/parser/config lineage.
 | Same verification URL + `/review` POST | `action` accept/reject/annotate, `actor`, `note`; append-only previous-review linkage. |
 | Same verification URL + `/context` POST | `category`, tags, actor, note, optional protocol and explicit `maximal_confirmed`; append-only context ID and previous-context linkage. |
 
+Recompute commits legacy original-member/lap indexing, missing canonical heads and
+the requested G2 configuration, versions and selections in one serialized SQLite
+transaction. Any extraction failure rolls back the whole batch, including earlier
+activities with existing heads. Original archive bytes are immutable; unpacking can
+retain a content-addressed copy of an existing ZIP member, but its database index
+and derived evidence remain uncommitted until the request succeeds.
+
 Effort identity hashes extraction version, source checksum and the reported interval
 including block and attainment convention. Exact rational crossing coordinates and
 original endpoint samples remain separate audit evidence. Annotation does not change identity. Context
@@ -222,6 +229,15 @@ repository, independent of pytest's working directory.
   underflowed to zero. The new public regression first reproduced ZeroDivisionError.
   Inspection and recompute now return 422 with a byte-identical database; staged
   configuration registration rolls back with the failed extraction.
+- Final review found that legacy canonical backfill had committed before a failed
+  G2 request. Three public regressions reproduced this on the reviewed head: one
+  legacy ZIP, a mixed legacy batch, and a batch with an already processed activity.
+  All now retain byte-identical SQLite after 422, then successfully reuse the same
+  configuration name on retry. Restored member/lap indexing, summary-only evidence,
+  original ZIP bytes and offline behavior are verified. Focused checks: **20 passed**;
+  complete canonical/import suites: **105 passed**. A separate loopback HTTP replay
+  confirmed unchanged canonical/effort reads and SQLite after failure, followed by
+  successful processing of both activities with their original IDs.
 - Final mutation checks removed raw-index uncertainty overlap, then replaced the
   rational coordinate conversion with binary64. Each corresponding new public
   regression failed as expected. Both mutations were restored byte-for-byte;

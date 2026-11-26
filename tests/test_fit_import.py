@@ -190,7 +190,7 @@ async def test_conflicting_garmin_ids_cannot_split_identical_fit_bytes(history):
         assert row["garmin_id"] == "42" and (await client.get("/api/activities/2")).status_code == 404
 
 
-def legacy_archive(tmp_path):
+def legacy_archive(tmp_path, data=None):
     # These are the pre-FIT tables and constraints used by the merged first importer.
     with closing(sqlite3.connect(tmp_path / "runs.sqlite3")) as db, db:
         db.executescript("""
@@ -208,7 +208,7 @@ def legacy_archive(tmp_path):
         INSERT INTO activities VALUES (731, '42', 'Legacy', 'running', '2024-02-29 00:15', '2024-02-29',
             NULL, 4500, NULL, NULL, NULL, '{}', NULL);
         """)
-        data = make_fit(laps=[(324.5, 80, 120)])
+        data = data if data is not None else make_fit(laps=[(324.5, 80, 120)])
         original = zipped(data)
         directory = tmp_path / "archive"
         directory.mkdir(mode=0o700)
