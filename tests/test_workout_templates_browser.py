@@ -1,6 +1,28 @@
 """Real Chromium coverage of the template editor and exact W2 block accounting."""
+from urllib.parse import urljoin
+
 from test_fit_browser import chrome_executable
 from test_health import serve_database
+
+
+def save_from_editor(page):
+    from playwright.sync_api import expect
+
+    form = page.locator("#template-editor")
+    invalid = form.evaluate("""form => Array.from(form.elements)
+        .filter(field => field.willValidate && !field.validity.valid)
+        .map(field => [field.name, field.validationMessage])""")
+    assert invalid == []
+    api_path = form.get_attribute("action")
+    api_url = urljoin(page.url, api_path)
+    detail_path = api_path.removeprefix("/api")
+    with page.expect_response(lambda r: r.url == api_url and r.request.method == "POST") as posted:
+        page.get_by_role("button", name="Save workout template").press("Enter")
+    response = posted.value
+    assert response.status == 200, response.text()
+    assert response.headers["content-type"].startswith("application/json")
+    expect(page).to_have_url(urljoin(api_url, detail_path))
+    return response.request
 
 
 def test_w2_normal_form_round_trip(tmp_path):
@@ -11,12 +33,21 @@ def test_w2_normal_form_round_trip(tmp_path):
             page = browser.new_page(viewport={"width":1240,"height":900})
             base = f"http://127.0.0.1:{port}"
             page.goto(base + "/workouts")
-            page.get_by_role("link", name="Workout templates").press("Enter")
+            script_url = base + "/assets/workout-template-editor.js"
+            held = []
+            page.route(script_url, lambda route: held.append(route), times=1)
+            with page.expect_request(script_url):
+                page.get_by_role("link", name="Workout templates").press("Enter", no_wait_after=True)
+            expect(page.get_by_role("status")).to_have_text("Loading the workout template editor…")
+            expect(page.locator("#template-editor")).to_be_attached()
+            expect(page.locator("#template-editor")).to_be_hidden()
+            held.pop().continue_()
             page.get_by_label("Template name").fill("W2 arithmetic fixture")
             page.get_by_label("Primary purpose").select_option("TEMPO_THRESHOLD")
             page.get_by_label("Intended role").select_option("PRIMARY_QUALITY")
             page.get_by_label("Secondary tags").fill('["BENCHMARK_TAG"]')
-            for i, (kind, distance) in enumerate([("WARM_UP",5000), ("WORK",6000), ("COOL_DOWN",16000)]):
+            doses = [("WARM_UP", 5000), ("WORK", 6000), ("COOL_DOWN", 16000)]
+            for i, (kind, distance) in enumerate(doses):
                 if i:
                     page.get_by_role("button", name="Add block").press("Enter")
                 block = page.get_by_role("group", name=f"Block {i+1}", exact=True)
@@ -28,12 +59,23 @@ def test_w2_normal_form_round_trip(tmp_path):
                     block.get_by_label("Protect this block").check()
             page.get_by_label("Recorded by").fill("Synthetic runner")
             page.get_by_label("Reason for this revision").fill("Check independently specified W2 quantities")
-            with page.expect_navigation():
-                page.get_by_role("button", name="Save workout template").press("Enter")
+            posted = save_from_editor(page)
+            sent = posted.post_data_json
+            assert (sent["name"], sent["primary"], sent["role"], sent["tags"]) == (
+                "W2 arithmetic fixture", "TEMPO_THRESHOLD", "PRIMARY_QUALITY", ["BENCHMARK_TAG"])
+            assert [(b["kind"], b["distance_m"]) for b in sent["blocks"]] == doses
             expect(page.get_by_text("27,000 m total", exact=True)).to_be_visible()
+            current = page.request.get(posted.url)
+            assert current.status == 200
+            record = current.json()["record"]
             api = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
-            r = page.request.get(base + api).json()
-            assert r["primary"] == "TEMPO_THRESHOLD" and r["tags"] == ["BENCHMARK_TAG"]
+            assert api == f"/api/workout-templates/{record['template_id']}/versions/{record['version_id']}"
+            persisted = page.request.get(base + api)
+            assert persisted.status == 200
+            r = persisted.json()
+            assert r == record
+            assert all(r[key] == sent[key] for key in ("name", "primary", "role", "tags"))
+            assert [(b["kind"], b["distance_m"]) for b in r["blocks"]] == doses
             assert (r["accounting"]["total_m"], r["accounting"]["work_m"], r["accounting"]["easy_m"]) == (27000,6000,21000)
             assert r["accounting"]["duration_upper_s"] is None
             assert r["blocks"][1]["protected"]
@@ -72,8 +114,7 @@ def test_pace_precision_mobile_history_stale_and_invalid_forms(tmp_path):
             block.get_by_label("Evidence status").select_option("SUPPORTED")
             page.get_by_label("Recorded by").fill("Fixture runner")
             page.get_by_label("Reason for this revision").fill("Enter decimal bounds")
-            with page.expect_navigation():
-                page.get_by_role("button", name="Save workout template").press("Enter")
+            save_from_editor(page)
             url = page.url
             first_url = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
             first = page.request.get(base + first_url).json()
@@ -84,8 +125,7 @@ def test_pace_precision_mobile_history_stale_and_invalid_forms(tmp_path):
             page.get_by_label("Template name").fill("Edited description")
             page.get_by_label("Recorded by").fill("Fixture runner")
             page.get_by_label("Reason for this revision").fill("Rename only")
-            with page.expect_navigation():
-                page.get_by_role("button", name="Save workout template").press("Enter")
+            save_from_editor(page)
             second_url = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
             second = page.request.get(base + second_url).json()
             assert second["previous_version_id"] == first["version_id"]

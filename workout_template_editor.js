@@ -109,3 +109,5 @@ form.addEventListener("submit", async event => {
     location.assign(result.html_url);
   } catch (err) { status.textContent = err.message; button.disabled = false; }
 });
+form.hidden = false;
+document.querySelector("#template-loading").remove();

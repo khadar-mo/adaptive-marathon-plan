@@ -132,7 +132,8 @@ def block_editor():
 def editor(key, record=None):
     initial = {k: record[k] for k in ("name", "primary", "role", "tags", "blocks", "version_id")} if record else {}
     initial_json = json.dumps(initial, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
-    return (f'<form id="template-editor" action="/api/workout-templates/{key}" method="post">'
+    return ('<p id="template-loading" role="status">Loading the workout template editor…</p>'
+            f'<form id="template-editor" action="/api/workout-templates/{key}" method="post" hidden>'
             + field("name","Template name",required=True)
             + '<label>Primary purpose<select name="primary">' + options(templates.CATEGORIES) + '</select></label>'
             + '<label>Intended role<select name="role">' + options(templates.ROLES) + '</select></label>'
