@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import ValidationError
 
 from availability_web import e, invalid, reject_constant, unique_object
 import views
@@ -74,10 +73,10 @@ async def save(request: Request, key: templates.Key):
 
 
 @router.post("/api/workout-templates/{key}/versions/{version_id}/preview")
-async def preview(request: Request, key: templates.Key, version_id: templates.Hash):
+async def preview(request: Request, key: templates.Key, version_id: templates.Hash, as_of: str | None = None):
     try:
         choice = templates.Adjustments.model_validate(await document(request))
-        record = version(request, key, version_id)
+        record = version(request, key, version_id, as_of)
         return {"template_id": key, "version_id": version_id,
                 "accounting": templates.account(record["blocks"], choice.distances_m)}
     except (ValueError, OverflowError) as exc:
@@ -118,10 +117,10 @@ def block_editor():
             + '<div class="pace-evidence">' + field('pace_lower', 'Fastest pace', required=True)
             + field('pace_upper', 'Slowest pace', required=True)
             + '<label>Pace unit<select name="pace_unit"><option>s/km</option><option>min/km</option><option>s/m</option></select></label>'
-            + field('pace_method', 'Pace method', required=True) + text_field('pace_source_ref','Pace source reference', required=True)
+            + field('pace_method', 'Pace method') + text_field('pace_source_ref','Pace source reference')
             + text_field('pace_calibration', 'Pace calibration reference')
-            + field('pace_evidence_known_at','Evidence known at (ISO timestamp with UTC offset)', required=True)
-            + text_field('pace_uncertainty','Pace uncertainty', required=True)
+            + field('pace_evidence_known_at','Evidence known at (ISO timestamp with UTC offset)')
+            + text_field('pace_uncertainty','Pace uncertainty')
             + '<label>Evidence status<select name="pace_status"><option>UNVERIFIED</option><option>SUPPORTED</option></select></label></div></details>'
             + '<details><summary>Intensity zone</summary><label><input type="checkbox" name="use_zone"> Record a zone in its own method</label>'
             + '<div class="zone-evidence">' + field('zone_method','Zone method', required=True)
@@ -163,6 +162,32 @@ def page(request: Request, as_of: str | None = None):
     return views.page("Workout templates", content)
 
 
+def block_summary(block, calculated):
+    dose = [f'{calculated["min_m"]:,}–{calculated["max_m"]:,} m permitted',
+            f'{e(block["rest_after_s"])} s stationary rest']
+    if block["protected"]:
+        dose.append("Protected")
+    if block["allow_split"]:
+        dose.append("Easy-volume split allowed")
+    body = (f'<strong>{e(label(block["kind"]))} · {block["distance_m"]:,} m</strong><br>'
+            f'{e(block["intensity"])} · {e(block["intensity_method"])}<br>' + " · ".join(dose))
+    pace = block["pace"]
+    if pace:
+        body += (f'<details><summary>Pace {e(pace["lower"])}–{e(pace["upper"])} {e(pace["unit"])}</summary>'
+                 f'<dl><dt>Runner-declared evidence</dt><dd>{e(pace["status"])}</dd>')
+        for key, title in (("method", "Method"), ("source_ref", "Source"), ("calibration", "Calibration"),
+                           ("evidence_known_at", "Known at"), ("uncertainty", "Uncertainty")):
+            body += f'<dt>{title}</dt><dd>{e(pace[key] or "Unspecified")}</dd>'
+        body += '</dl></details>'
+    zone = block["zone"]
+    if zone:
+        body += (f'<p>{e(zone["method"])} · {e(zone["band"])} · {e(calculated["zone_status"])}'
+                 f'<br>Calibration · {e(zone["calibration"] or "Unspecified")}</p>')
+    else:
+        body += '<p>ZONE_UNVERIFIED · No zone method supplied.</p>'
+    return '<li>' + body + '</li>'
+
+
 @router.get("/workout-templates/{key}", response_class=HTMLResponse)
 def detail(request: Request, key: templates.Key, version_id: templates.Hash | None = None, as_of: str | None = None):
     state = current(request, key, as_of)
@@ -173,14 +198,14 @@ def detail(request: Request, key: templates.Key, version_id: templates.Hash | No
                f'<p>{e(label(r["primary"]))} · {e(label(r["role"]))} · revision {r["revision"]}</p>'
                f'<p><strong>{data["total_m"]:,} m total</strong> · {data["work_m"]:,} m work · {data["easy_m"]:,} m easy</p>'
                f'<p>Stationary rest {e(data["rest_s"])} s · {e(data["duration_status"])}</p>')
+    if r["tags"]:
+        content += '<p>Secondary tags</p><ul>' + "".join(f'<li>{e(tag)}</li>' for tag in r["tags"]) + '</ul>'
     if data["duration_upper_s"] is not None:
         content += f'<p>Supplied duration range {e(data["duration_lower_s"])}–{e(data["duration_upper_s"])} seconds, including rest.</p>'
-    content += '<ol>'
-    for block, calculated in zip(r["blocks"], data["blocks"]):
-        content += (f'<li><strong>{e(label(block["kind"]))} · {block["distance_m"]:,} m</strong><br>'
-                    f'{e(block["intensity"])} · {e(block["intensity_method"])} · {e(calculated["zone_status"])}'
-                    f'<br>Permitted {calculated["min_m"]:,}–{calculated["max_m"]:,} m · rest {e(block["rest_after_s"])} s</li>')
-    content += f'</ol><p>Recorded by {e(r["actor"])} at {e(r["known_at"])} · {e(r["reason"])}</p>'
+    else:
+        content += f'<p>{len(data["missing_pace_block_ids"])} running blocks lack supported pace evidence.</p>'
+    content += '<ol>' + "".join(block_summary(b, a) for b, a in zip(r["blocks"], data["blocks"])) + '</ol>'
+    content += f'<p>Recorded by {e(r["actor"])} at {e(r["known_at"])} · {e(r["reason"])}</p>'
     content += f'<p><a href="/api/workout-templates/{key}/versions/{r["version_id"]}{e(suffix)}">Exact revision JSON</a></p><h2>Revision history</h2><ul>'
     for older in state["versions"]:
         query = {"version_id": older["version_id"]}

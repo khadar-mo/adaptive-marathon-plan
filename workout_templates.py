@@ -47,24 +47,25 @@ class Pace(Input):
     lower: Quantity
     upper: Quantity
     unit: Literal["s/km", "min/km", "s/m"]
-    method: ShortText
-    source_ref: Text
+    method: ShortText | None = None
+    source_ref: Text | None = None
     calibration: Text | None = None
-    evidence_known_at: str
-    uncertainty: Text
+    evidence_known_at: str | None = None
+    uncertainty: Text | None = None
     status: Literal["SUPPORTED", "UNVERIFIED"]
 
     @field_validator("evidence_known_at")
     @classmethod
     def absolute_time(cls, value):
-        return inputs.utc(value)
+        return inputs.utc(value) if value is not None else None
 
     @model_validator(mode="after")
     def bounds(self):
         if self.lower <= 0 or self.upper < self.lower:
             raise ValueError("Give positive pace bounds from fastest to slowest.")
-        if self.status == "SUPPORTED" and not self.calibration:
-            raise ValueError("Supported pace bounds require a calibration reference.")
+        if self.status == "SUPPORTED" and not all((self.method, self.source_ref, self.calibration,
+                                                  self.evidence_known_at, self.uncertainty)):
+            raise ValueError("Supported pace needs a method, source, calibration, knowledge time and uncertainty.")
         return self
 
 
@@ -218,7 +219,7 @@ def save(store, key, raw):
         if submission.expected_revision != (previous["version_id"] if previous else None):
             raise Conflict("The template changed. Reopen the current revision before editing.")
         known = inputs.now()
-        if any(b.pace and b.pace.evidence_known_at > known for b in submission.blocks):
+        if any(b.pace and b.pace.evidence_known_at and b.pace.evidence_known_at > known for b in submission.blocks):
             raise ValueError("Pace evidence cannot be first known after this submission.")
         del payload["expected_revision"]
         record = {**payload, "template_id": key, "schema_version": VERSION, "known_at": known,

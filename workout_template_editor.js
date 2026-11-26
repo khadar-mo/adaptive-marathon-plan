@@ -71,7 +71,7 @@ function addBlock(original = {}) {
 }
 function readEvidence(block, name, keys) {
   if (!control(block, "use_" + name).checked) return null;
-  return Object.fromEntries(keys.map(k => [k, k === "calibration" ? optional(block, name + "_" + k) : value(block, name + "_" + k)]));
+  return Object.fromEntries(keys.map(k => [k, optional(block, name + "_" + k)]));
 }
 function readBlock(b) {
   return {

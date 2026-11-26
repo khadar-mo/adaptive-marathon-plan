@@ -286,6 +286,25 @@ Generate made-up exports with `python3 demo_efforts.py /tmp/marathon-g2-examples
 upload them only to a separate demo database. Human Garmin comparison and scientific
 validation remain unverified. Observed fastest efforts are not coaching authority.
 
+## Edit workout templates
+
+Open **Workout labels → Workout templates**. Enter a primary purpose, a role,
+optional secondary tags and one block for each warm-up, work repetition,
+active recovery, cool-down or easy-volume segment. Enter stationary rest in
+seconds. Each revision shows the resulting total, work and easy metres.
+The form accepts explicit adjustment bounds on easy blocks and preserves
+protected work. Supplied pace bounds retain their decimal precision, source,
+method, calibration, knowledge time and uncertainty. Missing evidence appears
+as an unavailable duration. Device and runner zone methods retain their names.
+
+`POST /api/workout-templates/{key}` creates or revises a template using a
+request ID and the expected previous version. The first submission uses
+`expected_revision: null`. Inspect a saved revision with
+`GET /api/workout-templates/{key}/versions/{version_id}`. Append `/preview`
+and POST a `distances_m` object keyed by block ID to calculate an allowed
+adjustment. Reads support an absolute `as_of` cutoff. The library retains
+each runner decision for the planner to reference.
+
 ## Record optional fueling practice
 
 Open a recorded activity and choose **Record fueling practice and tolerance**.
