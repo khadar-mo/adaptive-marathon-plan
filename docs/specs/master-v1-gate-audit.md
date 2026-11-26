@@ -214,3 +214,25 @@ read-only fallback, entry, correction and replay; the G2 fixture verifies unchan
 saved effort state. See [the contract](fueling-inputs.md) and
 [acceptance evidence](fueling-acceptance.md). Latest-head CI and independent review
 remain required. Nutrition research and runner-specific tolerance validation remain open.
+
+## Candidate estimator software — issue #27
+
+G4 adds the achieved distance profile, separate Riegel source/target comparisons,
+centered OLS CS/D′, residuals/R², source-activity overlap, all supported subsets,
+three-versus-four-distance leave-one-out behavior and 56/84/112/168-day sensitivity.
+Signed D′ and uncomputable diagnostics remain inspectable. Undefined scientific
+cutoffs are editable immutable review policies; defaults remain UNKNOWN.
+
+The Best efforts entry opens actual cutoff/configuration/source controls,
+calculate/save and history. Saved non-PB G2 inspections can be selected. Each
+saved evaluation copies observations, full source geometry/samples, versions,
+QC, reviews, context/optional qualification and exclusions in one transaction.
+Later labels/rejections/recomputations do not rewrite earlier evaluations.
+Event cutoff, unknown retrospective knowledge cutoff and creation time remain
+separate; these are event-time reconstructions, not prospective predictions.
+See the [ten-item G4 acceptance record](g4-acceptance.md) for tests and API/UI proof.
+
+G4 software awaits final independent review and CI in its focused PR. Human and
+physiological validation remain **UNVERIFIED**, personal predictive validity
+**UNTESTED**, and prescription authority false. No personal CS-to-marathon
+regression, combined model or calibrated confidence interval is supplied.
