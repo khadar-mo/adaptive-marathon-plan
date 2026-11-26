@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS fm_events (
  sequence INTEGER PRIMARY KEY, source TEXT NOT NULL, source_key TEXT NOT NULL,
  UNIQUE(source,source_key)
 );
+CREATE TABLE IF NOT EXISTS fm_config_selections (
+ sequence INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, config_version TEXT NOT NULL,
+ selected_at TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fm_refreshes (
  through_sequence INTEGER PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES fm_snapshots(id)
 );
@@ -34,7 +38,7 @@ INPUT_EVENTS = {
     "workload_input_versions": "id", "source_acquisitions": "id", "source_group_history": "id",
     "source_identity_reviews": "id", "provider_config_revisions": "revision",
     "fitness_run_context": "id", "fitness_configs": "version", "estimator_configs": "version",
-    "qc_configs": "version", "effort_configs": "version",
+    "fm_config_selections": "event_key", "qc_configs": "version", "effort_configs": "version",
 }
 
 for table, key in INPUT_EVENTS.items():

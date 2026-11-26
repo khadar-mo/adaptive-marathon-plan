@@ -34,6 +34,8 @@ from availability_web import router as availability_router
 from source_history_web import router as source_history_router
 from workload_web import router as workload_router
 from fitness_web import router as fitness_router
+import asyncio
+import validation_refresh
 from validation_web import router as validation_router
 from workout_web import router as workout_router
 from runner_settings_web import router as settings_router
@@ -50,7 +52,15 @@ async def lifespan(app):
     except (OSError, sqlite3.Error):
         # Keep /health reachable when storage is unreadable.
         pass
-    yield
+    task = asyncio.create_task(validation_refresh.run(app.state.store))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(lifespan=lifespan)

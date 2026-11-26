@@ -1,9 +1,10 @@
 """G6. Build immutable FitnessSnapshots from dated G1–G5 selections in one transaction."""
-from collections import defaultdict
 import hashlib
+import json
 from pathlib import Path
 
 import canonical
+import fm_observations
 import estimators
 import fitness
 import fitness_evidence
@@ -19,7 +20,7 @@ RECONSTRUCTION = "EVENT_TIME_RECONSTRUCTION"
 
 
 def code_hash():
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return hashlib.sha256(Path(__file__).read_bytes() + Path(fm_observations.__file__).read_bytes()).hexdigest()
 
 
 def workout_tokens(group):
@@ -39,6 +40,12 @@ def usable_group(row, by_owner):
     return group, None
 
 
+def selected_config(db, k):
+    row = db.execute("SELECT * FROM fm_config_selections WHERE selected_at<=? ORDER BY selected_at DESC,sequence DESC LIMIT 1",
+                     (k,)).fetchone()
+    return dict(row) if row else None
+
+
 def config_evidence(db, g5):
     version = g5["definition"]["config"]["estimator_config"]
     selected = {"version": version, "basis": "VERSIONED_CODE_DEFAULT", "registered_at": None}
@@ -47,7 +54,9 @@ def config_evidence(db, g5):
         if not row or wi.utc(row[0]) > g5["knowledge_cutoff"]:
             raise ValueError("Estimator configuration registration is unavailable at the knowledge cutoff.")
         selected.update(basis="REGISTRATION", registered_at=row[0])
+    active = selected_config(db, g5["knowledge_cutoff"])
     return {"fitness": g5["definition"], "estimator": selected,
+            "dated_active_fitness_config": active,
             "method_selection": "Current artifact creation; no earlier method selection is inferred."}
 
 
@@ -71,6 +80,11 @@ def build_inputs(db, archive, t, k, mode, config_version, inventory=None):
                              "reason": reason or "CANONICAL_VERSION_UNAVAILABLE", "selection": row["selection"]})
             remap = True
             continue
+        source = db.execute("SELECT json_extract(payload,'$.parser') AS parser,created_at FROM canonical_source_versions WHERE id=?",
+                            (row["selected_source_version_id"],)).fetchone()
+        if source and wi.utc(source["created_at"]) <= k:
+            row["source_parser"] = json.loads(source["parser"]) if source["parser"] else None
+            row["source_created_at"] = source["created_at"]
         groups.append(group)
         kept.append(row)
     wb["activities"] = kept
@@ -90,12 +104,37 @@ def build_inputs(db, archive, t, k, mode, config_version, inventory=None):
         g5["run_context"] = [r for r in g5["run_context"] if r["activity_id"] in all_ids]
     keys = {(s["kind"], s["sha256"], s["format"]) for g in groups for s in g["sources"]}
     source_facts = {"version": ledger["version"], "groups": groups,
+                    "unowned_sources": [{**r, "reason": "NO_DATED_WORKOUT_OWNERSHIP"} for r in ledger["source_receipts"]
+                                        if not r["observed_owners"]],
                     "source_receipts": [r for r in ledger["source_receipts"] if (r["kind"], r["sha256"], r["format"]) in keys],
                     "identity_reviews": [r for r in ledger["review_events"] if r["owner_id"] in all_ids
                                          or all_ids.intersection(r["candidates_at_observation"])],
                     "ownership_history": [h for h in ledger["group_history"] if all_ids.intersection(h["group"]["member_ids"])],
                     "availability_policy": "First immutable source and owner evidence, independently dated. Claimed acquisition is informational."}
-    return {"version": VERSION, "code_sha256": code_hash(), "g5": g5, "source_evidence": source_facts, "configuration": config}
+    config["activity_configurations"] = activity_configs(db, kept, k)
+    return {"version": VERSION, "code_sha256": code_hash(), "g5": g5, "source_evidence": source_facts, "configuration": config,
+            "observations": fm_observations.extract(db, archive, g5)}
+
+
+def activity_configs(db, activities, k):
+    selections = []
+    for row in activities:
+        aid = row["activity_id"]
+        qc = {"version": row["qc_config_version"], "definition": row["qc_config"], "selection": row["selection"],
+              "available_by": row["canonical_created_at"], "registration_at": None,
+              "basis": "IMMUTABLE_CANONICAL_VERSION_AND_SELECTION"}
+        eff = db.execute("""SELECT s.id AS selection_id,s.selected_at,v.id AS version_id,v.created_at,v.payload
+            FROM effort_selections s JOIN effort_versions v ON v.id=s.version_id WHERE s.activity_id=? AND
+            s.selected_at<=? AND v.created_at<=? ORDER BY s.selected_at DESC,s.id DESC LIMIT 1""", (aid,k,k)).fetchone()
+        extraction = None
+        if eff:
+            payload = json.loads(eff["payload"])
+            extraction = {"version_id": eff["version_id"], "available_by": eff["created_at"],
+                "selected_at": eff["selected_at"], "selection_id": eff["selection_id"], "registration_at": None,
+                "config_version": payload.get("config_version"), "definition": payload.get("config"),
+                "basis": "IMMUTABLE_EFFORT_VERSION_AND_SELECTION"}
+        selections.append({"activity_id": aid, "qc": qc, "effort": extraction})
+    return selections
 
 
 def planner_adapter(bundle, state):
@@ -112,7 +151,9 @@ def planner_adapter(bundle, state):
             "fit_message_written_utc": row["fit_message_written_utc"], "timing_disagreement": row["timing_disagreement"],
             "measures": row["measures"], "distance_m": row["measures"]["distance_m"], "missing_measures": row["missing_measures"],
             "source_version_id": row["selected_source_version_id"], "selected_fit_sha256": row["selected_fit_sha256"],
-            "normalization_version": row["canonical_payload"].get("normalization_version"),
+            "normalization_version": (row.get("source_parser") or {}).get("normalization_version"),
+            "source_parser": row.get("source_parser"), "source_created_at": row.get("source_created_at"),
+            "fit_timing_mapping": (row["canonical_payload"].get("header") or {}).get("end_basis"),
             "qc_config_version": row["qc_config_version"]})
     return {"basis": "START", "timezone": "Europe/London", "actuals": rows,
         "weeks": [{k: w[k] for k in ("iso_week", "local_from", "local_to_exclusive", "full_week_bounds", "week_state", "planner_start", "fm_end")}
@@ -127,7 +168,15 @@ def planner_adapter(bundle, state):
 
 def calculate(bundle):
     state = fitness.calculate(bundle["g5"])
+    config = bundle["configuration"]
+    source = bundle["source_evidence"]
     return {"fitness": state, "planner": planner_adapter(bundle, state),
+            "lineage": {"fitness_config": config["fitness"]["version"], "fitness_config_selection": config["dated_active_fitness_config"],
+                        "estimator": config["estimator"], "input_versions": [r["version_id"] for r in state["exposure"]["input_records"]],
+                        "context_versions": state["lineage"]["context_version_ids"], "classification": state["lineage"]["session_labels"],
+                        "run_context_versions": state["lineage"]["run_context_ids"], "activity_configurations": config["activity_configurations"],
+                        "provider": state["exposure"]["provider_lineage"], "unowned_sources": source["unowned_sources"],
+                        "code": {"g6": bundle["code_sha256"], "g5": bundle["g5"]["code_sha256"], **bundle["g5"]["upstream"]}},
             "availability": {"provider": state["exposure"]["provider_lineage"],
                              "strava_persistent": "POLICY_BLOCKED", "missingness": state["quality"]},
             "validation": {"deterministic": "REPLAY_AVAILABLE", "manual_garmin": "UNVERIFIED",
@@ -154,6 +203,11 @@ def changes(previous, result, before_hash, digest):
         differences.append({"field": "input_hash", "before": before_hash, "after": digest,
                             "reason": "Frozen eligible evidence, cutoffs or recipe changed."})
     if previous:
+        for key in sorted(result["lineage"]):
+            old = previous.get("lineage", {}).get(key)
+            if old != result["lineage"][key]:
+                differences.append({"field": f"lineage.{key}", "before": old, "after": result["lineage"][key],
+                                    "reason": "The recorded input version, selection or source evidence changed."})
         before = {r["activity_id"]: r for r in previous["planner"]["actuals"]}
         after = {r["activity_id"]: r for r in result["planner"]["actuals"]}
         for owner in sorted(before.keys() | after.keys()):
@@ -164,7 +218,7 @@ def changes(previous, result, before_hash, digest):
 
 
 def build_fitness_snapshot(db, archive, *, as_of=None, knowledge_cutoff=None, mode="AS_KNOWN",
-                           config_version=fitness_inputs.DEFAULT_VERSION, previous_id=None):
+                           config_version=None, previous_id=None):
     inventory = None
     if not as_of and not knowledge_cutoff or mode == "EVENT_TIME_RECONSTRUCTION" and not knowledge_cutoff:
         inventory = workload_processing.observe(db, persist=True)
@@ -173,6 +227,9 @@ def build_fitness_snapshot(db, archive, *, as_of=None, knowledge_cutoff=None, mo
     t, k, mode = fitness.parameters(as_of, knowledge_cutoff, mode)
     if t > wi.utc(wi.now()) or mode == "AS_KNOWN" and k != t or mode == "EVENT_TIME_RECONSTRUCTION" and k < t:
         raise ValueError("As-known snapshots require K = T. Later-knowledge reconstructions require T ≤ K. Both cutoffs must have passed.")
+    if config_version is None:
+        selected = selected_config(db, k)
+        config_version = selected["config_version"] if selected else fitness_inputs.DEFAULT_VERSION
     bundle = build_inputs(db, archive, t, k, mode, config_version, inventory)
     digest = wi.digest(bundle)
     identity = wi.digest({"version": VERSION, "input_hash": digest})
