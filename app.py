@@ -22,6 +22,7 @@ import garmin_coverage
 import history
 import canonical
 import effort_api
+import estimator_api
 import recording
 import provider_modes
 import provider_views
@@ -50,6 +51,7 @@ app.include_router(context_router)
 app.include_router(workout_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 effort_api.register(app)
+estimator_api.register(app)
 
 
 @app.middleware("http")

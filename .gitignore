@@ -7,6 +7,7 @@ docs/specs/*
 !docs/specs/g0-acceptance.md
 !docs/specs/g1-acceptance.md
 !docs/specs/g2-acceptance.md
+!docs/specs/g4-acceptance.md
 !docs/specs/provider-modes-acceptance.md
 !docs/specs/context-inputs.md
 !docs/specs/context-ingestion-acceptance.md
