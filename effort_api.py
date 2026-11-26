@@ -11,7 +11,7 @@ import effort_views
 
 class Recompute(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    config_version: str = Field(default=efforts.DEFAULT_CONFIG_VERSION, pattern=r"^[A-Za-z0-9._-]{1,80}$")
+    config_version: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,80}$")
     config: dict | None = None
 
 

@@ -77,6 +77,8 @@ def bests(row):
     content += '<p>Recent windows include segment ends on both boundaries and require the complete activity to have ended by the cutoff. '
     content += 'The 112-day default and 56/84/168-day comparisons are provisional. All-time PBs are retained when recent evidence is missing.</p>'
     content += '<p>This is an event-time reconstruction using current selected source versions, not a frozen prospective prediction.</p>'
+    if any(e["reason"] == "SOURCE_NORMALIZATION_REBUILD_REQUIRED" for e in row["excluded"]):
+        content += '<p><strong>Recompute required:</strong> saved evidence uses an older session/lap time interpretation. Recompute saved history offline to update it; previous versions remain inspectable.</p>'
     content += table("Observed best efforts", ("Distance (m)", "All time", "Whole activity", "Internal segment", "Recent windows", "Flagged evidence"), (
         (show(r["distance_m"]), f'<p>{show(r["state"])}</p>' + inspect_form(r["all_time"]), inspect_form(r["best_whole_activity"]), inspect_form(r["best_internal_segment"]),
          ''.join(f'<p>{recent["days"]} days · {show(recent["state"])}</p>' + inspect_form(recent["best"]) for recent in r["recent"]),
@@ -97,6 +99,8 @@ def activity(row):
     if row["state"] == "NOT_PROCESSED":
         return views.page("Activity continuous efforts", content + '<p>NOT_PROCESSED: explicit offline recompute is required.</p><p id="effort-status" role="status"></p>' + SCRIPT)
     vid, source = row["version_id"], row["inspected_source"]
+    if row.get("recompute_required"):
+        content += '<p><strong>Recompute required:</strong> this saved version uses an older session/lap time interpretation. Its values remain historical evidence and are excluded from current bests.</p>'
     if vid != row["current_version_id"]:
         content += '<p><strong>Historical extraction version</strong></p>'
     content += f'<form method="get"><fieldset><legend>Saved extraction</legend><label>Extraction version<select name="version">' + ''.join(

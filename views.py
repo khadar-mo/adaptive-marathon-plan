@@ -342,7 +342,8 @@ def recording_page(row):
     header = row["header"]
     content += '<h2>Recorded session</h2><dl class="detail-metrics">' + ''.join(
         f'<div><dt>{title}</dt><dd>{value(header[key], unit)}</dd></div>' for title, key, unit in (
-            ("Start (UTC)", "start_utc", ""), ("End (UTC)", "end_utc", ""), ("Sport", "sport", ""),
+            ("Start (UTC)", "start_utc", ""), ("Derived end (UTC)", "end_utc", ""),
+            ("Message written (UTC)", "message_timestamp_utc", ""), ("End basis", "end_basis", ""), ("Sport", "sport", ""),
             ("Distance", "distance_m", " m"), ("Elapsed time", "elapsed_seconds", " s"),
             ("Watch timer", "timer_seconds", " s"), ("Moving time", "moving_seconds", " s"))) + '</dl>'
     content += raw(header, "Session, device and recorded time fields")
@@ -378,10 +379,10 @@ def recording_page(row):
         content += '<p>No event messages supplied. Pause and resume history is unknown.</p>'
     content += '<h2>Lap markers</h2>'
     if row["laps"]:
-        content += '<p>Start timestamp coverage: ' + statuses[channels["lap_start_utc"]["status"]] + '; end timestamp coverage: '
+        content += '<p>Start timestamp coverage: ' + statuses[channels["lap_start_utc"]["status"]] + '; derived end coverage (start + reported elapsed): '
         content += statuses[channels["lap_end_utc"]["status"]] + '. Lap indices start at zero and retain file order.</p>'
-        content += table("Laps in file order", ("Lap index", "Start (UTC)", "End (UTC)", "Distance", "Elapsed", "Timer", "Source fields"), (
-            (str(lap["lap_index"]), value(lap["start_utc"]), value(lap["end_utc"]), value(lap["distance_m"], " m"),
+        content += table("Laps in file order", ("Lap index", "Start (UTC)", "Derived end (UTC)", "Message written (UTC)", "End basis", "Distance", "Elapsed", "Timer", "Source fields"), (
+            (str(lap["lap_index"]), value(lap["start_utc"]), value(lap["end_utc"]), value(lap["message_timestamp_utc"]), value(lap["end_basis"]), value(lap["distance_m"], " m"),
              value(lap["elapsed_seconds"], " s"), value(lap["timer_seconds"], " s"), raw(lap["fields"])) for lap in row["laps"]))
     else:
         content += '<p>Lap markers not provided.</p>'
@@ -442,6 +443,8 @@ document.getElementById('recompute').addEventListener('click', async event => {
 </script>"""
     if row["state"] == "NOT_PROCESSED":
         return page("Canonical trace and quality", content + '<p>' + escape(row["message"]) + '</p>')
+    if row.get("recompute_required"):
+        content += '<p><strong>Recompute required:</strong> this saved version uses an older session/lap time interpretation. Recompute offline to update it; historical versions remain inspectable.</p>'
     query = {"version": row["version_id"]}
     if row["inspected_fit_sha256"]:
         query["source"] = row["inspected_fit_sha256"]

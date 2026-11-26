@@ -122,7 +122,9 @@ class Block:
             # Untimed original records are not members of G1 timed blocks, but
             # still belong to the raw support of an interval that spans them.
             uncertain_overlap = uncertain and max(raw_first, uncertain[0]) <= min(raw_last, uncertain[1])
-            if global_issue or uncertain_overlap or (span and (max(first, span[0]) < min(last, span[1]) or
+            support_overlap = flag.get("scope") == "RAW_SAMPLE_SUPPORT" and any(
+                raw_first <= i <= raw_last for i in flag["sample_indices"])
+            if global_issue or uncertain_overlap or support_overlap or (span and (max(first, span[0]) < min(last, span[1]) or
                                         first < span[0] == span[1] < last)):
                 flags.append(flag)
         for label, crossing in (("start", a), ("end", b)):

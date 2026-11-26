@@ -92,10 +92,13 @@ def global_flags(payload, source, trace=None):
             t = sample["timestamp_utc"]
             if t and ((header["start_utc"] and effort_math.stamp(t) < effort_math.stamp(header["start_utc"])) or
                       (header["end_utc"] and effort_math.stamp(t) > effort_math.stamp(header["end_utc"]))):
-                flags.append({"code": "sample_outside_recorded_session", "effect": "SUSPECT", "sample_indices": [],
+                boundary = header["start_utc"] if header["start_utc"] and effort_math.stamp(t) < effort_math.stamp(header["start_utc"]) else header["end_utc"]
+                flags.append({"code": "sample_outside_recorded_session", "effect": "SUSPECT",
+                              "sample_indices": [sample["record_index"]], "sample_times_utc": [t], "scope": "RAW_SAMPLE_SUPPORT",
                               "calculation": {"record_index": sample["record_index"], "timestamp_utc": t,
-                                              "header_start_utc": header["start_utc"], "header_end_utc": header["end_utc"]}})
-                break
+                                              "header_start_utc": header["start_utc"], "header_end_utc": header["end_utc"],
+                                              "end_basis": header.get("end_basis"),
+                                              "difference_from_boundary_seconds": (effort_math.stamp(t) - effort_math.stamp(boundary)).total_seconds()}})
     return flags
 
 
@@ -186,6 +189,7 @@ def load(db, requested, version=None):
         raise NotFound("That extraction version does not belong to this activity.")
     row = db.execute("SELECT payload, created_at FROM effort_versions WHERE id=?", (chosen,)).fetchone()
     result = json.loads(row[0])
+    result["recompute_required"] = canonical.requires_recompute(db, result["canonical_version_id"])
     result.update(activity_id=aid, state="PROCESSED", versions=versions, current_version_id=head[0] if head else None,
                   created_at=row[1], selection_history=[dict(r) for r in db.execute("""SELECT activity_id, version_id, selected_at FROM effort_selections
                       WHERE activity_id IN (SELECT value FROM json_each(?)) ORDER BY id""", (canonical.encoded(owners),))])
@@ -281,7 +285,7 @@ def save_inspection(store, activity_id, version, source, start_distance_m, dista
     with store.connect(write=True, create=True) as db:
         result = load(db, activity_id, version)
         selected = select_source(result, source)
-        if result["code_sha256"] != CODE_SHA256:
+        if result["recompute_required"] or result["code_sha256"] != CODE_SHA256:
             raise ValueError("This extraction used another code version. Inspect its saved candidates or explicitly recompute before selecting a new interval.")
         if not selected or not selected["source_version_id"]:
             raise ValueError("No timestamped trace is available for this source.")
@@ -354,20 +358,26 @@ def rejected_intervals(db, result, source):
     return rejected
 
 
-def recompute(store, activity_ids=None, *, config_version=DEFAULT_CONFIG_VERSION, config=None):
+def recompute(store, activity_ids=None, *, config_version=None, config=None):
     from fit_import import index_originals_in_db
     # Canonical backfill, extraction/configuration and all selections belong to
     # one requested batch. A later extraction failure must roll back earlier rows.
     results = []
     with store.connect(write=True, create=True) as db:
-        register(db, config_version, DEFAULT_CONFIG if config is None else config)
+        if config_version is not None or config is not None:
+            config_version = config_version or DEFAULT_CONFIG_VERSION
+            if config is None:
+                saved = db.execute("SELECT payload FROM effort_configs WHERE version=?", (config_version,)).fetchone()
+                config = json.loads(saved[0]) if saved else DEFAULT_CONFIG
+            register(db, config_version, config)
         ids = activity_ids if activity_ids is not None else [r[0] for r in db.execute("SELECT id FROM activities ORDER BY id")]
         owners = [owner(db, requested) for requested in ids]
         if any(not db.execute("SELECT 1 FROM canonical_activity_heads WHERE activity_id=?", (aid,)).fetchone() for aid in owners):
             index_originals_in_db(db, store.archive)
         for aid in owners:
             head = db.execute("SELECT version_id FROM canonical_activity_heads WHERE activity_id=?", (aid,)).fetchone()
-            canonical_id = head[0] if head else canonical.persist(db, store.archive, aid)
+            canonical_id = (head[0] if head and not canonical.requires_recompute(db, head[0])
+                            else canonical.persist(db, store.archive, aid))
             vid = persist(db, canonical_id, config_version=config_version, config=config)
             results.append({"activity_id": aid, "version_id": vid})
     return results
@@ -408,6 +418,10 @@ def bests(store, cutoff=None, days=None):
                 for window in windows:
                     item["recent"].setdefault(window, [])
                     item["recent_limits"].setdefault(window, [])
+            if result["recompute_required"]:
+                report["excluded"].append({"activity_id": aid, "reason": "SOURCE_NORMALIZATION_REBUILD_REQUIRED",
+                                          "version_id": result["version_id"]})
+                continue
             if not source or not source.get("header") or not source["header"]["end_utc"]:
                 report["excluded"].append({"activity_id": row[0], "reason": "MISSING_SOURCE_ACTIVITY_END"})
                 continue
@@ -526,7 +540,7 @@ def main():
     parser.add_argument("--database", required=True)
     parser.add_argument("--archive", required=True)
     parser.add_argument("--activity", type=int, action="append")
-    parser.add_argument("--config-version", default=DEFAULT_CONFIG_VERSION)
+    parser.add_argument("--config-version", help="Explicit extraction configuration; omitted preserves each current selection")
     parser.add_argument("--config", type=Path)
     args = parser.parse_args()
     try:
