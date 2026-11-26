@@ -16,13 +16,34 @@ def save_from_editor(page):
     api_path = form.get_attribute("action")
     api_url = urljoin(page.url, api_path)
     detail_path = api_path.removeprefix("/api")
+    detail_url = urljoin(api_url, detail_path)
+    # Keep the server response available after Chromium replaces the document.
+    replies = []
+
+    def forward_save(route):
+        reply = route.fetch()
+        replies.append(reply)
+        route.fulfill(response=reply)
+
+    page.route(api_url, forward_save, times=1)
     with page.expect_response(lambda r: r.url == api_url and r.request.method == "POST") as posted:
         page.get_by_role("button", name="Save workout template").press("Enter")
     response = posted.value
-    assert response.status == 200, response.text()
+    reply = replies.pop()
+    assert response.status == reply.status == 200, reply.text()
     assert response.headers["content-type"].startswith("application/json")
-    expect(page).to_have_url(urljoin(api_url, detail_path))
-    return response.request
+    result = reply.json()
+    assert result["html_url"] == detail_path
+    expect(page).to_have_url(detail_url)
+    record = result["record"]
+    version_path = f"{api_path}/versions/{record['version_id']}"
+    assert result["version_url"] == version_path
+    expect(page.get_by_role("link", name="Exact revision JSON")).to_have_attribute("href", version_path)
+    version = page.request.get(urljoin(api_url, version_path))
+    current = page.request.get(api_url)
+    assert version.status == current.status == 200
+    assert version.json() == current.json()["record"] == record
+    return response.request.post_data_json, record
 
 
 def test_w2_normal_form_round_trip(tmp_path):
@@ -59,21 +80,11 @@ def test_w2_normal_form_round_trip(tmp_path):
                     block.get_by_label("Protect this block").check()
             page.get_by_label("Recorded by").fill("Synthetic runner")
             page.get_by_label("Reason for this revision").fill("Check independently specified W2 quantities")
-            posted = save_from_editor(page)
-            sent = posted.post_data_json
+            sent, r = save_from_editor(page)
             assert (sent["name"], sent["primary"], sent["role"], sent["tags"]) == (
                 "W2 arithmetic fixture", "TEMPO_THRESHOLD", "PRIMARY_QUALITY", ["BENCHMARK_TAG"])
             assert [(b["kind"], b["distance_m"]) for b in sent["blocks"]] == doses
             expect(page.get_by_text("27,000 m total", exact=True)).to_be_visible()
-            current = page.request.get(posted.url)
-            assert current.status == 200
-            record = current.json()["record"]
-            api = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
-            assert api == f"/api/workout-templates/{record['template_id']}/versions/{record['version_id']}"
-            persisted = page.request.get(base + api)
-            assert persisted.status == 200
-            r = persisted.json()
-            assert r == record
             assert all(r[key] == sent[key] for key in ("name", "primary", "role", "tags"))
             assert [(b["kind"], b["distance_m"]) for b in r["blocks"]] == doses
             assert (r["accounting"]["total_m"], r["accounting"]["work_m"], r["accounting"]["easy_m"]) == (27000,6000,21000)
@@ -114,10 +125,9 @@ def test_pace_precision_mobile_history_stale_and_invalid_forms(tmp_path):
             block.get_by_label("Evidence status").select_option("SUPPORTED")
             page.get_by_label("Recorded by").fill("Fixture runner")
             page.get_by_label("Reason for this revision").fill("Enter decimal bounds")
-            save_from_editor(page)
+            _, first = save_from_editor(page)
             url = page.url
             first_url = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
-            first = page.request.get(base + first_url).json()
             assert first["blocks"][0]["pace"]["lower"] == precise
             with localcontext() as ctx:
                 ctx.prec = 100
@@ -125,9 +135,7 @@ def test_pace_precision_mobile_history_stale_and_invalid_forms(tmp_path):
             page.get_by_label("Template name").fill("Edited description")
             page.get_by_label("Recorded by").fill("Fixture runner")
             page.get_by_label("Reason for this revision").fill("Rename only")
-            save_from_editor(page)
-            second_url = page.get_by_role("link", name="Exact revision JSON").get_attribute("href")
-            second = page.request.get(base + second_url).json()
+            _, second = save_from_editor(page)
             assert second["previous_version_id"] == first["version_id"]
             assert second["blocks"] == first["blocks"] and second["accounting"] == first["accounting"]
             assert page.request.get(base + first_url).json() == first
