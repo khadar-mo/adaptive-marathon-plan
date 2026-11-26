@@ -216,6 +216,19 @@ verified the first immutable commit through HTTP against expected clock/union
 results. Final integrated CI and independent review are required before merge.
 This completes calendar input only; P0/P4 and their coaching/approval boundaries remain.
 
+## Runner goal and training preferences — issue #46
+
+1. Part 3 §3.2, Part B §§2, 3.2, 11 and 13 and Part C §9.3 define the inputs. The original goal remains 9,000 seconds on 14 March 2027 with an optional review on 7 February.
+2. The runner settings page shows the goal source, separate preference state and both revision histories. An unentered preference has a distinct state from a zero daily limit or an explicitly empty constraint list.
+3. An explicit runner action supplies the actor, reason, request ID and expected prior version. SQLite pins the original baseline with the first decision. Later revisions retain their original payload, source and UTC decision time.
+4. Synthetic inputs cover duplicate and concurrent submissions, conflicting request IDs, stale revisions, subsecond cutoffs, both date boundaries, scoped constraints and a goal decision independent of a preference change.
+5. The availability comparison reads the two selected revisions in one transaction. A larger general limit cannot add windows or increase a day’s declared session count. A smaller limit restricts that day. Missing days remain unknown.
+6. API checks use current, cutoff and version URLs. The first runnable commit also passed an independent HTTP check on an older G0 database. Its saved activity, imports and sources survived the settings writes intact.
+7. Real Chromium follows the main navigation, confirms an explicit time change, reads the original goal, edits preferences at mobile width and handles stale or invalid submissions. Untouched API-entered CRLF, Unicode and boundary whitespace survive a form edit.
+8. The public replay tests read earlier versions after restart and on either side of a one-microsecond revision boundary. A one-second mutation in the goal save path failed the expected target assertion.
+9. The settings record runner choices. Weekly prescriptions and forecast calculations belong to the consuming planner gates. Exercise choice and actual strength loading stay under runner control.
+10. The issue pull request records the test run, independent review and CI result for its integrated head. These fixtures use synthetic runner decisions.
+
 ## Workout classification and effort evidence — issue #30
 
 Separate planned, inferred and corrected labels now retain raw title/lap/step
