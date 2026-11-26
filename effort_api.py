@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import efforts
 import effort_views
+import workout_labels
 
 
 class Recompute(BaseModel):
@@ -39,11 +40,16 @@ class Context(BaseModel):
     note: str = Field(min_length=1, max_length=4000)
     protocol: str | None = Field(None, max_length=4000)
     maximal_confirmed: bool = Field(False, strict=True)
+    qualification: dict | None = None
+    supersedes: str | None = Field(None, pattern=r"^$|^[a-f0-9]{64}$")
 
 
-def call(function, *args, **kwargs):
+def call(function, *args, context_as_of=None, knowledge_as_of=None, **kwargs):
     try:
-        return function(*args, **kwargs)
+        result = function(*args, **kwargs)
+        return workout_labels.decorate(args[0], result, as_of=context_as_of, knowledge_as_of=knowledge_as_of) if function in (efforts.read, efforts.inspect, efforts.bests) else result
+    except workout_labels.Conflict as exc:
+        raise HTTPException(409, str(exc)) from None
     except efforts.NotFound as exc:
         raise HTTPException(404, str(exc)) from None
     except (ValueError, OverflowError) as exc:
@@ -85,13 +91,13 @@ def register(app):
 
     @app.get("/api/activities/{activity_id}/efforts/{version}/{candidate_id}")
     def inspect(activity_id: str, version: str, candidate_id: str, offset: int = Query(0, ge=0, le=2**31 - 1),
-                limit: int = Query(200, ge=1, le=500)):
-        return call(efforts.inspect, app.state.store, activity_id, version, candidate_id, offset=offset, limit=limit)
+                limit: int = Query(200, ge=1, le=500), as_of: str | None = None, knowledge_as_of: str | None = None):
+        return call(efforts.inspect, app.state.store, activity_id, version, candidate_id, offset=offset, limit=limit, context_as_of=as_of, knowledge_as_of=knowledge_as_of)
 
     @app.get("/activities/{activity_id}/efforts/{version}/{candidate_id}", response_class=HTMLResponse)
     def inspect_page(activity_id: str, version: str, candidate_id: str, offset: int = Query(0, ge=0, le=2**31 - 1),
-                     limit: int = Query(200, ge=1, le=500)):
-        return effort_views.inspection(call(efforts.inspect, app.state.store, activity_id, version, candidate_id, offset=offset, limit=limit))
+                     limit: int = Query(200, ge=1, le=500), as_of: str | None = None, knowledge_as_of: str | None = None):
+        return effort_views.inspection(call(efforts.inspect, app.state.store, activity_id, version, candidate_id, offset=offset, limit=limit, context_as_of=as_of, knowledge_as_of=knowledge_as_of))
 
     @app.post("/api/activities/{activity_id}/efforts/{version}/{candidate_id}/review")
     def review(activity_id: str, version: str, candidate_id: str, verdict: Verdict):
@@ -100,5 +106,5 @@ def register(app):
 
     @app.post("/api/activities/{activity_id}/efforts/{version}/{candidate_id}/context")
     def context(activity_id: str, version: str, candidate_id: str, choice: Context):
-        c = call(efforts.context, app.state.store, activity_id, version, candidate_id, **choice.model_dump())
+        c = call(workout_labels.save_effort_context, app.state.store, activity_id, version, candidate_id, **choice.model_dump())
         return {"candidate": c, "html_url": f"/activities/{activity_id}/efforts/{version}/{candidate_id}"}

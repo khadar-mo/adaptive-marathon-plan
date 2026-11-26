@@ -10,6 +10,9 @@ docs/specs/*
 !docs/specs/provider-modes-acceptance.md
 !docs/specs/context-inputs.md
 !docs/specs/context-ingestion-acceptance.md
+!docs/specs/workout-provenance.md
+!docs/specs/workout-provenance-acceptance.md
+!docs/specs/weekly-availability.md
 .codex/
 .venv/
 __pycache__/
