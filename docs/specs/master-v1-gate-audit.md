@@ -297,3 +297,9 @@ regression, combined model or calibrated confidence interval is supplied.
 10. **Acceptance boundary.** The focused pull request records exact-head CI and independent review. The ledger supplies software provenance. Manual source comparisons and prospective physiological or predictive validation have their own evidence requirements.
 
 Review corrections for #45 cover an actual pre-#45 Garmin ZIP imported at `ba3ed18` and captured through the workload API. A partial inventory preserves its previously evidenced embedded FIT until a complete ownership decision supersedes it. New Garmin original and member bytes receive independent archive receipts before decoding and assignment. A rolled-back assignment preserves both receipts across retry, including damaged members and invalid containers.
+
+## Contextual fitness software — issue #31
+
+The Fitness profile combines supported all-time and recent observations, provisional G4 candidates, source-linked endurance, G3 workload, wellness/feedback/strength and six quality dimensions. T13 keeps running evidence available when sleep or HRV is missing. Editable descriptor versions can produce real matched-run medians, sustained segments and late blocks. Each saved state retains separate event, knowledge and creation times with raw references, original context and explained changes.
+
+The first runnable version passed independent existing-input API checks. A later review of an old interval initially left a rejected observation visible during retrospective calculation. The corrected selector applies quality decisions known by K to the observed interval at T. Earlier K and saved results remain reproducible. The [ten-item acceptance record](g5-acceptance.md) describes scope, synthetic browser/API cases, lineage and prospective evidence still required by G6.

@@ -31,7 +31,7 @@ th, td {{padding:.35rem .65rem; text-align:left; border-bottom:1px solid #d9e1db
 .recording-table {{min-width:42rem; width:100%}} .recording-table td {{vertical-align:top}}
 .recording-table pre {{max-width:28rem; white-space:pre-wrap}}
 :focus-visible {{outline:3px solid #1a704e; outline-offset:2px}}
-</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/workload">Workload</a><a href="/imports">Imports</a><a href="/efforts">Best efforts</a><a href="/providers">Sources</a><a href="/context">Context</a><a href="/workouts">Workout labels</a><a href="/runner-settings">Runner settings</a></nav><main><h1>{escape(title)}</h1>
+</style></head><body><nav aria-label="Main"><a href="/history">History</a><a href="/workload">Workload</a><a href="/fitness">Fitness profile</a><a href="/imports">Imports</a><a href="/efforts">Best efforts</a><a href="/providers">Sources</a><a href="/context">Context</a><a href="/workouts">Workout labels</a><a href="/runner-settings">Runner settings</a></nav><main><h1>{escape(title)}</h1>
 {content}</main></body></html>"""
 
 

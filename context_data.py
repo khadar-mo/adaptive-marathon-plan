@@ -214,6 +214,7 @@ class Wellness(Dated):
     validity: Literal["VALID", "SUSPECT", "INVALID", "MISSING"] = "VALID"
     missing_reason: str | None = Field(None, min_length=1, max_length=1000)
     method: str = Field(default="UNKNOWN", min_length=1, max_length=500)
+    calibration: str | None = Field(None, min_length=1, max_length=500)
     origin: Literal["device", "self_report", "laboratory", "unknown"] = "unknown"
 
     @field_validator("value", mode="before")
@@ -454,6 +455,8 @@ def normalize(db, raw, known_at):
         raise ValueError("Each record needs a supported kind.")
     record = MODELS[kind].model_validate(raw)
     value = record.model_dump(exclude={"supersedes", "correction_reason"})
+    if record.kind == "wellness" and value["calibration"] is None:
+        value.pop("calibration")  # Keep existing uncalibrated rows idempotent.
     policy = definition(db, "policy", record.policy_version)
     value.update(algorithm_version=ALGORITHM_VERSION, parser_version=PARSER_VERSION, policy=policy)
     for field, rating in value.get("ratings", {}).items():
@@ -628,7 +631,7 @@ def daily_groups(records, policy):
     for row in records:
         if row["kind"] != "wellness":
             continue
-        key = (row["local_date"], row["timezone"], row["metric"], row["unit"], row["source"], row["method"], row["value_type"], row["interpretation"])
+        key = (row["local_date"], row["timezone"], row["metric"], row["unit"], row["source"], row["method"], row["value_type"], row["interpretation"], row.get("calibration") or "")
         groups.setdefault(key, []).append(row)
     result = []
     for key, rows in sorted(groups.items()):
@@ -644,7 +647,7 @@ def daily_groups(records, policy):
                 ctx.prec = 400
                 value = format(numbers[middle] if len(numbers) % 2 else (numbers[middle - 1] + numbers[middle]) / 2, "f")
             state = "AGGREGATED"
-        result.append(dict(zip(("local_date", "timezone", "metric", "unit", "source", "method", "value_type", "interpretation"), key)) |
+        result.append(dict(zip(("local_date", "timezone", "metric", "unit", "source", "method", "value_type", "interpretation", "calibration"), key)) |
                       {"state": state, "value": value, "valid_observations": len(valid), "observation_count": len(rows),
                        "version_ids": [r["version_id"] for r in rows], "missing_reasons": [r["missing_reason"] for r in rows if r["missing_reason"]],
                        "measurement_time_unknown": any(r["event_utc"] is None for r in rows),
