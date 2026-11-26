@@ -93,7 +93,7 @@ def test_context_desktop_mobile_keyboard_import_and_corrections(tmp_path):
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             response=page.request.get(base+'/api/context')
             data=response.json()
-            assert data['report_counts']=={'wellness':2,'post_run':1,'preweek':1,'strength':1,'coverage':1}
+            assert data['report_counts']=={'wellness':2,'post_run':1,'preweek':1,'strength':1,'coverage':1,'fueling':0}
             assert data['strength_running_distance_m']=='0'
             strength,=[row for row in data['records'] if row['kind']=='strength']
             assert strength['exercises'][0]['load']=='20.12345678901234567890'

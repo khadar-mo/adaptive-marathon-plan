@@ -233,6 +233,21 @@ inspection, custom configuration and recent-boundary behavior after this upgrade
 Software conformance does not establish manual Garmin or scientific validation.
 Final-head CI and independent review remain the merge gates.
 
+## Completed-run fueling evidence — issue #39
+
+Optional source-linked practice, runner-entered strategy, GI tolerance and timestamped
+notes reuse append-only context revisions/receipts/events. Original activity references
+survive redirects and source reclassification. Status remains RESEARCH_PENDING; no
+nutritional quantities, running metres, fitness/readiness scores or planning decisions
+are generated. #25 retains planned-session integration and the remaining P6 criteria.
+
+The coordinator's early G0-database comparison found a missing-canonical-table read
+failure. A genuine G0-generated synthetic fixture reproduces it and verifies the
+read-only fallback, entry, correction and replay; the G2 fixture verifies unchanged
+saved effort state. See [the contract](fueling-inputs.md) and
+[acceptance evidence](fueling-acceptance.md). Latest-head CI and independent review
+remain required. Nutrition research and runner-specific tolerance validation remain open.
+
 ## Candidate estimator software — issue #27
 
 G4 adds the achieved distance profile, separate Riegel source/target comparisons,

@@ -286,6 +286,16 @@ Generate made-up exports with `python3 demo_efforts.py /tmp/marathon-g2-examples
 upload them only to a separate demo database. Human Garmin comparison and scientific
 validation remain unverified. Observed fastest efforts are not coaching authority.
 
+## Record optional fueling practice
+
+Open a recorded activity and choose **Record fueling practice and tolerance**.
+Save your own strategy, practice status, timestamped notes and optional GI tolerance;
+correct a saved report without losing its original revision or activity reference.
+Missing practice/tolerance stays unknown and research status is `RESEARCH_PENDING`.
+No intake quantity, timing, fitness or readiness recommendation is generated.
+The [fueling input contract](docs/specs/fueling-inputs.md) documents JSON/CSV entry,
+exact revision inspection and the read interface for later planned-session linking.
+
 ## Record wellness, feedback and strength
 
 Open **Context** to enter wellness observations, post-run check-ins, pre-week

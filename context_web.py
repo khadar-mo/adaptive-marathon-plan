@@ -186,7 +186,7 @@ def form(kind, title, row, definitions):
     return f'<section><h2>{e(title)}</h2><form class="context-entry" data-kind="{kind}" action="/api/context/records">{content}<button type="submit">{"Save correction" if row else "Save " + title.lower()}</button><p role="status" class="result"></p></form></section>'
 
 
-SCRIPT = """
+SCRIPT = r"""
 <script>
 document.querySelectorAll('form.context-entry, form.context-definition, form.context-import').forEach(form => {
  form.addEventListener('submit', async event => {
@@ -196,6 +196,11 @@ document.querySelectorAll('form.context-entry, form.context-definition, form.con
    if(form.classList.contains('context-import')) { url += '?format='+encodeURIComponent(data.get('format')); data.delete('format'); body=data; }
    else {
     const fields=Object.fromEntries([...data].filter(([k,v]) => v !== ''));
+    if(form.dataset.kind==='fueling' && form.dataset.originalText) {
+     for(const [key,value] of Object.entries(JSON.parse(form.dataset.originalText))) {
+      if((fields[key]||'')===value.replace(/\r\n?/g,'\n')) fields[key]=value;
+     }
+    }
     const rawJSON={};
     if(form.classList.contains('context-definition')) {
      url='/api/context/definitions/'+encodeURIComponent(fields.kind)+'/'+encodeURIComponent(fields.version);
@@ -256,6 +261,9 @@ def page(request: Request, as_of: str | None = None, first: str | None = None, l
     current = data(request, as_of, first, last, policy_version)
     defs = context.definitions(store(request))
     selected = history(request, edit)["versions"][-1] if edit else None
+    if selected and selected["kind"] == "fueling":
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(f'/activities/{selected["activity_id"]}/fueling?edit={selected["record_id"]}', status_code=303)
     query = urlencode({k: v for k, v in {"as_of": as_of, "first": first, "last": last, "policy_version": policy_version}.items() if v})
     content = '<p>Wellness, runner reports and strength sessions are optional context. Missing data does not mean recovery or illness. This page makes no medical or mileage decisions.</p>'
     content += '<style>.context-entry, .context-definition, .context-import {display:grid;grid-template-columns:minmax(0,1fr);gap:.8rem;border:1px solid #bccbc2;padding:1rem;margin:1rem 0} fieldset > div, .context-entry > *, .context-definition > *, .context-import > * {min-width:0;max-width:100%} textarea {box-sizing:border-box;max-width:100%;width:100%;font:inherit} .context-entry label input[type=checkbox] {display:inline} pre {white-space:pre-wrap;overflow-wrap:anywhere} .result {color:#753a13}</style>'
