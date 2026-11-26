@@ -8,9 +8,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import workload_inputs as inputs
+import workload_processing as processing
 
 
-VERSION = "g3-exposure-v1"
+VERSION = "g3-exposure-v2"
 ZONE = ZoneInfo("Europe/London")
 MEASURES = ("distance_m", "elapsed_seconds", "timer_seconds", "moving_seconds")
 CONFIG = {"version": VERSION, "rolling_days": [7, 28, 56], "longest_days": [30, 56, 112],
@@ -19,11 +20,12 @@ CONFIG = {"version": VERSION, "rolling_days": [7, 28, 56], "longest_days": [30, 
           "timing": "accepted summary pair; missing pair may use selected FIT own span; invalid pair unassigned",
           "l30": "END local date in [proposed START local date - 30 days, proposed date), end <= event cutoff",
           "precision": "Decimal from source values; decimal strings in JSON; no planner rounding",
-          "intensity": "supplied exact profile and band ledger; no inferred physiological thresholds"}
+          "intensity": "supplied exact profile and band ledger; no inferred physiological thresholds",
+          "processing": "Timestamped inventory plus import boundary; only relevant unresolved processing gaps withhold authoritative totals."}
 
 
 def code_hash():
-    return hashlib.sha256(Path(__file__).read_bytes() + Path(inputs.__file__).read_bytes()).hexdigest()
+    return hashlib.sha256(Path(__file__).read_bytes() + Path(inputs.__file__).read_bytes() + Path(processing.__file__).read_bytes()).hexdigest()
 
 
 def number(value):
@@ -82,7 +84,7 @@ def activity(row, selection):
             "canonical_payload": payload}
 
 
-def collect(db, cutoff, knowledge, mode, proposal):
+def collect(db, cutoff, knowledge, mode, proposal, *, processing_inventory=None):
     """Read one immutable selection timeline, never current aliases or mutable heads."""
     choices, excluded = {}, []
     if inputs.table(db, "canonical_selections"):
@@ -119,10 +121,12 @@ def collect(db, cutoff, knowledge, mode, proposal):
         row = db.execute("SELECT * FROM workload_input_versions WHERE id=?", (pid,)).fetchone()
         if row and inputs.stamp(row["known_at"]) <= inputs.stamp(knowledge):
             profiles.append(inputs.decorate(row))
+    inventory = processing_inventory or processing.select(db, knowledge)
     return {"algorithm_version": VERSION, "code_sha256": code_hash(), "config": CONFIG,
             "event_cutoff": cutoff, "knowledge_cutoff": knowledge, "time_basis": mode,
             "proposal": proposal, "activities": rows, "selection_exclusions": excluded,
             "records": records, "referenced_profiles": profiles,
+            "processing_inventory": inventory, "processing_gaps": processing.gaps(db, inventory, selected, knowledge),
             "provider_lineage": provider_lineage(db, knowledge),
             "identity_policy": "Use only identity groups captured in immutable selected canonical payloads; no inferred earlier identity knowledge.",
             "legacy_policy": "Unknown knowledge excluded. Canonical creation/selection proves availability no earlier than that recorded event."}
@@ -223,25 +227,25 @@ def coverage(bundle, span, basis):
             "gaps": [bounds(s) for s in gaps], "unresolved_intervals": [bounds(s) for s in blockers]}
 
 
-def summarize(rows, census, unassigned):
+def summarize(rows, census, unassigned, processing_gaps):
     result = {"run_count": len(rows), "activity_ids": [r["activity_id"] for r in rows],
               "canonical_version_ids": [r["canonical_version_id"] for r in rows],
-              "coverage": census, "unassigned_timing_count": unassigned, "measures": {}}
+              "coverage": census, "unassigned_timing_count": unassigned, "processing": processing.status(processing_gaps), "measures": {}}
     for key in MEASURES:
         values = [number(r["measures"][key]) for r in rows if r["measures"][key] is not None]
         missing = len(rows) - len(values)
         subtotal = sum(values, Decimal(0))
-        complete = census["complete"] and not missing and not unassigned
+        complete = census["complete"] and not missing and not unassigned and not processing_gaps
         result["measures"][key] = {"known_subtotal": str(subtotal), "missing_count": missing,
                                     "value": str(subtotal) if complete else None,
-                                    "status": "COMPLETE" if complete else "MISSING_MEASUREMENT" if missing else "INCOMPLETE_HISTORY"}
+                                    "status": "COMPLETE" if complete else "INCOMPLETE_PROCESSING" if processing_gaps else "MISSING_MEASUREMENT" if missing else "INCOMPLETE_HISTORY"}
     known = [r for r in rows if r["measures"]["distance_m"] is not None]
     longest = max((number(r["measures"]["distance_m"]) for r in known), default=None)
-    complete = census["complete"] and len(known) == len(rows) and not unassigned
+    complete = census["complete"] and len(known) == len(rows) and not unassigned and not processing_gaps
     result["longest"] = {"observed_distance_m": decimal(longest), "distance_m": decimal(longest) if complete else None,
                          "activity_ids": [r["activity_id"] for r in known if number(r["measures"]["distance_m"]) == longest],
                          "status": "COMPLETE" if complete else "INCOMPLETE_HISTORY"}
-    result["frequency_status"] = "COMPLETE" if census["complete"] and not unassigned else "INCOMPLETE_HISTORY"
+    result["frequency_status"] = "COMPLETE" if census["complete"] and not unassigned and not processing_gaps else "INCOMPLETE_HISTORY"
     result["frequency"] = {"known_count": len(rows), "value": len(rows) if result["frequency_status"] == "COMPLETE" else None,
                            "status": result["frequency_status"]}
     return result
@@ -328,12 +332,18 @@ def _calculate(bundle):
         else:
             future.append({"activity_id": item["activity_id"], "canonical_version_id": item["canonical_version_id"], "reason": "NOT_COMPLETED_BY_CUTOFF"})
     ready.sort(key=lambda row: (row["timing"]["start_utc"], row["activity_id"]))
-    unknown = len(unassigned)
+
+    def gaps_for(span, basis="END"):
+        return [gap for gap in bundle["processing_gaps"] if processing.affects(gap, span, basis, cutoff)]
+
+    def unknown_for(span, basis):
+        return sum(processing.affects({"timing": None, "known_start_utc": row["accepted_summary"].get("start_utc")
+                                     if row["timing_issue"] != "INVALID_TIMING" else None}, span, basis, cutoff) for row in unassigned)
 
     def window(span, basis="END"):
         key = "end_utc" if basis == "END" else "start_utc"
         rows = [r for r in ready if inside(inputs.stamp(r["timing"][key]), span)]
-        result = summarize(rows, coverage(bundle, span, basis), unknown)
+        result = summarize(rows, coverage(bundle, span, basis), unknown_for(span, basis), gaps_for(span, basis))
         result["intensity"] = intensity(bundle, rows)
         result["fit_membership_disagreements"] = [r["activity_id"] for r in ready if r["selected_fit_span"] and
             inside(inputs.stamp(r["selected_fit_span"][key]), span) != inside(inputs.stamp(r["timing"][key]), span)]
@@ -363,6 +373,7 @@ def _calculate(bundle):
                         "previous_end_utc": previous["timing"]["end_utc"], "next_start_utc": following["timing"]["start_utc"],
                         "seconds": str(seconds), "overlap": seconds < 0,
                         "coverage": coverage(bundle, (end, start, False, False), "END") if seconds > 0 else None,
+                        "processing": processing.status(gaps_for((end, start, False, False))) if seconds > 0 else None,
                         "interpretation": "Observed spacing; an uncovered interval is not verified rest."})
     l30 = None
     proposal = bundle["proposal"]
@@ -372,7 +383,7 @@ def _calculate(bundle):
         end = datetime.combine(day, time(), ZONE)
         report = window(interval(start.isoformat(), end.isoformat()))
         maximum = number(report["longest"]["observed_distance_m"])
-        complete = report["coverage"]["complete"] and not unknown and not report["measures"]["distance_m"]["missing_count"]
+        complete = report["coverage"]["complete"] and report["processing"]["complete"] and not report["unassigned_timing_count"] and not report["measures"]["distance_m"]["missing_count"]
         status = "INCOMPLETE_HISTORY" if not complete else "NOT_CALCULABLE" if not maximum else "CALCULABLE"
         ratio = number(proposal["distance_m"]) / maximum if status == "CALCULABLE" else None
         l30 = {**report, "status": status, "proposed_start_utc": proposal["start_utc"], "proposed_local_date": day.isoformat(),
@@ -387,6 +398,7 @@ def _calculate(bundle):
         end = inputs.stamp(last["timing"]["end_utc"])
         trailing = {"from_activity_id": last["activity_id"], "seconds": str(Decimal(str((cutoff - end).total_seconds()))),
                     "coverage": coverage(bundle, (end, cutoff, False, True), "END") if end < cutoff else None,
+                    "processing": processing.status(gaps_for((end, cutoff, False, True))) if end < cutoff else None,
                     "interpretation": "Time since latest observed completed run, not inferred rest."}
     return {"algorithm_version": VERSION, "event_cutoff": bundle["event_cutoff"], "knowledge_cutoff": bundle["knowledge_cutoff"],
             "time_basis": bundle["time_basis"], "input_hash": inputs.digest(bundle), "config": bundle["config"],
@@ -400,6 +412,7 @@ def _calculate(bundle):
             "zone_profiles_at_cutoff": [r for r in bundle["records"] if r["kind"] == "zone_profile" and inputs.stamp(r["effective_from"]) <= cutoff
                                         and (not r["effective_to"] or cutoff < inputs.stamp(r["effective_to"]))],
             "provider_lineage": bundle["provider_lineage"],
+            "processing_inventory": bundle["processing_inventory"], "processing_gaps": bundle["processing_gaps"],
             "accounting": "FM end-week; planner start-week; legacy dashboard recorded local date. Whole completed sessions, fractional metres.",
             "missingness": "Census completeness and each measurement's completeness are independent. Missing runs or timing never mean rest.",
             "strength": "Separate context modality; never added to running kilometres."}
@@ -427,9 +440,13 @@ def parameters(as_of=None, knowledge_cutoff=None, mode="EVENT_TIME_RECONSTRUCTIO
 
 
 def read(store, **kwargs):
-    cutoff, knowledge, mode, proposal, _ = parameters(**kwargs)
+    cutoff, knowledge, mode, proposal, created = parameters(**kwargs)
     with store.history() as db:
-        bundle = collect(db, cutoff, knowledge, mode, proposal)
+        inventory = None
+        if mode == "EVENT_TIME_RECONSTRUCTION" and (not kwargs.get("knowledge_cutoff") or knowledge == created):
+            inventory = processing.observe(db)
+            knowledge = inventory["known_at"]
+        bundle = collect(db, cutoff, knowledge, mode, proposal, processing_inventory=inventory)
         result = calculate(bundle)
         diagnostic = current_diagnostics(db) if mode == "EVENT_TIME_RECONSTRUCTION" else None
         return {**result, "current_diagnostics": diagnostic} if diagnostic else result
@@ -438,8 +455,13 @@ def read(store, **kwargs):
 def capture(store, **kwargs):
     cutoff, knowledge, mode, proposal, created = parameters(**kwargs)
     with store.connect(write=True, create=True) as db:
-        bundle = collect(db, cutoff, knowledge, mode, proposal)
+        inventory = None
+        if mode == "EVENT_TIME_RECONSTRUCTION" and (not kwargs.get("knowledge_cutoff") or knowledge == created):
+            inventory = processing.observe(db, persist=True)
+            knowledge = inventory["known_at"]
+        bundle = collect(db, cutoff, knowledge, mode, proposal, processing_inventory=inventory)
         result = calculate(bundle)
+        created = inputs.utc(inputs.now())
         identity = inputs.digest({"input_hash": result["input_hash"], "result": result})
         db.execute("INSERT OR IGNORE INTO workload_snapshots VALUES (?,?,?,?,?)",
                    (identity, result["input_hash"], inputs.encoded(bundle), inputs.encoded(result), created))

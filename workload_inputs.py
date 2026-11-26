@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS workload_snapshots (
     id TEXT PRIMARY KEY, input_hash TEXT NOT NULL, inputs TEXT NOT NULL, result TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workload_processing_inventories (
+    id TEXT PRIMARY KEY, known_at TEXT NOT NULL, payload TEXT NOT NULL
+);
 """
 
 
@@ -221,7 +224,10 @@ def ingest(store, raw):
         existing = db.execute("SELECT result FROM workload_imports WHERE id=?", (import_id,)).fetchone()
         if existing:
             return {**json.loads(existing[0]), "replayed": True}
-        known = utc(now())
+        # A census assertion cannot certify that all imported rows were normalized.
+        # Preserve a separate processing observation in this same input transaction.
+        import workload_processing
+        known = workload_processing.observe(db, persist=True)["known_at"]
         saved = []
         for value in records:
             for key in ("reported_at", "measured_at"):

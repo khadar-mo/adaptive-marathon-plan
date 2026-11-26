@@ -191,7 +191,7 @@ SCRIPT = """
 <script>
 document.addEventListener('submit', async event => {
  const form=event.target;
- if (!form.matches('.workload-entry,.workload-capture,.workload-import,.workload-scan')) return;
+ if (!form.matches('.workload-entry,.workload-capture,.workload-import,.workload-scan,.workload-recompute')) return;
  event.preventDefault(); const button=event.submitter, message=document.getElementById('workload-message');
  button.disabled=true; message.textContent='Saving…';
  try {
@@ -226,21 +226,23 @@ document.addEventListener('submit', async event => {
   }
   const response=await fetch(url,{method:'POST',headers,body}), result=await response.json();
   if(!response.ok) throw Error(typeof result.detail==='string'?result.detail:JSON.stringify(result.detail));
-  location.assign(result.html_url);
+  location.assign(result.html_url || '/workload');
  } catch(error) {message.textContent=error.message; button.disabled=false;}
 });
 </script>
 """
 
 
-def page(data, frozen=None, correction=None):
-    query = {"as_of": data["event_cutoff"], "knowledge_cutoff": data["knowledge_cutoff"], "mode": data["time_basis"]}
+def page(data, frozen=None, correction=None, live_knowledge=False):
+    query = {"as_of": data["event_cutoff"], "knowledge_cutoff": "" if live_knowledge else data["knowledge_cutoff"], "mode": data["time_basis"]}
     if data["l30"]:
         query.update(proposed_start=data["l30"]["proposed_start_utc"], proposed_distance_m=data["l30"]["proposed_distance_m"])
     body = '<p>Whole completed runs; fractional metres. FM weeks use the END date in London; planner weeks use START. The History calendar keeps its recorded local date.</p>'
     if not frozen:
         body += '<p><a href="#running-inputs">Enter coverage or measured intensity</a> · <a href="#workload-sources">Inspect source contributions</a></p>'
     body += f'<p><strong>{e(data["time_basis"])}</strong> · Event cutoff {e(data["event_cutoff"])} · Knowledge cutoff {e(data["knowledge_cutoff"])}. Manual verification: UNVERIFIED.</p>'
+    if data['algorithm_version'] == 'g3-exposure-v1':
+        body += '<p><strong>Historical v1 artifact: canonical processing completeness was not verified. Recalculate before using its totals or L30 as authoritative.</strong> The original saved result is preserved.</p>'
     if data.get("current_diagnostics"):
         body += '<p><strong>INCOMPLETE_PROCESSING: canonical backfill required before using present totals as complete.</strong></p>' + details('Current operational diagnostic, outside historical inputs', data["current_diagnostics"])
     if frozen:
@@ -249,12 +251,13 @@ def page(data, frozen=None, correction=None):
         fields = text_field("as_of", "Event cutoff", query["as_of"]) + text_field("knowledge_cutoff", "Knowledge cutoff", query["knowledge_cutoff"])
         fields += select("mode", "Time view", [(v, v) for v in ("EVENT_TIME_RECONSTRUCTION", "AS_KNOWN")], query["mode"])
         fields += text_field("proposed_start", "Proposed START timestamp", query.get("proposed_start", "")) + text_field("proposed_distance_m", "Proposed distance in metres", query.get("proposed_distance_m", ""))
+        body += '<p>Leave knowledge cutoff blank for a current read and capture. A past cutoff uses only recorded processing inventories.</p>'
         body += f'<form method="get" action="/workload"><fieldset><legend>Inspect workload and L30</legend>{fields}<button>Inspect workload</button></fieldset></form>'
         body += '<form class="workload-capture" action="/api/workload/capture">' + ''.join(f'<input type="hidden" name="{k}" value="{e(v)}">' for k,v in query.items()) + '<button>Freeze this calculation</button></form>'
     body += '<p id="workload-message" role="status"></p><h2>Rolling completed exposure</h2>'
-    body += '<div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable rolling workload"><table class="recording-table"><thead><tr><th>Window</th><th>Known metres</th><th>Runs</th><th>Census</th><th>Missing distances</th></tr></thead><tbody>'
+    body += '<div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable rolling workload"><table class="recording-table"><thead><tr><th>Window</th><th>Known metres</th><th>Known runs</th><th>Census</th><th>Processing</th><th>Missing distances</th></tr></thead><tbody>'
     for row in data["rolling"]:
-        body += f'<tr><td>{row["days"]} days</td><td>{e(row["measures"]["distance_m"]["known_subtotal"])}</td><td>{row["run_count"]}</td><td>{e(row["coverage"]["status"])}</td><td>{row["measures"]["distance_m"]["missing_count"]}</td></tr>'
+        body += f'<tr><td>{row["days"]} days</td><td>{e(row["measures"]["distance_m"]["known_subtotal"])}</td><td>{row["run_count"]}</td><td>{e(row["coverage"]["status"])}</td><td>{e(row.get("processing", {}).get("status", "NOT_RECORDED"))}</td><td>{row["measures"]["distance_m"]["missing_count"]}</td></tr>'
     body += '</tbody></table></div><p>Known subtotals are not complete totals when census or measurements are missing. Missing history is not verified rest.</p>'
     for row in data["rolling"]:
         for group in row['intensity']['groups']:
@@ -281,6 +284,11 @@ def page(data, frozen=None, correction=None):
     body += '</details>' + details('Excluded inputs and reasons', data["excluded"])
     if not frozen:
         body += '<h2 id="running-inputs">Running coverage and intensity inputs</h2><p>Running census is distinct from wellness or strength coverage. Supply explicit evidence for each endpoint basis. Strength never adds running kilometres.</p>'
+        body += '<h3>Canonical processing gaps</h3>' + details('Timestamped processing inventory and unresolved gaps', {'inventory':data.get('processing_inventory'), 'gaps':data.get('processing_gaps',[])})
+        for gap in data.get('processing_gaps', []):
+            body += f'<p>{e(gap["guidance"])}</p>'
+            if gap.get('recompute_url'):
+                body += f'<form class="workload-recompute" action="{e(gap["recompute_url"])}"><button>Recompute canonical activity {gap["activity_id"]}</button></form>'
         if correction:
             body += entry_form(correction["kind"], data, correction)
         else:
@@ -300,7 +308,7 @@ def workload_page(request: Request, as_of: str | None = None, knowledge_cutoff: 
                   proposed_distance_m: str | None = None, correct: str | None = None):
     data = read(request, as_of, knowledge_cutoff, mode, proposed_start, proposed_distance_m)
     old = input_history(request, correct)["versions"][-1] if correct else None
-    return page(data, correction=old)
+    return page(data, correction=old, live_knowledge=not knowledge_cutoff and mode == "EVENT_TIME_RECONSTRUCTION")
 
 
 @router.get("/workload/snapshots/{identity}", response_class=HTMLResponse)
