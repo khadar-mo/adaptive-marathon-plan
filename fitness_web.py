@@ -59,12 +59,44 @@ def replay(request: Request, identity: str):
 
 
 @router.post("/api/fitness/configurations")
-def register(request: Request, choice: inputs.Definition):
+async def register(request: Request):
+    choice = call(inputs.parse, await limited_body(request))
     result = call(inputs.register, request.app.state.store, choice)
     return {**result, "html_url": "/fitness?config_version=" + result["version"]}
 
 
 @router.post("/api/fitness/run-context")
 async def observe(request: Request):
-    result = call(inputs.observe, request.app.state.store, await request.body())
+    result = call(inputs.observe, request.app.state.store, await limited_body(request))
     return {**result, "html_url": "/fitness?activity_id=" + str(result["activity_id"])}
+
+
+@router.get("/fitness", response_class=HTMLResponse)
+def page(request: Request, as_of: str | None = None, knowledge_cutoff: str | None = None,
+         mode: str = "EVENT_TIME_RECONSTRUCTION", config_version: str = inputs.DEFAULT_VERSION, activity_id: int | None = None):
+    import fitness_views
+    store = request.app.state.store
+    query = {"as_of": as_of or None, "knowledge_cutoff": knowledge_cutoff or None, "mode": mode, "config_version": config_version}
+    state = call(fitness.read, store, **query)
+    row = next((r for r in state["endurance"]["session_evidence"] if r["activity_id"] == activity_id), None)
+    if activity_id is not None and row is None:
+        raise HTTPException(404, "Completed run unavailable for the selected profile.")
+    return fitness_views.profile(state, query, configs=inputs.choices(store, state["knowledge_cutoff"]),
+        history=fitness.history(store), record=row,
+        notes=inputs.activity_notes(store, activity_id, state["knowledge_cutoff"]) if row else ())
+
+
+@router.get("/fitness/snapshots/{identity}", response_class=HTMLResponse)
+def snapshot_page(request: Request, identity: str):
+    import fitness_views
+    value = call(fitness.snapshot, request.app.state.store, identity)
+    return fitness_views.profile(value["state"], {}, saved=value)
+
+
+async def limited_body(request):
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 50_000:
+            raise HTTPException(413, "Fitness input exceeds 50 KB.")
+    return bytes(body)

@@ -172,14 +172,21 @@ def decorated(row):
             "known_at": row["known_at"], "raw_sha256": row["raw_sha256"]}
 
 
-def observe(store, raw):
+def parse(raw):
     if len(raw) > 50_000:
-        raise ValueError("Run context exceeds 50 KB.")
-    value = Observation.model_validate_json(raw).model_dump(mode="json")
+        raise ValueError("Fitness input exceeds 50 KB.")
+    try:
+        return json.loads(raw, parse_float=Decimal, parse_constant=context_data.reject_constant, object_pairs_hook=context_data.unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Expected a JSON object.") from None
+
+
+def observe(store, raw):
+    value = Observation.model_validate(parse(raw)).model_dump(mode="json")
     aid, cid = value["activity_id"], value["canonical_version_id"]
     with store.connect(write=True, create=True) as db:
         known = wi.now()
-        current = db.execute("SELECT v.* FROM canonical_activity_heads h JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?", (aid,)).fetchone()
+        current = db.execute("SELECT v.* FROM canonical_activity_heads h JOIN canonical_activity_versions v ON v.id=h.version_id JOIN activities a ON a.id=h.activity_id WHERE h.activity_id=? AND NOT EXISTS (SELECT 1 FROM activity_redirects d WHERE d.old_id=h.activity_id)", (aid,)).fetchone()
         if not current or current["id"] != cid:
             raise wi.Conflict("Choose the current canonical version for this same activity.")
         canonical = json.loads(current["payload"])
@@ -214,3 +221,17 @@ def observations(db, knowledge, activities):
         if row["activity_id"] in ids:
             previous[row["activity_id"]] = decorated(row)
     return list(previous.values())
+
+
+def choices(store, knowledge):
+    with store.history() as db:
+        extras = [r[0] for r in db.execute("SELECT version FROM fitness_configs WHERE known_at<=? ORDER BY rowid", (knowledge,))] if wi.table(db, "fitness_configs") else []
+        return [DEFAULT_VERSION, *extras]
+
+
+def activity_notes(store, activity_id, knowledge):
+    with store.history() as db:
+        if not wi.table(db, "fitness_run_context"):
+            return []
+        return [decorated(r) for r in db.execute("SELECT * FROM fitness_run_context WHERE activity_id=? AND known_at<=? ORDER BY revision",
+                                                 (activity_id, knowledge))]

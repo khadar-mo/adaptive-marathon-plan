@@ -52,7 +52,7 @@ def selected_history(db, activities, event, knowledge):
             JOIN effort_selections e ON e.id=(SELECT z.id FROM effort_selections z WHERE z.activity_id=o.id
             ORDER BY z.selected_at DESC,z.id DESC LIMIT 1)
             JOIN effort_versions v ON v.id=e.version_id AND v.canonical_version_id=o.canonical""")
-        view("effort_reviews", f"SELECT * FROM main.effort_reviews WHERE created_at<=min({t},{k})")
+        view("effort_reviews", f"SELECT * FROM main.effort_reviews WHERE created_at<={k}")
         # An existing annotation commonly has no separately supplied event time.
         # The adapter will then use the source candidate's end as its event time.
         view("effort_contexts", f"""SELECT rowid AS rowid,* FROM main.effort_contexts
@@ -69,6 +69,22 @@ def selected_history(db, activities, event, knowledge):
             db.execute(f"DROP TABLE temp.{name}")
 
 
+class BoundedCapture(estimators.Capture):
+    """Retain QC decisions known at K about a source interval achieved by T."""
+
+    def resolve(self, ref):
+        observation = super().resolve(ref)
+        candidate = observation["candidate"]
+        # Workout classification uses its own event time. A later trace review
+        # evaluates the original measured interval; its clock is knowledge time.
+        # G2 has already selected the candidate against these same decisions.
+        read = efforts.reviewed(self.db, dict(candidate), observation["ref"]["version_id"])
+        for field in ("reviews", "review_verdict", "effective_quality_state"):
+            candidate[field] = read[field]
+        candidate["context_exclusions"]["reviews"] = []
+        return observation
+
+
 def capture(db, archive, workload_bundle, estimator_config):
     event, knowledge = workload_bundle["event_cutoff"], workload_bundle["knowledge_cutoff"]
     # Exclude a session with an accepted future start/end before querying its
@@ -79,7 +95,7 @@ def capture(db, archive, workload_bundle, estimator_config):
     with selected_history(db, activities, event, knowledge):
         config = estimators.configuration(db, estimator_config)
         request = estimators.Calculation(cutoff=event, config_version=estimator_config)
-        session = estimators.Capture(db, archive, event)
+        session = BoundedCapture(db, archive, event)
         session.context_read_at = knowledge
         g4 = estimators.build(session, request, config)
         traces, labels = {}, {}
@@ -91,7 +107,7 @@ def capture(db, archive, workload_bundle, estimator_config):
                 if extracted["state"] != "PROCESSED" or extracted["recompute_required"]:
                     continue
                 source = efforts.select_source(extracted)
-                if not source or not source.get("source_version_id") or not source.get("header", {}).get("end_utc"):
+                if not source or not source.get("source_version_id") or not (source.get("header") or {}).get("end_utc"):
                     continue
                 if any(wi.stamp(clock) > wi.stamp(event) for clock in (source["header"]["end_utc"], source.get("last_sample_utc")) if clock):
                     continue
@@ -106,6 +122,8 @@ def capture(db, archive, workload_bundle, estimator_config):
                     "canonical_version_id": extracted["canonical_version_id"], "extraction_version_id": extracted["version_id"],
                     "config": extracted["qc_config"], "parser": data["parser"], "trace": data["trace"], "qc": qc,
                     "global_flags": efforts.global_flags(row["canonical_payload"], source, data["trace"]),
+                    "reviews": [dict(r) for r in db.execute(
+                        "SELECT * FROM effort_reviews WHERE version_id=? AND source_sha256=? ORDER BY id", (extracted["version_id"], sha))],
                     "rejected_intervals": sorted(efforts.rejected_intervals(db, extracted, source))}
     return {"estimator": g4, "traces": traces, "labels": labels,
-            "selection_policy": "Existing G2/G4 calculations over canonical identities and selected extraction versions known at K. Session and label events must be eligible at T. Review decisions use their recorded instant. Captured source bytes verified when assembling."}
+            "selection_policy": "Existing G2/G4 calculations over canonical identities and selected extraction versions known at K. Session and label events must be eligible at T. QC reviews apply to the measured interval at T when their decision was known by K. Captured source bytes verified when assembling."}

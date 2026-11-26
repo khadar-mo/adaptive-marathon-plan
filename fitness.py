@@ -90,7 +90,12 @@ def calculate(bundle):
     training = workload.calculate(bundle["workload"])
     config = bundle["definition"]["config"]
     records, capability = bundle["context_records"], bundle["capability_evidence"]
-    rec = recovery.calculate(records, event, config)
+    completed_ids = {i for a in training["activities"] for i in [a["activity_id"], *a["identity"]["merged_activity_ids"]]}
+    linked = [r for r in records if r["kind"] != "post_run" or r["activity_id"] in completed_ids]
+    rec = recovery.calculate(linked, event, config)
+    rec["unlinked_feedback"] = [{"record_id": r["record_id"], "version_id": r["version_id"], "activity_id": r["activity_id"],
+                                  "reason": "No completed target established at the selected cutoffs."}
+                                 for r in records if r["kind"] == "post_run" and r["activity_id"] not in completed_ids]
     all_time, recent = capabilities(capability["estimator"])
     cs = capability["estimator"]["critical_speed"]
     observations = endurance.calculate(training, capability["traces"], bundle["run_context"], records, config)
