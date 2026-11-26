@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 import app
+import canonical
 import context_data as context
 from storage import Archive
 from test_canonical import trace_fit, add_run
@@ -40,12 +41,16 @@ async def read(client, activity_id=1, **params):
     return response.json()
 
 
-async def test_optional_unknown_and_verbatim_entry_leave_activity_and_efforts_unchanged(history, tmp_path):
+async def test_optional_unknown_and_verbatim_entry_leave_activity_and_efforts_unchanged(history, tmp_path, monkeypatch):
     raw = trace_fit()
     strategy = '  My note: 60.12345678901234567890 g/h, water at 00:30.\nNo generated dose. <script>alert(1)</script>  '
     async with server() as client:
         await upload(client, ("made-up.fit", raw))
-        before = {path: (await client.get(path)).json() for path in ("/api/activities/1", "/api/activities/1/canonical", "/api/activities/1/efforts")}
+        capture_time=context.now()
+        monkeypatch.setattr(canonical,'knowledge_time',lambda:capture_time)
+        before = {path: (await client.get(path)).json() for path in (
+            "/api/activities/1", "/api/activities/1/canonical", "/api/activities/1/efforts",
+            "/api/estimators?cutoff=2026-10-26T00:00:00Z")}
         missing = await read(client)
         assert missing["state"] == "MISSING" and missing["reports"] == []
         assert missing["practice_status"] == missing["tolerance_status"] == "UNKNOWN"

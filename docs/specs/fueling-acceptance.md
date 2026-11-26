@@ -6,7 +6,9 @@ Master v1.0 L15, Part B §12 APE-FUEL-01–03 and Part C §10.2/M30; SHA-256
 `8562073c94131ff70e6848a507d8655e399bd00d42d6c6910d6f41da20ad8d87`.
 The implementation began at merged G2 `59faa54`, then incorporated actual merged
 workout provenance #41 at `454896ddbd6dd05be3246602cc0d97abec3b714e` before its first
-working checkpoint. No unmerged fitness or planning dependency is used.
+working checkpoint. Final integration also includes merged G4 #40 at
+`5dffef9d46fd7bcdd782559bb3d7619a8c2d5d02`; all API registrations and both audit
+sections are retained. No unmerged fitness or planning dependency is used.
 
 ## 2. Exact issue criteria
 
@@ -58,6 +60,9 @@ The checked-in 1505-byte compressed fixture has no canonical tables. The regress
 first failed with the same 503; after the read-only fallback it verifies missingness,
 entry, correction, exact revision, old replay, restart and unchanged 10000 m / 3600 s.
 No synthetic fixture was made by deleting tables from current output.
+The coordinator's independent recheck of the corrected checkpoint confirmed the
+10000-metre run stayed unchanged, verbatim note/retry behavior, historical cutoff
+selection and HTTP 409 for a stale correction.
 
 ## 6. API, persistence and CLI boundaries
 
@@ -86,6 +91,14 @@ with the coordinator-provided headless Chromium on PATH. The G0 regression faile
 against the first runnable implementation, then passed with the fallback restored.
 Full-suite and final-head CI results will be recorded after code freeze.
 
+On checkpoint `70e88a6`, the full root suite with headless Chromium passed **496
+tests, no skips**, 203.12 s. [CI run 45736077535](https://github.com/khadar-mo/adaptive-marathon-plan/actions/runs/45736077535)
+also passed. A temporary mutation disabled preserving original text in the production
+form script: the real browser test failed its stored-note equality assertion because
+CRLF/CR became LF (one failure, 5.42 s). Production code was restored before integrated
+checks. The G4-integrated API regression additionally asserts unchanged estimator
+preview output before/after fueling entry. Final integrated checks are tracked on PR #44.
+
 ## 9. Boundaries and unverified work
 
 All test data are synthetic. No real FIT, credentials, private history or nutritional
@@ -95,6 +108,8 @@ change fitness estimates, create approvals or complete #25's taper/forecast work
 
 ## 10. Independent review and final delivery
 
-Latest-head CI, independent review and the coordinator's serialized integration are
-pending. The root owns merge sequencing. Software conformance does not complete
-fueling research, runner-specific validation or athlete approval of a future protocol.
+[PR #44](https://github.com/khadar-mo/adaptive-marathon-plan/pull/44) records the
+final head, CI run and independent-review verdict. Latest-head CI and independent
+approval are required for the coordinator's serialized merge. The root owns merge
+sequencing. Software conformance does not complete fueling research, runner-specific
+validation or athlete approval of a future protocol.

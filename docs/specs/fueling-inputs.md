@@ -17,6 +17,8 @@ or poor. Research status is fixed to `RESEARCH_PENDING`.
 Text is retained verbatim, including the runner's quantities, timing, whitespace
 and Unicode. Report/observation offsets remain as supplied. Notes use the report
 timestamp. Observation and tolerance-report times cannot follow that report time.
+The context event timestamp is the report time; an absent practice observation time
+does not become a fabricated observation instant.
 The actor is a supplied provenance label, not an authenticated identity. Server receipt
 and correction availability cannot be supplied/backdated by a client.
 
