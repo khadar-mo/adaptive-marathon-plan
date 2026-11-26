@@ -214,9 +214,12 @@ def read_version(db, week, version_id):
     return json.loads(row["payload"]) if row else None
 
 
-def read_current(db, week):
+def read_current(db, week, *, known_by_utc=None):
+    """Read the latest revision, optionally bounded by a normalized UTC knowledge time."""
     week_bounds(week)
-    row = initialized(db) and db.execute("SELECT payload FROM availability_revisions WHERE week=? ORDER BY revision DESC LIMIT 1", (week,)).fetchone()
+    row = initialized(db) and db.execute("""SELECT payload FROM availability_revisions WHERE week=?
+        AND (? IS NULL OR received_at<=?) ORDER BY revision DESC LIMIT 1""",
+        (week, known_by_utc, known_by_utc)).fetchone()
     return json.loads(row["payload"]) if row else None
 
 

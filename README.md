@@ -321,6 +321,19 @@ original local inputs, UTC bounds and actor/time history. Overlaps count once.
 Saving this calendar does not approve a target or activate a plan. See the
 [API, clock policy and acceptance evidence](docs/specs/weekly-availability.md).
 
+## Update runner settings
+
+Open **Runner settings** in the main navigation to see the original 2:30:00 marathon
+goal for 14 March 2027 and its optional 7 February review. To revise the time,
+enter the new finish time, your name and reason, then confirm the decision.
+Each goal and training-preference change retains its own history. Record optional
+daily session limits, strength exercise choices and dated constraints there.
+Weekly availability owns the actual windows and each day’s permission for doubles.
+Its daily limits link combines the selected calendar and preference revisions.
+The local API serves `GET /api/runner-settings/goal` and
+`GET /api/runner-settings/preferences`. Supply an absolute `as_of` timestamp
+or open an exact revision from the settings history.
+
 ## Compare performance estimators
 
 On **Best efforts**, choose **Compare performance estimators**. Select an event

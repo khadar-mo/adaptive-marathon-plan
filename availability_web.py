@@ -202,7 +202,7 @@ def page(request: Request, week: str | None = None, version: str | None = None):
         invalid(exc)
     if version and record is None:
         raise HTTPException(404, "Availability version not found in this week.")
-    body = '<p><a href="/context">Context and weekly readiness</a> · <a href="/runner-settings">Runner settings</a></p>'
+    body = '<p><a href="/context">Context and weekly readiness</a></p>'
     body += '<form method="get" action="/availability"><fieldset><legend>Choose a week</legend>' + field("availability-week", "Week beginning Monday", week, "date", 'name="week" required') + '<button>Open week</button></fieldset></form>'
     body += '<p>All windows use Europe/London. Saving availability records your calendar; it does not approve a target or activate a training plan.</p>'
     shown = record["state"] if record else "UNKNOWN — not entered"
@@ -221,6 +221,7 @@ def page(request: Request, week: str | None = None, version: str | None = None):
         body += f'<p>This revision is read-only. <a href="/availability?week={week}">Open current availability to edit</a>.</p>'
     else:
         body += editor(state) + '<template id="availability-window">' + window_fields("WINDOW_ID") + '</template>' + SCRIPT
+        body += f'<p><a href="/api/runner-settings/availability/{week}">Daily limits with current runner preferences (JSON)</a></p>'
     body += f'<h2>Revision history</h2><p><a href="/api/availability/{week}">Current availability JSON</a></p>'
     body += '<ul>' + ''.join(f'<li><a href="/availability?week={week}&amp;version={v["id"]}">Revision {v["revision"]}</a> · {e(v["received_at"])} · {e(v["actor"])}</li>' for v in state["versions"]) + '</ul>'
     return views.page("Weekly availability", body)
