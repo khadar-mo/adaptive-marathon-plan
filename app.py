@@ -32,6 +32,7 @@ from context_web import router as context_router
 from fueling_web import router as fueling_router
 from availability_web import router as availability_router
 from workload_web import router as workload_router
+from fitness_web import router as fitness_router
 from workout_web import router as workout_router
 from runner_settings_web import router as settings_router
 from workout_template_web import router as template_router
@@ -56,6 +57,7 @@ app.include_router(context_router)
 app.include_router(fueling_router)
 app.include_router(availability_router)
 app.include_router(workload_router)
+app.include_router(fitness_router)
 app.include_router(workout_router)
 app.include_router(settings_router)
 app.include_router(template_router)
