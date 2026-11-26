@@ -24,6 +24,7 @@ import fit_store
 import garmin_activity
 import garmin_coverage
 import provider_modes
+import workload_inputs
 import workout_labels
 
 
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS import_issues (
     id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL REFERENCES imports(id),
     severity TEXT NOT NULL, item TEXT NOT NULL, step TEXT NOT NULL, message TEXT NOT NULL
 );
-""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + availability.SCHEMA
+""" + fit_store.SCHEMA + canonical.SCHEMA + efforts.SCHEMA + context_data.SCHEMA + provider_modes.SCHEMA + workout_labels.SCHEMA + estimators.SCHEMA + availability.SCHEMA + workload_inputs.SCHEMA
 
 
 def prepare_schema(db):
@@ -93,7 +94,9 @@ def prepare_schema(db):
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Import start is insert-once and terminal time only replaces the running
+    # state. Preserve subsecond order against canonical/inventory knowledge clocks.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def storage_failure(operation, error):
