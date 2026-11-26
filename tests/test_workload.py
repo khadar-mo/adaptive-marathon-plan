@@ -280,3 +280,46 @@ def test_reselection_uses_selection_clock_not_creation_and_replay_after_restart(
         data=workload.capture(store,as_of=cutoff,mode='AS_KNOWN')
         assert data['result']['activities'][0]['canonical_version_id']==version
         assert workload.replay(Store(store.path,store.archive),data['snapshot_id'])['status']=='IDENTICAL'
+
+
+def test_provider_mode_and_unavailable_terminal_result_are_frozen_at_knowledge_time(store):
+    run(store,1,'2026-10-30T10:00:00Z',10000)
+    with store.connect(write=True,create=True) as db:
+        db.execute("INSERT INTO provider_config_revisions VALUES (1,'STRAVA_ONLY','2026-11-01T00:00:00Z','provider-modes-v1')")
+        db.execute("INSERT INTO provider_attempts(id,config_revision,mode,contract_version,started_at,finished_at,result) VALUES (1,1,'STRAVA_ONLY','provider-modes-v1','2026-11-01T12:00:00Z','2026-11-02T12:00:00Z',?)",
+                   (json.dumps({'state':'POLICY_BLOCKED','policy_checked_at':'2026-11-01','activity_ids':[]}),))
+    args=dict(as_of='2026-11-01T13:00:00Z',mode='AS_KNOWN')
+    old=workload.capture(store,**args)
+    pending=old['inputs']['provider_lineage']['attempts'][0]
+    assert pending['result'] is None and pending['finished_at'] is None
+    assert old['result']['rolling'][0]['run_count']==1  # mode choice does not erase retained actuals
+    with store.connect(write=True,create=True) as db:
+        db.execute("INSERT INTO provider_config_revisions VALUES (2,'GARMIN_ONLY','2026-11-03T00:00:00Z','provider-modes-v1')")
+    assert workload.read(store,**args)==old['result']
+    later=workload.read(store,as_of='2026-11-04T00:00:00Z',mode='AS_KNOWN')['provider_lineage']
+    assert later['selected_config']['mode']=='GARMIN_ONLY'
+    assert later['attempts'][0]['result']['state']=='POLICY_BLOCKED'
+
+
+def test_t14_new_future_activity_does_not_change_strict_historical_hash_or_values(store,monkeypatch):
+    run(store,1,'2026-10-30T10:00:00Z',10000)
+    args=dict(as_of='2026-11-01T13:00:00Z',mode='AS_KNOWN')
+    old=workload.capture(store,**args)
+    monkeypatch.setattr(canonical,'knowledge_time',lambda:'2026-11-02T12:00:00Z')
+    run(store,2,'2026-11-02T10:00:00Z',12000)
+    assert workload.read(store,**args)==old['result']
+    assert workload.capture(store,**args)['snapshot_id']==old['snapshot_id']
+    assert workload.replay(store,old['snapshot_id'])['status']=='IDENTICAL'
+
+
+def test_batch_correction_failure_is_atomic_and_no_intensity_ledger_keeps_unknown_time(store):
+    run(store,1,'2026-10-30T10:00:00Z',10000)
+    result=inspect(store)['rolling'][0]['intensity']
+    assert result['status']=='UNKNOWN'
+    assert result['uncovered_time']['elapsed_seconds']=={'known_unknown_seconds':'3600.0','missing_duration_count':0}
+    assert result['uncovered_time']['moving_seconds']=={'known_unknown_seconds':'0','missing_duration_count':1}
+    row=enter(store,coverage())
+    with pytest.raises(wi.Conflict):
+        wi.ingest(store,wi.encoded([coverage(source_id='must-rollback'),coverage(reason='Illegal implicit replacement')]).encode())
+    with store.history() as db:
+        assert [r['record_id'] for r in wi.selected(db,'2026-11-26T12:00:00Z')]==[row['record_id']]

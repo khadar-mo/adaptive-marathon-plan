@@ -109,6 +109,19 @@ supersedes earlier G0/G1 wording that treated a message-written clock as a span 
 not a claim that those validation gates passed. G3 workload, G4 candidate estimators
 and #30 provenance classification follow the G2 software merge and preserve that status.
 
+G3 software is implemented by #18: accepted canonical whole-session rolling
+7/28/56-day exposure, separate FM END/planner START weeks, longest-run/L30 evidence,
+UTC spacing, missing measurements and immutable running-census assertions. The
+History-linked workload page supplies actual coverage/calibration/band-time entry,
+import and correction forms. Historical calculations select timestamped canonical
+versions and recorded identity groups without resolving today's mutable heads or
+aliases. Saved bundles retain exact inputs, input/config/code hashes and replay.
+Provider unavailable capability remains explicit; modes do not erase retained
+actuals. See the [ten-part G3 report](g3-acceptance.md) for exact bounds, synthetic
+test/API/browser evidence, manual limitations and final review/CI requirements.
+Software completion does not establish physiological safety or manual acceptance;
+G6 still owns prospective predictions and independent outcome validation.
+
 ## Baseline verification
 
 On 25 November: 215 existing tests passed; the two browser tests initially skipped

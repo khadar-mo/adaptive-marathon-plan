@@ -27,7 +27,7 @@ def test_workload_history_forms_intensity_correction_freeze_desktop_mobile(tmp_p
             page.locator('summary').filter(has_text='Enter running coverage').click()
             form=page.locator('form[data-kind=coverage]')
             for label,value in [('Source record ID','browser-census'),('Evidence / reason','Synthetic complete running record'),
-                                ('London From date','2024-02-01'),('London To exclusive date','2024-03-02'),
+                                ('London From date','2024-01-31'),('London To exclusive date','2024-03-02'),
                                 ('Observed through timestamp','2024-03-02T00:00:00Z'),('Attestation / manifest timestamp','2024-03-02T01:00:00Z')]:
                 form.get_by_label(label,exact=True).fill(value)
             form.get_by_label('Endpoint basis',exact=True).select_option('BOTH')
@@ -48,8 +48,8 @@ def test_workload_history_forms_intensity_correction_freeze_desktop_mobile(tmp_p
             page.get_by_text('Enter measured intensity seconds',exact=True).click()
             form=page.locator('form[data-kind=band_ledger]')
             for label,value in [('Source record ID','browser-bands'),('Evidence / reason','Synthetic measured timer bands'),
-                                ('Measured band seconds (JSON)','{"low":"1000.125","middle":"300.25","high":"100"}'),
-                                ('Explicit unclassified seconds','99.625'),('Measurement timestamp','2024-02-28T23:50:00Z'),
+                                ('Measured band seconds (JSON)','{"low":1000.12345678901234567890,"middle":"300.25","high":"100"}'),
+                                ('Explicit unclassified seconds','0'),('Measurement timestamp','2024-02-28T23:50:00Z'),
                                 ('Measurement method / source semantics','Accumulated seconds while timer running')]:
                 form.get_by_label(label,exact=True).fill(value)
             form.get_by_label('Measured duration basis',exact=True).select_option('timer_seconds')
@@ -75,14 +75,14 @@ def test_workload_history_forms_intensity_correction_freeze_desktop_mobile(tmp_p
             expect(page.locator('#l30-result')).to_contain_text('CALCULABLE')
             expect(page.locator('#l30-result')).to_contain_text('ratio 3.6')
             page.get_by_text('7-day bounds, durations, intensity and coverage evidence',exact=True).click()
-            expect(page.get_by_text('1000.125',exact=False).first).to_be_visible()
+            expect(page.get_by_text('1000.12345678901234567890',exact=False).first).to_be_visible()
             for width in (1280,375):
                 page.set_viewport_size({'width':width,'height':900})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 page.screenshot(path=str(tmp_path/f'workload-{width}.png'))
             data=page.request.get(base+'/api/workload?as_of=2024-03-01T12%3A00%3A00Z').json()
             group,=data['rolling'][0]['intensity']['groups']
-            assert group['seconds']['low']=='1000.125' and group['unknown_seconds']=='99.625'
+            assert group['seconds']['low']=='1000.12345678901234567890' and group['unknown_seconds']=='99.62654321098765432110'
             page.get_by_role('button',name='Freeze this calculation',exact=True).press('Enter')
             expect(page.get_by_role('link',name='Frozen evidence JSON',exact=True)).to_be_visible()
             link=page.get_by_role('link',name='Replay frozen inputs',exact=True).get_attribute('href')

@@ -7,9 +7,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
-import canonical
-
-
 VERSION = "g3-inputs-v1"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workload_input_versions (
@@ -280,7 +277,7 @@ def provider_evidence(store, scan_id, actor, reason):
     value = {"kind": "coverage", "source": "garmin-scan-capture", "source_id": digest(evidence),
              "actor": actor, "reason": reason, "source_refs": [{"raw_sha256": raw_sha, "scan_id": scan_id, "import_id": scan["import_id"]}],
              "basis": "RECORDED_LOCAL_DATE", "lower_utc": lower.isoformat(), "upper_utc": upper.isoformat(),
-             "observed_through": evidence["captured_at"], "reported_at": evidence["captured_at"],
+             "observed_through": scan["finished_at"] or scan["started_at"], "reported_at": evidence["captured_at"],
              "status": "UNKNOWN", "evidence_kind": "PROVIDER_CENSUS", "boundary_timezone": "Europe/London",
              "exclusions": [evidence["limitation"]]}
     return ingest(store, encoded(value).encode())

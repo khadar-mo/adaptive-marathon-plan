@@ -242,6 +242,8 @@ def summarize(rows, census, unassigned):
                          "activity_ids": [r["activity_id"] for r in known if number(r["measures"]["distance_m"]) == longest],
                          "status": "COMPLETE" if complete else "INCOMPLETE_HISTORY"}
     result["frequency_status"] = "COMPLETE" if census["complete"] and not unassigned else "INCOMPLETE_HISTORY"
+    result["frequency"] = {"known_count": len(rows), "value": len(rows) if result["frequency_status"] == "COMPLETE" else None,
+                           "status": result["frequency_status"]}
     return result
 
 
@@ -388,6 +390,8 @@ def _calculate(bundle):
                     "interpretation": "Time since latest observed completed run, not inferred rest."}
     return {"algorithm_version": VERSION, "event_cutoff": bundle["event_cutoff"], "knowledge_cutoff": bundle["knowledge_cutoff"],
             "time_basis": bundle["time_basis"], "input_hash": inputs.digest(bundle), "config": bundle["config"],
+            "artifact_kind": "RETROSPECTIVE_AS_KNOWN_CALCULATION" if bundle["time_basis"] == "AS_KNOWN" else "EVENT_TIME_RECONSTRUCTION",
+            "evaluation_policy": "Recorded input knowledge cutoff with explicitly versioned current calculation code; not a forecast originally made at that historical time.",
             "rolling": rolling, "longest": longest, "weeks": weeks, "l30": l30, "spacing": spacing,
             "since_last_run": trailing, "activities": [{**r, "completed_by_cutoff": True} for r in ready],
             "unassigned": unassigned, "unassigned_known_subtotals": {key: str(sum((number(r["measures"][key]) or Decimal(0) for r in unassigned), Decimal(0))) for key in MEASURES},
@@ -489,7 +493,7 @@ def main(argv=None):
             value = (capture if args.capture else read)(store, as_of=args.as_of, knowledge_cutoff=args.knowledge_cutoff,
                 mode=args.mode, proposed_start=args.proposed_start, proposed_distance_m=args.proposed_distance_m)
         print(inputs.encoded(value))
-    except (ValueError, OSError) as exc:
+    except (ValueError, OverflowError, OSError) as exc:
         parser.error(str(exc))
 
 

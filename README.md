@@ -299,3 +299,39 @@ actual interface checks and unverified scientific/manual evidence.
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.
 
 To run the tests, activate the virtual environment, install `requirements-dev.txt` with pip and run `python3 -m pytest -q`. The tests use synthetic activities, temporary databases and loopback HTTP. The browser replay runs with Chrome or Chromium on PATH and is required in GitHub Actions.
+
+### Training workload and running coverage (G3)
+
+Open **History → Workload** to inspect completed running volume over 7/28/56 days,
+longest runs, spacing, missing measurements and proposed-session L30 comparisons.
+Rolling windows count whole sessions ending in `(T−W,T]`. The new week tables show
+FM END-week and planner START-week accounting in Europe/London; the existing
+History calendar retains recorded-local-date accounting. Fractional metres remain
+unrounded. Elapsed, timer and moving durations are separate.
+
+The page provides working running-coverage, sourced zone-profile and measured
+intensity forms, JSON import, corrections and revision history. Complete running
+census requires explicit evidence; no runs in a list does not prove rest. Wellness
+coverage does not establish running history. Calibration evidence and native
+five-zone versus research three-zone methods stay visible; no physiological zone
+thresholds are supplied.
+
+`GET /api/workload` accepts absolute `as_of` and `knowledge_cutoff` timestamps.
+`mode=AS_KNOWN` selects only timestamped canonical/input evidence known by the
+cutoff; it is a retrospective calculation, not an original historical forecast.
+The default event-time reconstruction discloses its later knowledge cutoff.
+Legacy activities without timestamped canonical selections need explicit G1
+recompute; reads never backdate their knowledge or mutate the database.
+
+For L30, supply both `proposed_start` and `proposed_distance_m`. A complete 16 km
+denominator and 18 km proposal yield 1.125 (+12.5%). Unknown coverage returns
+INCOMPLETE_HISTORY with a null authoritative ratio; a complete empty/nonpositive
+denominator returns NOT_CALCULABLE. This is exposure context, not an injury
+probability or an automatic change to mileage.
+
+`POST /api/workload/capture` freezes exact inputs and results. Historical views and
+replay are available under `/workload/snapshots/{id}` and
+`/api/workload/snapshots/{id}/replay`. The offline `workload.py` CLI requires `--db`
+and supports `--import-json`, `--capture` and `--replay`; it makes no provider calls.
+See the [G3 interface and ten-part acceptance record](docs/specs/g3-acceptance.md)
+for input schemas, time/coverage policies and verification evidence.

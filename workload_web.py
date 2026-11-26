@@ -129,15 +129,15 @@ def details(title, value):
 
 
 def text_field(name, label, value="", required=False, kind="text"):
-    return f'<label>{e(label)}<input type="{kind}" name="{name}" value="{e(value)}" {"required" if required else ""}></label>'
+    return f'<label>{e(label)}<input aria-label="{e(label)}" type="{kind}" name="{name}" value="{e(value)}" {"required" if required else ""}></label>'
 
 
 def area(name, label, value="", required=True):
-    return f'<label>{e(label)}<textarea name="{name}" rows="3" style="width:100%;box-sizing:border-box" {"required" if required else ""}>{e(value)}</textarea></label>'
+    return f'<label>{e(label)}<textarea aria-label="{e(label)}" name="{name}" rows="3" style="width:100%;box-sizing:border-box" {"required" if required else ""}>{e(value)}</textarea></label>'
 
 
 def select(name, label, values, chosen=None):
-    return f'<label>{e(label)}<select name="{name}">' + "".join(f'<option value="{e(v)}" {"selected" if v == chosen else ""}>{e(label)}</option>' for v, label in values) + '</select></label>'
+    return f'<label>{e(label)}<select aria-label="{e(label)}" name="{name}">' + "".join(f'<option value="{e(v)}" {"selected" if v == chosen else ""}>{e(label)}</option>' for v, label in values) + '</select></label>'
 
 
 def entry_form(kind, data, old=None):
@@ -196,10 +196,13 @@ document.addEventListener('submit', async event => {
  button.disabled=true; message.textContent='Saving…';
  try {
   let data=Object.fromEntries(new FormData(form)), url=form.getAttribute('action'), headers={}, body;
+  const rawJSON={};
   if(form.matches('.workload-import')) body=new FormData(form);
   else {
    if(form.matches('.workload-entry')) {
-    for(const key of ['source_refs','exclusions','bands','seconds']) if(key in data) data[key]=JSON.parse(data[key]);
+    // Validate syntax, then send original numeric lexemes. JSON.parse/stringify
+    // must not round supplied calibration or measured seconds in the browser.
+    for(const key of ['source_refs','exclusions','bands','seconds']) if(key in data) {JSON.parse(data[key]); rawJSON[key]=data[key];}
     for(const key of ['lower_inclusive','upper_inclusive']) if(key in data) data[key]=data[key]==='true';
     if(data.effective_to==='') data.effective_to=null;
     if(data.kind==='coverage') {
@@ -207,14 +210,19 @@ document.addEventListener('submit', async event => {
      else {delete data.first; delete data.to_exclusive;}
     }
    }
-   if(form.matches('.workload-scan')) data.scan_id=Number(data.scan_id);
+   if(form.matches('.workload-scan')) {
+    if(!/^[1-9][0-9]*$/.test(data.scan_id)) throw Error('Use a positive whole scan ID.');
+    rawJSON.scan_id=data.scan_id;
+   }
    if(form.matches('.workload-capture')) for(const key in data) if(data[key]==='') data[key]=null;
    headers={'Content-Type':'application/json'};
    if(data.basis==='BOTH' && !url.endsWith('coverage-dates')) {
     if(data.supersedes) throw Error('Correct START and END assertions separately using their history links.');
     data=['START','END'].map(basis=>({...data,basis,source_id:data.source_id+':'+basis}));
    }
-   body=JSON.stringify(data);
+   const encode=value=>'{'+Object.entries(value).map(([key,item])=>JSON.stringify(key)+':'+
+     (Object.hasOwn(rawJSON,key)?rawJSON[key]:JSON.stringify(item))).join(',')+'}';
+   body=Array.isArray(data)?'['+data.map(encode).join(',')+']':encode(data);
   }
   const response=await fetch(url,{method:'POST',headers,body}), result=await response.json();
   if(!response.ok) throw Error(typeof result.detail==='string'?result.detail:JSON.stringify(result.detail));
@@ -230,6 +238,8 @@ def page(data, frozen=None, correction=None):
     if data["l30"]:
         query.update(proposed_start=data["l30"]["proposed_start_utc"], proposed_distance_m=data["l30"]["proposed_distance_m"])
     body = '<p>Whole completed runs; fractional metres. FM weeks use the END date in London; planner weeks use START. The History calendar keeps its recorded local date.</p>'
+    if not frozen:
+        body += '<p><a href="#running-inputs">Enter coverage or measured intensity</a> · <a href="#workload-sources">Inspect source contributions</a></p>'
     body += f'<p><strong>{e(data["time_basis"])}</strong> · Event cutoff {e(data["event_cutoff"])} · Knowledge cutoff {e(data["knowledge_cutoff"])}. Manual verification: UNVERIFIED.</p>'
     if data.get("current_diagnostics"):
         body += '<p><strong>INCOMPLETE_PROCESSING: canonical backfill required before using present totals as complete.</strong></p>' + details('Current operational diagnostic, outside historical inputs', data["current_diagnostics"])
@@ -242,11 +252,14 @@ def page(data, frozen=None, correction=None):
         body += f'<form method="get" action="/workload"><fieldset><legend>Inspect workload and L30</legend>{fields}<button>Inspect workload</button></fieldset></form>'
         body += '<form class="workload-capture" action="/api/workload/capture">' + ''.join(f'<input type="hidden" name="{k}" value="{e(v)}">' for k,v in query.items()) + '<button>Freeze this calculation</button></form>'
     body += '<p id="workload-message" role="status"></p><h2>Rolling completed exposure</h2>'
-    body += '<div class="table-wrap"><table><thead><tr><th>Window</th><th>Known metres</th><th>Runs</th><th>Census</th><th>Missing distances</th></tr></thead><tbody>'
+    body += '<div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable rolling workload"><table class="recording-table"><thead><tr><th>Window</th><th>Known metres</th><th>Runs</th><th>Census</th><th>Missing distances</th></tr></thead><tbody>'
     for row in data["rolling"]:
         body += f'<tr><td>{row["days"]} days</td><td>{e(row["measures"]["distance_m"]["known_subtotal"])}</td><td>{row["run_count"]}</td><td>{e(row["coverage"]["status"])}</td><td>{row["measures"]["distance_m"]["missing_count"]}</td></tr>'
     body += '</tbody></table></div><p>Known subtotals are not complete totals when census or measurements are missing. Missing history is not verified rest.</p>'
     for row in data["rolling"]:
+        for group in row['intensity']['groups']:
+            band_text = ' · '.join(f'{e(label)}: {e(seconds)} s' for label, seconds in group['seconds'].items())
+            body += f'<p>{row["days"]}-day intensity · {e(group["profile"]["method"])} ({e(group["profile"]["system"])}, {e(group["profile"]["reliability"])}) · {band_text} · unknown: {e(group["unknown_seconds"])} s; {group["missing_duration_count"]} missing durations.</p>'
         body += details(f'{row["days"]}-day bounds, durations, intensity and coverage evidence', row)
     body += '<h2>Longest runs and L30</h2>'
     for row in data["longest"]:
@@ -255,19 +268,19 @@ def page(data, frozen=None, correction=None):
         row = data["l30"]
         body += f'<p id="l30-result"><strong>{e(row["status"])}</strong> · ratio {e(row["ratio"])} · percentage change {e(row["percentage_change"])}%. Exposure comparison only; no injury probability or automatic mileage change.</p>'
         body += details('L30 exact bounds, denominator and sources', row)
-    body += '<h2>ISO weeks and accounting</h2><div class="table-wrap"><table><thead><tr><th>Week</th><th>State</th><th>FM END metres</th><th>Planner START metres</th><th>END / START census</th></tr></thead><tbody>'
+    body += '<h2>ISO weeks and accounting</h2><div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable week accounting"><table class="recording-table"><thead><tr><th>Week</th><th>State</th><th>FM END metres</th><th>Planner START metres</th><th>END / START census</th></tr></thead><tbody>'
     for row in data["weeks"]:
         body += f'<tr><td>{e(row["iso_week"])}</td><td>{e(row["week_state"])}</td><td>{e(row["fm_end"]["measures"]["distance_m"]["known_subtotal"])}</td><td>{e(row["planner_start"]["measures"]["distance_m"]["known_subtotal"])}</td><td>{e(row["fm_end"]["coverage"]["status"])} / {e(row["planner_start"]["coverage"]["status"])}</td></tr>'
     body += '</tbody></table></div>' + details('Week boundaries, open-week observation and contributions', data["weeks"])
     body += '<h2>Spacing and missing history</h2>' + details('Observed gaps and overlaps', {"spacing": data["spacing"], "since_last_run": data["since_last_run"], "unassigned": data["unassigned"], "unassigned_known_subtotals": data["unassigned_known_subtotals"]})
     body += details('Dated zone profiles at cutoff', data['zone_profiles_at_cutoff']) + details('Provider modes and saved capability lineage', data['provider_lineage'])
-    body += '<h2>Source contributions</h2>'
+    body += '<h2 id="workload-sources">Source contributions</h2><details><summary>Inspect contributing canonical activities</summary>'
     for row in data["activities"]:
         body += f'<p><a href="/activities/{row["activity_id"]}/canonical?version={row["canonical_version_id"]}">Activity {row["activity_id"]} canonical evidence</a> · {e(row["measures"]["distance_m"])} m · {e(row["timing_basis"])}</p>'
         body += details(f'Activity {row["activity_id"]} workload input', row)
-    body += details('Excluded inputs and reasons', data["excluded"])
+    body += '</details>' + details('Excluded inputs and reasons', data["excluded"])
     if not frozen:
-        body += '<h2>Running coverage and intensity inputs</h2><p>Running census is distinct from wellness or strength coverage. Supply explicit evidence for each endpoint basis. Strength never adds running kilometres.</p>'
+        body += '<h2 id="running-inputs">Running coverage and intensity inputs</h2><p>Running census is distinct from wellness or strength coverage. Supply explicit evidence for each endpoint basis. Strength never adds running kilometres.</p>'
         if correction:
             body += entry_form(correction["kind"], data, correction)
         else:
