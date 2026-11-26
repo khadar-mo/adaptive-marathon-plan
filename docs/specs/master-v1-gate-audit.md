@@ -182,3 +182,20 @@ This is ingestion software, not G5 recovery interpretation, G6 prospective valid
 or P5 approved recovery adaptation. Missing sources remain missing. Real Garmin
 wellness mapping/manual comparison and physiological validation remain UNVERIFIED;
 the generic owned-export/self-report schema does not claim a vendor-specific adapter.
+
+## Workout classification and effort evidence — issue #30
+
+Separate planned, inferred and corrected labels now retain raw title/lap/step
+evidence, immutable versions and event/known-at times. Editable completed-step
+mappings preserve UNKNOWN for unsupported patterns. Existing G2 effort contexts
+gain explicit maximality, rest/control and race verification evidence without
+changing trace QC, extraction hashes or candidate IDs. Historical inputs remain
+copyable; source changes and legacy identity limits stay visible. Strength remains
+a separate modality with no running kilometres.
+
+See [the contract](workout-provenance.md) and
+[ten-part acceptance record](workout-provenance-acceptance.md). A synthetic database
+created with the actual merged G2 source verifies retained rejection, saved
+inspection, custom configuration and recent-boundary behavior after this upgrade.
+Software conformance does not establish manual Garmin or scientific validation.
+Final-head CI and independent review remain the merge gates.
