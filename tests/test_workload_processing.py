@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 import canonical
+import app
 import fit_store
 import storage
 import workload
@@ -11,6 +12,9 @@ import workload_inputs as wi
 from runs import ConnectionProblem
 from test_imports import add_run, history, server, submit
 from test_workload import coverage, enter, run, store
+from test_fit_import import upload
+from test_canonical import trace_fit
+from garmin_fit_sdk import convert_datetime_to_timestamp
 
 
 @pytest.fixture
@@ -147,3 +151,83 @@ def test_old_inventory_does_not_certify_a_later_import_boundary(store,monkeypatc
     # A current read can observe completed processing without an extra user step.
     assert workload.read(store,as_of='2026-11-25T12:00:00Z')['processing_gaps']==[]
     assert workload.replay(store,old['snapshot_id'])['status']=='IDENTICAL'
+
+
+@pytest.mark.anyio
+async def test_same_second_fit_import_after_frozen_knowledge_does_not_change_history(history,monkeypatch):
+    clock=['2026-11-26T12:00:00.050000+00:00']
+    class ImportClock:
+        @staticmethod
+        def now(zone): return wi.stamp(clock[0]).astimezone(zone)
+    # Exercise production storage.now formatting, not a replacement of now().
+    monkeypatch.setattr(storage,'datetime',ImportClock)
+    monkeypatch.setattr(wi,'now',lambda:clock[0])
+    monkeypatch.setattr(canonical,'knowledge_time',lambda:clock[0])
+    async with server() as client:
+        earlier=trace_fit(start=convert_datetime_to_timestamp(wi.stamp('2026-11-23T10:00:00Z')))
+        first=await upload(client,('earlier.fit',earlier))
+        assert first['started_at']==first['finished_at']==clock[0]
+        cutoff='2026-11-26T12:00:00.100000+00:00'; clock[0]=cutoff
+        assert (await client.post('/api/workload/capture',json={'as_of':cutoff})).status_code==200
+        query={'as_of':cutoff,'mode':'AS_KNOWN'}
+        saved=(await client.post('/api/workload/capture',json=query)).json()
+        before=saved['result']
+        assert before['rolling'][0]['run_count']==1 and not before['processing_gaps']
+        clock[0]='2026-11-26T12:00:00.900000+00:00'
+        later=trace_fit(start=convert_datetime_to_timestamp(wi.stamp('2026-11-24T10:00:00Z')))
+        second=await upload(client,('later.fit',later))
+        assert second['started_at']==second['finished_at']==clock[0]
+        after=(await client.get('/api/workload',params=query)).json()
+        assert after==before and after['input_hash']==before['input_hash']
+        clock[0]='2026-11-26T12:00:00.950000+00:00'
+        later_known=(await client.get('/api/workload',params={'as_of':clock[0],'mode':'AS_KNOWN'})).json()
+        assert later_known['rolling'][0]['run_count']==2
+        gap,=later_known['processing_gaps']
+        assert gap['known_at']=='2026-11-26T12:00:00.900000+00:00'
+        assert gap['source_availability']['precision']=='MICROSECOND'
+        # Terminal timestamp is immutable after the running-to-terminal transition.
+        app.app.state.store.finish(second['id'],'complete')
+        assert (await client.get('/api/imports/'+str(second['id']))).json()['finished_at']==second['finished_at']
+        assert (await client.get('/api/workload/snapshots/'+saved['snapshot_id']+'/replay')).json()['status']=='IDENTICAL'
+
+
+def test_unobserved_legacy_second_is_not_backdated_into_earlier_cutoff(store,monkeypatch):
+    clock=['2026-11-26T12:00:00.100000+00:00']
+    monkeypatch.setattr(wi,'now',lambda:clock[0])
+    workload.capture(store,as_of=clock[0])
+    query={'as_of':clock[0],'mode':'AS_KNOWN'}
+    before=workload.read(store,**query)
+    with store.connect(write=True,create=True) as db:
+        db.execute("INSERT INTO imports(id,started_at,finished_at,state,source) VALUES (1,'2026-11-26T12:00:00+00:00','2026-11-26T12:00:00+00:00','complete','fit')")
+    clock[0]='2026-11-26T12:00:01.100000+00:00'
+    assert workload.read(store,**query)==before
+    later=workload.read(store,as_of='2026-11-26T12:00:01.000000+00:00',mode='AS_KNOWN')
+    gap,=later['processing_gaps']
+    assert gap['known_at']=='2026-11-26T12:00:01.000000+00:00'
+    assert gap['source_availability']['precision']=='SECOND_TRUNCATED'
+    assert gap['source_availability']['availability_basis']=='TRUNCATED_INTERVAL_ELAPSED'
+    assert gap['source_availability']['upper_exclusive']
+
+
+@pytest.mark.parametrize('finished', [None,'2026-11-26T12:00:00+00:00'])
+def test_inventory_retains_genuinely_earlier_known_legacy_state_within_same_second(store,monkeypatch,finished):
+    clock=['2026-11-26T12:00:00.100000+00:00']
+    monkeypatch.setattr(wi,'now',lambda:clock[0])
+    with store.connect(write=True,create=True) as db:
+        db.execute("INSERT INTO imports(id,started_at,finished_at,state,source) VALUES (1,'2026-11-26T12:00:00+00:00',?,'complete','fit')",(finished,))
+    workload.capture(store,as_of=clock[0])
+    query={'as_of':clock[0],'mode':'AS_KNOWN'}
+    before=workload.read(store,**query)
+    assert before['processing_inventory']['import_boundary'][0]['finished_at']==finished
+    if finished is None:
+        gap,=before['processing_gaps']
+        assert gap['known_at']==clock[0]
+        assert gap['source_availability']['availability_basis']=='IMMUTABLE_INVENTORY_OBSERVATION'
+        assert gap['source_availability']['precision']=='SECOND_TRUNCATED'
+    else:
+        assert not before['processing_gaps']
+    clock[0]='2026-11-26T12:00:00.900000+00:00'
+    with store.connect(write=True,create=True) as db:
+        db.execute("UPDATE imports SET finished_at='2026-11-26T12:00:00+00:00' WHERE id=1")
+        db.execute("INSERT INTO imports(id,started_at,finished_at,state,source) VALUES (2,'2026-11-26T12:00:00+00:00','2026-11-26T12:00:00+00:00','complete','fit')")
+    assert workload.read(store,**query)==before

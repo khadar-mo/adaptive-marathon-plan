@@ -1,22 +1,48 @@
 """Timestamped processing inventories; legacy existence is never backdated."""
+from datetime import timedelta
+import re
+
 import canonical
 from garmin_activity import RUN_TYPES
 import workload_inputs as inputs
 
 
-VERSION = "g3-processing-inventory-v1"
+VERSION = "g3-processing-inventory-v2"
 
 
-def import_boundary(db, cutoff=None):
+def clock_evidence(value, observed_by=None):
+    """A legacy truncated clock cannot establish a precise earlier-known instant."""
+    recorded = inputs.stamp(value)
+    fraction = re.search(r"[T ]\d{2}:\d{2}:\d{2}[.,](\d+)", value)
+    digits = len(fraction[1]) if fraction else 0
+    precise = digits >= 6
+    upper = recorded if precise else recorded + timedelta(microseconds=10 ** (6 - digits))
+    available = upper
+    basis = "PRECISE_IMPORT_CLOCK" if precise else "TRUNCATED_INTERVAL_ELAPSED"
+    if observed_by and inputs.stamp(observed_by) < available:
+        available, basis = inputs.stamp(observed_by), "IMMUTABLE_INVENTORY_OBSERVATION"
+    return {"recorded_at": value, "precision": "MICROSECOND" if precise else "SECOND_TRUNCATED" if not digits else "FRACTION_TRUNCATED",
+            "recorded_lower_utc": recorded.isoformat(timespec="microseconds"),
+            "recorded_upper_utc": upper.isoformat(timespec="microseconds"), "upper_exclusive": not precise,
+            "available_by": available.isoformat(timespec="microseconds"), "availability_basis": basis}
+
+
+def import_boundary(db, cutoff=None, inventory=None):
     rows = []
     if not inputs.table(db, "imports"):
         return rows
+    previous = {row["id"]: row for row in inventory["import_boundary"]} if inventory else {}
     for source in db.execute("SELECT id, started_at, finished_at FROM imports ORDER BY id"):
         row = dict(source)
-        if cutoff and inputs.stamp(row["started_at"]) > inputs.stamp(cutoff):
-            continue
-        if cutoff and row["finished_at"] and inputs.stamp(row["finished_at"]) > inputs.stamp(cutoff):
-            row["finished_at"] = None
+        if cutoff:
+            old = previous.get(row["id"], {})
+            proof = inventory["known_at"] if inventory and old.get("started_at") == row["started_at"] else None
+            if inputs.stamp(clock_evidence(row["started_at"], proof)["available_by"]) > inputs.stamp(cutoff):
+                continue
+            if row["finished_at"]:
+                proof = inventory["known_at"] if inventory and old.get("finished_at") == row["finished_at"] else None
+                if inputs.stamp(clock_evidence(row["finished_at"], proof)["available_by"]) > inputs.stamp(cutoff):
+                    row["finished_at"] = None
         rows.append(row)
     return rows
 
@@ -43,7 +69,8 @@ def observe(db, *, persist=False):
                          "known_start_utc": start if issue != "INVALID_TIMING" else None, "timing_issue": issue,
                          "source_refs_at_observation": sources,
                          "identity_basis": "LOCAL_ROW_OBSERVED_NOW_NOT_ORIGINAL_HISTORICAL_IDENTITY"})
-    payload = {"version": VERSION, "activities": rows, "import_boundary": import_boundary(db)}
+    payload = {"version": VERSION, "activities": rows, "import_boundary": import_boundary(db),
+               "import_clock_policy": "New import clocks retain microseconds. Legacy truncated clocks are intervals, not precise availability instants; an immutable inventory can independently prove an earlier-known state."}
     known = inputs.utc(inputs.now())  # After reading the transaction's state, never a source event date.
     identity = inputs.digest({"payload": payload, "known_at": known})
     observation = {"id": identity, "known_at": known, **payload}
@@ -74,10 +101,13 @@ def gaps(db, inventory, selected, cutoff):
                "recompute_url": f'/api/activities/{row["activity_id"]}/canonical/recompute'}
               for row in inventory["activities"] if row["activity_id"] not in processed]
     previous = {row["id"]: row for row in inventory["import_boundary"]}
-    for row in import_boundary(db, cutoff):
+    for row in import_boundary(db, cutoff, inventory):
         if previous.get(row["id"]) != row or row["finished_at"] is None:
+            field = "finished_at" if row["finished_at"] else "started_at"
+            proof = inventory["known_at"] if previous.get(row["id"], {}).get(field) == row[field] else None
+            availability = clock_evidence(row[field], proof)
             result.append({"reason": "IMPORT_PROCESSING_NOT_OBSERVED", "import_id": row["id"],
-                           "known_at": row["finished_at"] or row["started_at"], "timing": None,
+                           "known_at": availability["available_by"], "source_availability": availability, "timing": None,
                            "known_start_utc": None, "activity_id": None, "inventory_id": inventory["id"],
                            "guidance": "This import has no processing inventory for its state at K. Calculate with current knowledge after processing completes; no activity timing or alias is inferred."})
     return result

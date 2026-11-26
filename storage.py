@@ -92,7 +92,9 @@ def prepare_schema(db):
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Import start is insert-once and terminal time only replaces the running
+    # state. Preserve subsecond order against canonical/inventory knowledge clocks.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def storage_failure(operation, error):

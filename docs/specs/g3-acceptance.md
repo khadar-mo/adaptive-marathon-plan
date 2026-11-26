@@ -148,6 +148,23 @@ G0-imported store through the public API and confirmed withheld pre-backfill
 authority, restored post-recompute values, preserved old capture, strict exclusion
 of a later import, and unchanged fully processed/covered-week arithmetic.
 
+P2 clock correction: new import starts and running-to-terminal transitions retain
+UTC microseconds. Starts remain insert-once and terminal timestamps cannot be
+replaced by another finish call. `g3-processing-inventory-v2` treats legacy clocks
+without fractional seconds as truncated intervals, not precise availability.
+An unobserved import/terminal state becomes eligible only after that entire second;
+an immutable inventory can independently prove that the exact state was already
+known within the second. Gap evidence records the original clock, precision,
+interval and available-by basis without claiming an exact legacy first-known time.
+
+`test_same_second_fit_import_after_frozen_knowledge_does_not_change_history`
+imports through the normal FIT endpoint at `.050000`, freezes K at `.100000`,
+then imports at `.900000` using the production storage clock formatter. The
+earlier AS_KNOWN result/hash and replay stay identical; the later cutoff retains
+the new import. Three legacy cases verify conservative unobserved-clock handling,
+retention of a genuinely earlier-known completed/pending state, and exclusion of a
+later same-second completion. The ten processing regression cases passed locally.
+
 `AS_KNOWN` requires K ≤ T and no future knowledge cutoff. Its artifact explicitly
 says it is a retrospective calculation with the recorded code, not a prediction
 originally made at T. Event-time reconstruction can use later-arriving evidence
