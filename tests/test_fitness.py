@@ -236,6 +236,92 @@ async def test_review_known_after_run_event_revises_pb_and_endurance_only_after_
         assert rejected.status_code == 200, rejected.text
         after = await current(client, **query)
         assert next(row["best"] for row in after["pb_all"] if row["distance_m"] == 1000) is None
-        assert after["endurance"]["sustained"]["longest_by_elapsed"] is None
+        shorter = after["endurance"]["sustained"]["longest_by_elapsed"]
+        assert shorter["elapsed_coordinate_s"] == "290" and shorter["distance_coordinate_m"] != "1000"
         assert await current(client, **query, knowledge_cutoff=original["knowledge_cutoff"]) == original
         assert (await client.get("/api/fitness/snapshots/" + first["snapshot_id"] + "/replay")).json()["status"] == "IDENTICAL"
+
+
+async def test_synthetic_g0_history_independent_no_automatic_rebuild_or_authoritative_zero(history, tmp_path):
+    import gzip
+    import json
+    from pathlib import Path
+    import sqlite3
+    from storage import Archive
+    fixture = json.loads(gzip.decompress((Path(__file__).parent / "fixtures" / "fueling-g0-4a0630f.json.gz").read_bytes()))
+    db = tmp_path / "runs.sqlite3"
+    with sqlite3.connect(db) as connection:
+        connection.executescript(fixture["sql"])
+    Archive(tmp_path / "archive").put(bytes.fromhex(fixture["raw_hex"]))
+    async with server() as client:
+        actual = (await client.get("/api/activities/1")).json()
+        assert actual["distance_m"] == 10000 and actual["elapsed_seconds"] == 3600
+        before = db.read_bytes()
+        unprocessed = await current(client, as_of="2024-03-01T14:00:00Z")
+        assert unprocessed["pb_all"] == [] and unprocessed["exposure"]["processing_gaps"]
+        assert all(w["longest"]["distance_m"] is None for w in unprocessed["endurance"]["windows"])
+        assert (await client.get("/fitness")).status_code == 200 and db.read_bytes() == before
+
+
+async def test_precise_input_validation_retries_and_fueling_kept_outside_state(history):
+    from test_fueling import enter as fueling_entry, report as fueling_report
+    import json
+    from fitness import tracked
+    async with server() as client:
+        await upload(client, ("run.fit", steady(0)))
+        cutoff = "2026-11-01T12:00:00Z"
+        original = await current(client, as_of=cutoff)
+        await fueling_entry(client, fueling_report(user_strategy="runner-entered synthetic text"))
+        after = await current(client, as_of=cutoff)
+        assert original["lineage"]["context_version_ids"] == after["lineage"]["context_version_ids"] == []
+        assert tracked(original) == tracked(after)
+        cid = after["endurance"]["session_evidence"][0]["canonical_version_id"]
+        value = {"activity_id": 1, "canonical_version_id": cid, "grade_percent": "RAW",
+                 "source": "runner", "source_reference": "grade log", "actor": "athlete", "reason": "Record"}
+        raw = json.dumps(value).replace('"RAW"', "0.12345678901234567890123456789")
+        async def post(text):
+            return await client.post("/api/fitness/run-context", content=text, headers={"content-type":"application/json"})
+        response = await post(raw)
+        assert response.status_code == 200, response.text
+        r = response.json()
+        assert r["grade_percent"] == "0.12345678901234567890123456789"
+        assert (await post(raw)).json() == r
+        assert (await post(raw.replace("grade log", "changed grade log"))).status_code == 409
+        assert (await post(raw.replace(cid, "a"*64))).status_code == 409
+        assert (await post(raw.replace('"athlete"', '"  "'))).status_code == 422
+        assert (await post(raw.replace("0.12345678901234567890123456789", "NaN"))).status_code == 422
+        for clock in ("2026-10-25", "0001-01-01T00:00:00+00:00"):
+            assert (await client.get("/api/fitness", params={"as_of": clock})).status_code == 422
+        assert (await client.get("/api/fitness/snapshots/missing")).status_code == 404
+
+
+async def test_future_source_and_pause_do_not_contribute_to_supported_intervals(history):
+    async with server() as client:
+        await configure(client, {"sustained_pace_s_per_km":{"low":"250","high":"350"},"late_after_m":"90"})
+        await upload(client, ("future.fit", steady(20)), ("pauses.fit", steady(1, events=[(0,0),(120,1),(150,0),(300,1)])))
+        state = await current(client, as_of="2026-01-15T00:00:00Z", config_version="synthetic-v1")
+        assert [s["activity_id"] for s in state["endurance"]["session_evidence"]] == [2]
+        assert list(state["lineage"]["session_labels"]) == ["2"]
+        spans = state["endurance"]["sustained"]["qualifying_spans"]
+        assert spans and all(s["elapsed_seconds"] < 300 for s in spans)
+        assert all(s["activity_id"] == 2 for s in state["endurance"]["late_blocks"]["blocks"])
+        assert (await client.get("/fitness", params={"as_of":"2026-01-15T00:00:00Z","activity_id":1})).status_code == 404
+
+
+async def test_conflicted_fit_keeps_uncertainty_dimensions_and_unavailable_validity(history):
+    import estimators
+    cutoff = "2026-01-15T12:00:00Z"
+    async with server() as client:
+        await upload(client, ("one-workout.fit", steady(0, distance=5000, elapsed=1500)))
+        custom = {**estimators.DEFAULT_CONFIG, "review_policy": {"max_activity_fraction": 0.5}}
+        saved = await client.post("/api/estimators/configurations", json={"version": "review-overlap", "config": custom})
+        assert saved.status_code == 200, saved.text
+        await configure(client, {"estimator_config": "review-overlap"})
+        query = {"as_of": cutoff, "config_version": "synthetic-v1"}
+        state = await current(client, **query)
+        fit = state["quality"]["identifiability"][0]
+        assert fit["status"] == "CONFLICTED_EVIDENCE" and fit["source_overlap"]["distinct_activities"] == 1
+        assert state["quality"]["personal_predictive_validity"]["prediction_interval"] is None
+        assert state["pb_all"][0]["best"]["status"] == "SUPPORTED_OBSERVATION"
+        html = await client.get("/fitness", params=query)
+        assert "CONFLICTED_EVIDENCE" in html.text and "INSUFFICIENT" in (await client.get("/fitness", params={"as_of":"2025-01-01T00:00:00Z"})).text

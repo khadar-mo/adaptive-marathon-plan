@@ -60,6 +60,7 @@ def configuration_form(state):
             + field("minimum_days", "Minimum observed days", cfg["minimum_days"], True, "number")
             + field("expected_metrics", "Expected metrics (comma separated)", ", ".join(cfg["expected_metrics"]))
             + textarea("robust_deviations", "Robust-deviation rules (JSON array)", json.dumps(cfg["robust_deviations"], ensure_ascii=False))
+            + '<small>Each optional rule names its metric, unit, source, method and calibration, with a positive epsilon and a direction of HIGHER, LOWER or BIDIRECTIONAL.</small>'
             + '</fieldset><fieldset><legend>Comparable runs</legend><p>Enter an exact route and conditions, inclusive duration and grade ranges, and a recorded HR or RPE band.</p>'
             + field("route", "Matched route", match.get("route")) + field("conditions", "Matched conditions", match.get("conditions"))
             + band("duration", "Duration (seconds)", match.get("duration_s")) + band("grade", "Grade (%)", match.get("grade_percent"))
@@ -108,8 +109,12 @@ def profile(state, query, *, configs=(), history=(), record=None, notes=(), save
             if not value or value["status"] != "SUPPORTED_OBSERVATION":
                 return e(missing)
             ref = value["ref"]
-            return e(f'{value["elapsed_seconds"]:.3f} s · {value["category"]} · ') + link(
-                f'/activities/{ref["activity_id"]}/efforts?version={ref["version_id"]}&source={ref["source_sha256"]}', f'Run {ref["activity_id"]}')
+            path = f'/activities/{ref["activity_id"]}/efforts'
+            if value.get("inspection_required"):
+                path += "?" + urlencode({"version": ref["version_id"], "source": ref["source_sha256"]})
+            else:
+                path += f'/{ref["version_id"]}/{ref["candidate_id"]}?' + urlencode({"as_of": state["event_cutoff"], "knowledge_as_of": state["knowledge_cutoff"]})
+            return e(f'{value["elapsed_seconds"]:.3f} s · {value["category"]} · ') + link(path, f'Run {ref["activity_id"]}')
         window = next((v for v in recent["windows"] if v["days"] == recent_days), {})
         rows.append([e(alltime["distance_m"]), summary(alltime["best"], alltime["state"]), summary(window.get("best"), window.get("state", "MISSING_RECENT"))])
     content += table(["Distance (m)", "All time", f"Recent ({recent_days} days)"], rows) if rows else '<p>No eligible observed intervals.</p>'

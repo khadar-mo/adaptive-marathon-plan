@@ -24,6 +24,10 @@ def records_at(db, event, knowledge):
     result = []
     for row in rows:
         value = json.loads(row["payload"])
+        if value["kind"] not in {"wellness", "strength", "post_run", "preweek", "coverage"}:
+            continue
+        if value["kind"] == "coverage" and value["domain"] not in {"wellness", "strength", "post_run", "preweek"}:
+            continue
         if not context.eligible(value, event):
             continue
         sources = [dict(ref) for ref in db.execute("""SELECT s.import_id,s.item_index,i.raw_sha256,i.parser_version,i.known_at

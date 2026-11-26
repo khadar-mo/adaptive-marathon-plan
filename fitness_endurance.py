@@ -1,6 +1,7 @@
 """Describe completed sessions and original, uninterrupted sample spans."""
 from decimal import Decimal, localcontext
 from fractions import Fraction
+from heapq import heappop, heappush
 from statistics import median
 
 import effort_math
@@ -40,7 +41,8 @@ def session_inputs(activity, trace, obs, feedback):
             "hr_bpm": hr, "hr_method": hr_method, "rpe": rpe, "context_id": supplied.get("id"),
             "context_source": supplied.get("source_reference"),
             "superseded_canonical_context_ids": [r["id"] for r in annotations if r is not supplied],
-            "source_refs": activity["raw_sources"]}
+            "timing_basis": activity["timing_basis"], "qc_config_version": activity["qc_config_version"],
+            "summary_disagreements": activity["summary_comparisons"], "source_refs": activity["raw_sources"]}
 
 
 def comparable(rows, descriptor):
@@ -65,6 +67,8 @@ def comparable(rows, descriptor):
                 reasons.append("INCOMPATIBLE_RPE_SCALE")
             elif not inside(decimal(rating["value"]), descriptor["rpe"]["values"]):
                 reasons.append("RPE_OUTSIDE_BAND")
+        if any(d["requires_distance_review"] for d in row["summary_disagreements"]):
+            reasons.append("SUMMARY_DISTANCE_REVIEW_REQUIRED")
         distance, duration = decimal(row["distance_m"]), decimal(row["duration_s"])
         if not distance or not duration:
             reasons.append("POSITIVE_TIME_AND_DISTANCE_REQUIRED")
@@ -81,12 +85,30 @@ def comparable(rows, descriptor):
     return result
 
 
+def best_eligible(block, start, end, rejected):
+    # A rejection names one exact G2 interval. Inspect the longest remaining
+    # sample-aligned span without treating a rejected parent as unmeasured.
+    pending = [(block.clocks[start] - block.clocks[end], start, end)]
+    visited = {(start, end)}
+    while pending:
+        _, left, right = heappop(pending)
+        distance = block.coordinates[right] - block.coordinates[left]
+        candidate = block.candidate(block.coordinates[left], distance)
+        if not candidate or candidate["computed_quality_state"] != "VALID":
+            continue
+        if effort_math.interval_key(candidate) not in rejected:
+            return candidate, distance
+        for a, b in ((left + 1, right), (left, right - 1)):
+            if a < b and (a, b) not in visited:
+                visited.add((a, b))
+                heappush(pending, (block.clocks[a] - block.clocks[b], a, b))
+    return None, None
+
+
 def segment(trace, block, start, end, row):
-    distance = block.coordinates[end] - block.coordinates[start]
-    if distance <= 0:
-        return None
-    c = block.candidate(block.coordinates[start], distance)
-    if not c or c["computed_quality_state"] != "VALID" or effort_math.interval_key(c) in {tuple(v) for v in trace["rejected_intervals"]}:
+    rejected = {tuple(v) for v in trace["rejected_intervals"]}
+    c, distance = best_eligible(block, start, end, rejected)
+    if c is None:
         return None
     a, b = c["start"]["positions"][0], c["end"]["positions"][1]
     samples = block.samples[a:b + 1]
@@ -140,9 +162,12 @@ def segments(rows, traces, config):
         blocks, failures = effort_math.prepare(trace["trace"], trace["qc"], trace["config"], trace["global_flags"])
         missing.extend({"activity_id": row["activity_id"], **f} for f in failures)
         for block in blocks:
-            for parameter, destination in (({"pace": pace}, sustained), ({"after": Fraction(threshold) if threshold else None}, late)):
-                if next(iter(parameter.values())) is None:
-                    continue
+            descriptors = []
+            if pace:
+                descriptors.append(({"pace": pace}, sustained))
+            if threshold:
+                descriptors.append(({"after": Fraction(threshold)}, late))
+            for parameter, destination in descriptors:
                 for a, b in qualified_spans(block, **parameter):
                     value = segment(trace, block, a, b, row)
                     if value:

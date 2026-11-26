@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import zlib
 
+import context_data
 import effort_qualification
 import efforts
 import estimators
@@ -25,6 +26,12 @@ def code_hash():
         __file__, inputs.__file__, endurance.__file__, recovery.__file__, evidence.__file__))).hexdigest()
 
 
+def upstream_versions():
+    return {"g2": efforts.CODE_SHA256, "g3": workload.code_hash(), "g4": estimators.CODE_SHA256,
+            "context": hashlib.sha256(Path(context_data.__file__).read_bytes()).hexdigest(),
+            "effort_qualification": effort_qualification.CODE_SHA256, "workout_labels": workout_labels.CODE_SHA256}
+
+
 def collect(db, archive, event, knowledge, mode, *, config_version=inputs.DEFAULT_VERSION, processing_inventory=None):
     definition = inputs.configuration(db, config_version, knowledge)
     bundle = workload.collect(db, event, knowledge, mode, None, processing_inventory=processing_inventory)
@@ -35,8 +42,7 @@ def collect(db, archive, event, knowledge, mode, *, config_version=inputs.DEFAUL
             "workload": bundle, "capability_evidence": selected,
             "context_records": recovery.records_at(db, event, knowledge),
             "run_context": inputs.observations(db, knowledge, completed),
-            "upstream": {"g2": efforts.CODE_SHA256, "g3": workload.code_hash(), "g4": estimators.CODE_SHA256,
-                         "effort_qualification": effort_qualification.CODE_SHA256, "workout_labels": workout_labels.CODE_SHA256}}
+            "upstream": upstream_versions()}
 
 
 def capabilities(g4):
@@ -54,7 +60,8 @@ def capabilities(g4):
                 "distance_m": c["distance_m"], "elapsed_seconds": c["elapsed_seconds"], "elapsed_coordinate_s": c["elapsed_coordinate_s"],
                 "start_utc": c["start_utc"], "end_utc": c["end_utc"], "exact_endpoint_clock": item["exact_end_clock"],
                 "speed_mps": value["speed_mps"], "age_days": item["age_days"], "quality": c["effective_quality_state"],
-                "category": c["provenance"]["category"], "context_version": c["context_input_version"], "qualification": item["qualification"]}
+                "category": c["provenance"]["category"], "inspection_required": c.get("inspection_required", False),
+                "context_version": c["context_input_version"], "qualification": item["qualification"]}
     all_time, recent = [], []
     for row in g4["observed_profile"]:
         all_time.append({"distance_m": row["distance_m"], "state": row["all_time_state"], "best": observed(row["all_time"])})
@@ -222,13 +229,18 @@ def snapshot(store, identity, *, inputs_only=False, replay=False):
         return unpack(row["inputs"])
     if replay:
         bundle = unpack(row["inputs"])
-        if bundle["code_sha256"] != code_hash() or bundle["upstream"]["g3"] != workload.code_hash():
+        if bundle["code_sha256"] != code_hash() or bundle["upstream"] != upstream_versions():
             return {"status": "REQUIRES_RECORDED_CODE", "snapshot_id": identity}
         same = wi.digest(bundle) == row["input_hash"] and calculate(bundle) == unpack(row["result"])
         return {"status": "IDENTICAL" if same else "MISMATCH", "snapshot_id": identity, "input_hash": row["input_hash"]}
     return saved_row(row)
 
 
-def history(store):
+def history(store, *, known_by=None):
     with store.history() as db:
-        return [dict(row) for row in db.execute("SELECT id,event_utc,knowledge_utc,created_at,config_version FROM fitness_snapshots ORDER BY rowid DESC")] if wi.table(db, "fitness_snapshots") else []
+        if not wi.table(db, "fitness_snapshots"):
+            return []
+        sql = "SELECT id,event_utc,knowledge_utc,created_at,config_version FROM fitness_snapshots"
+        if known_by:
+            sql += " WHERE created_at<=?"
+        return [dict(row) for row in db.execute(sql + " ORDER BY rowid DESC", (known_by,) if known_by else ())]

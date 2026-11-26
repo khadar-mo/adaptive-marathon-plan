@@ -82,7 +82,7 @@ def page(request: Request, as_of: str | None = None, knowledge_cutoff: str | Non
     if activity_id is not None and row is None:
         raise HTTPException(404, "Completed run unavailable for the selected profile.")
     return fitness_views.profile(state, query, configs=inputs.choices(store, state["knowledge_cutoff"]),
-        history=fitness.history(store), record=row,
+        history=fitness.history(store, known_by=state["knowledge_cutoff"] if knowledge_cutoff or mode == "AS_KNOWN" else None), record=row,
         notes=inputs.activity_notes(store, activity_id, state["knowledge_cutoff"]) if row else ())
 
 
