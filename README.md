@@ -311,6 +311,53 @@ recovery threshold or mileage change is performed by these input interfaces.
 See the [acceptance record](docs/specs/context-ingestion-acceptance.md) for tests,
 actual interface checks and unverified scientific/manual evidence.
 
+## Compare performance estimators
+
+On **Best efforts**, choose **Compare performance estimators**. Select an event
+cutoff and an immutable configuration. The achieved profile keeps all-time and
+56/84/112/168-day observations separate. Riegel shows every source/target comparison;
+critical speed shows signed D′, residuals, R², activity overlap, all eligible
+distance subsets and leave-one-distance-out sensitivity. Three distances cannot
+support leave-one-distance-out; four or more retain at least three per fit.
+
+**Calculate and save evaluation** preserves the complete input ledger and result.
+Open earlier results through **Saved evaluation history**. They retain the source
+versions, original sample geometry, QC, context and review revisions captured at
+creation. This is an event-time reconstruction using currently known evidence,
+not a prediction known at the earlier cutoff. Human/scientific validation remains
+unverified and personal predictive validity remains untested.
+
+By default comparisons use the G2 winners for each window. Clear the relevant
+**Use window bests** checkbox to select specific Riegel or CS sources, including
+saved non-PB intervals from G2. Each CS scenario uses one observation per distinct
+supported distance; save another evaluation to compare an alternative. No selection
+means no observations when defaults are disabled. Missing recent evidence never
+silently uses an old PB.
+
+Expand **Create a configuration version** to change the provisional primary window,
+Riegel exponent/targets, CS distance set or optional review thresholds. Blank review
+thresholds remain UNKNOWN. A threshold is a review policy, not a physiological
+calibration. Existing version names cannot be redefined.
+
+`GET /api/estimators?cutoff=2026-01-15T00:00:00Z` reads the preview, available owned
+source references, configurations and saved history without writing. Register a
+configuration with `POST /api/estimators/configurations`, for example
+`{"version":"three-trials","config":{"cs_distances_m":[400,800,5000]}}`.
+Omitted configuration fields take the documented defaults, which are fully saved.
+`POST /api/estimators` accepts
+`{"cutoff":"2026-01-15T00:00:00Z","config_version":"three-trials"}` and returns
+the `evaluation`, `url` and `html_url`. Optional `riegel_sources` and `cs_sources`
+lists select exact `{activity_id,version_id,source_sha256,candidate_id}` references;
+omission uses window bests, while an empty list explicitly selects none.
+`GET /api/estimators/{id}` returns the immutable saved result.
+
+Generate made-up T06 trial exports with
+`python3 demo_estimators.py /tmp/marathon-g4-examples`. Import these only into a
+separate demo database/archive. With the three-trials configuration and cutoff
+above, the 400/800/5000 m observations yield CS 3 m/s and D′ 100 m. See the
+[G4 acceptance record](docs/specs/g4-acceptance.md) for the ledger, interface checks
+and outstanding manual/prospective evidence.
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.
