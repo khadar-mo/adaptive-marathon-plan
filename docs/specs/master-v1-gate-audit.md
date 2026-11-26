@@ -38,7 +38,7 @@ features; it does not establish compliance with the new granular gates.
 | G3 — Training history/workload | PARTIAL | Local-date calendar week/month totals, coverage gaps; `history.py`, `tests/test_history.py` | Specified session-end rolling 7/28/56-day windows, preceding 30-day maximum, spacing and complete provenance/missingness | Canonical end timestamps and G1 acceptance |
 | G4 — Candidate estimators | NOT_STARTED | No estimator implementation | Direct bests, Riegel comparator and CS/D′ with input ledger and synthetic checks | G2/G3 evidence |
 | G5 — Contextual state | NOT_STARTED | Activity HR/GPS presence only; no contextual model | Separate capability, endurance, recovery and uncertainty evidence | Accepted fitness inputs; wellness/feedback where available |
-| G6 — Validation/snapshots | NOT_STARTED | No snapshot or prediction ledger | Reproducible as-of snapshots, time-ordered validation and prediction errors | G4/G5 candidates and contracts |
+| G6 — Validation/snapshots | SOFTWARE_IMPLEMENTED | Immutable T/K/C snapshots, scheduled forecasts, qualified holdouts and a common error ledger | Prospective personal validation remains open | G0–G5 and dated G1 source history |
 | P0 — FitnessSnapshot adapter | NOT_STARTED | No adapter or snapshot consumer | Master cross-engine contract, availability/quality checks and provenance | FitnessSnapshot producer |
 | P1 — Starting volume approval | NOT_STARTED | No volume proposals/approvals | History-based baseline proposal and recorded approval | P0 and usable history |
 | P2 — Weekly progression | NOT_STARTED | No progression decisions | Versioned progression policy and history decisions | P1 and approved targets |
@@ -337,3 +337,8 @@ Review corrections for #45 cover an actual pre-#45 Garmin ZIP imported at `ba3ed
 The Fitness profile combines supported all-time and recent observations, provisional G4 candidates, source-linked endurance, G3 workload, wellness/feedback/strength and six quality dimensions. T13 keeps running evidence available when sleep or HRV is missing. Editable descriptor versions can produce real matched-run medians, sustained segments and late blocks. Each saved state retains separate event, knowledge and creation times with raw references, original context and explained changes.
 
 The first runnable version passed independent existing-input API checks. A later review of an old interval initially left a rejected observation visible during retrospective calculation. The corrected selector applies quality decisions known by K to the observed interval at T. Earlier K and saved results remain reproducible. The [ten-item acceptance record](g5-acceptance.md) describes scope, synthetic browser/API cases, lineage and prospective evidence still required by G6.
+
+
+## Fitness snapshots and validation — issue #32
+
+The G6 API and dashboard freeze eligible inputs, source/configuration selections, completed-run actuals, dated coverage and calibrated intensity. The scheduled update records explained changes, while a separate ledger appends frozen forecasts, observed benchmarks and identity exclusions. Replays and walk-forward reconstructions use explicit cutoffs. Prospective performance and physiological validity remain unestablished. The runner confirmed ten matching original-file and highlighted-trace reviews on 26 November 2026 for the project G0–G2 manual gate. This project-level result is distinct from per-source verification and predictive authority. See the [ten-item G6 acceptance report](g6-acceptance.md).

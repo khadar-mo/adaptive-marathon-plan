@@ -87,6 +87,7 @@ def note_form(row, notes):
 
 def profile(state, query, *, configs=(), history=(), record=None, notes=(), saved=None):
     content = f'<p>Event cutoff <time>{e(state["event_cutoff"])}</time> · Knowledge cutoff <time>{e(state["knowledge_cutoff"])}</time> · {e(state["config_version"])}</p>'
+    content += '<p>' + link("/validation", "Fitness snapshots and benchmarks") + '</p>'
     content += '<p>' + e(state["time_basis"].replace("_", " ").title()) + ' · Descriptive fitness evidence</p>'
     if saved:
         root = "/api/fitness/snapshots/" + saved["snapshot_id"]

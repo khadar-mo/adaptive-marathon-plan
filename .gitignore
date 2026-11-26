@@ -24,3 +24,4 @@ __pycache__/
 runs.sqlite3
 runs.sqlite3-*
 runs-archive/
+!docs/specs/g6-acceptance.md
