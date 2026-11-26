@@ -280,6 +280,7 @@ def page(request: Request, as_of: str | None = None, first: str | None = None, l
     if current["attention_signals"]:
         content += '<ul>' + ''.join(f'<li>{e(r["kind"])} · {e(r["reported_at"])} · PLANNER_REVIEW_ONLY</li>' for r in current["attention_signals"]) + '</ul>'
     content += '<form action="/context/feedback" method="get"><fieldset><legend>Inspect a post-run check-in</legend>' + input_field("target", "activity_id", "Activity ID to inspect", required=True, kind="number") + '<button>Inspect check-in</button></fieldset></form>'
+    content += '<p><a href="/availability">Weekly availability</a> — enter or revise your actual time windows and daily session limits.</p>'
     content += '<form action="/context/feedback" method="get"><fieldset><legend>Inspect weekly readiness</legend>' + input_field("target-week", "week", "Monday to inspect", required=True, kind="date") + '<button>Inspect readiness</button></fieldset></form>'
     content += '<h2>Saved contextual records</h2><p>S&amp;C contributes no running kilometres. Completed strength sessions appear only in this separate stream.</p>'
     for row in current["records"]:
@@ -321,6 +322,8 @@ def feedback_page(request: Request, activity_id: int | None = Query(None, ge=1, 
                   week: str | None = None, as_of: str | None = None):
     result = feedback(request, activity_id, week, as_of)
     body = '<p><a href="/context">Enter or correct a check-in</a></p>'
+    if week:
+        body += f'<p><a href="/availability?week={e(week)}">Weekly availability for this week</a></p>'
     body += '<p>Report state: ' + e(result["state"]) + '</p><p>' + e(result["missing_reason"] or 'Supplied reports retain individual scale and source definitions.') + '</p>'
     body += '<pre>' + e(json.dumps(result, indent=2, ensure_ascii=False)) + '</pre>'
     return views.page("Target check-in history", body)

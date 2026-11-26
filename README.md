@@ -321,6 +321,16 @@ recovery threshold or mileage change is performed by these input interfaces.
 See the [acceptance record](docs/specs/context-ingestion-acceptance.md) for tests,
 actual interface checks and unverified scientific/manual evidence.
 
+## Record weekly availability
+
+Open **Context → Weekly availability** to enter a Europe/London week. Keep missing
+days unknown, explicitly mark unavailable days, and supply real windows plus daily
+session limits. Doubles require explicit permission. Repeated autumn times need an
+occurrence or offset; nonexistent spring times are rejected. Revisions preserve
+original local inputs, UTC bounds and actor/time history. Overlaps count once.
+Saving this calendar does not approve a target or activate a plan. See the
+[API, clock policy and acceptance evidence](docs/specs/weekly-availability.md).
+
 ## Compare performance estimators
 
 On **Best efforts**, choose **Compare performance estimators**. Select an event
