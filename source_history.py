@@ -62,6 +62,46 @@ def legacy_groups(db, cutoff, epoch):
                                  activity["summary_at_observation"]["start_utc"])
 
 
+def terminal_evidence(db, cutoff, epoch):
+    # Both importers bind these raw references before the report reaches its
+    # terminal state. Mutable upload owners and reconstructed legacy scan rows
+    # cannot prove that an activity owned those bytes at that earlier instant.
+    uploads = epoch["last_legacy_upload"] if epoch else LAST_ROW
+    scans = epoch.get("last_legacy_scan", 0) if epoch else LAST_ROW
+    if not uploads and not scans:
+        return
+    observed = {}
+    if inputs.table(db, "workload_processing_inventories"):
+        for entry in db.execute("SELECT * FROM workload_processing_inventories WHERE known_at<=? ORDER BY known_at", (cutoff,)):
+            for item in json.loads(entry["payload"])["import_boundary"]:
+                if item.get("finished_at"):
+                    observed.setdefault((item["id"], item["finished_at"]), entry["known_at"])
+    records = []
+    if uploads and inputs.table(db, "fit_uploads"):
+        for r in db.execute("""SELECT u.sha256,u.ordinal,i.id,i.finished_at FROM fit_uploads u
+                JOIN imports i ON i.id=u.import_id WHERE u.rowid<=? AND u.sha256 IS NOT NULL
+                AND i.finished_at IS NOT NULL ORDER BY i.id,u.ordinal""", (uploads,)):
+            records.append((("fit", r["sha256"], "fit"), r["id"], r["finished_at"], "COMPLETED_FIT_UPLOAD",
+                           f'{r["id"]}/{r["ordinal"]}', {"upload_ordinal": r["ordinal"]}))
+    if scans and inputs.table(db, "garmin_scan_items"):
+        rows = db.execute("""SELECT g.scan_id,g.garmin_id,g.list_sha,g.detail_sha,i.id,i.finished_at
+            FROM garmin_scan_items g JOIN garmin_scans s ON s.id=g.scan_id JOIN imports i ON i.id=s.import_id
+            WHERE g.scan_id<=? AND s.mode!='legacy' AND i.finished_at IS NOT NULL ORDER BY g.scan_id,g.garmin_id""", (scans,))
+        for r in rows:
+            for kind in ("list", "detail"):
+                if sha := r[kind + "_sha"]:
+                    records.append(((kind, sha, "json"), r["id"], r["finished_at"], "COMPLETED_GARMIN_SCAN",
+                                   f'{r["scan_id"]}/{r["garmin_id"]}/{kind}',
+                                   {"scan_id": r["scan_id"], "provider_id": r["garmin_id"]}))
+    for key, iid, finish, basis, rid, data in records:
+        try:
+            clock = clock_evidence(finish, observed.get((iid, finish)))
+        except (ValueError, OverflowError):
+            continue
+        if clock["available_by"] <= cutoff:
+            yield key, ref(basis, rid, clock["available_by"], import_id=iid, clock=clock, **data)
+
+
 def acquisition_evidence(db, cutoff, epoch):
     if inputs.table(db, "canonical_source_versions"):
         cap = epoch["last_legacy_trace"] if epoch else LAST_ROW
@@ -71,27 +111,7 @@ def acquisition_evidence(db, cutoff, epoch):
             known = available_by(row["created_at"])
             if known and known <= cutoff:
                 yield ("fit", row["raw_sha256"], "fit"), ref("DECODED_SOURCE_VERSION", row["id"], known)
-    if inputs.table(db, "fit_uploads"):
-        # The staged checksum is write-once, and the import terminal clock is
-        # an upper bound. Owners in fit_uploads may be rewritten by later links.
-        cap = epoch["last_legacy_upload"] if epoch else LAST_ROW
-        rows = db.execute("""SELECT u.sha256,u.ordinal,i.id,i.finished_at FROM fit_uploads u
-            JOIN imports i ON i.id=u.import_id WHERE u.rowid<=? AND u.sha256 IS NOT NULL AND i.finished_at IS NOT NULL
-            ORDER BY i.id,u.ordinal""", (cap,))
-        observed = {}
-        if inputs.table(db, "workload_processing_inventories"):
-            for entry in db.execute("SELECT * FROM workload_processing_inventories WHERE known_at<=? ORDER BY known_at", (cutoff,)):
-                for item in json.loads(entry["payload"])["import_boundary"]:
-                    if item.get("finished_at"):
-                        observed.setdefault((item["id"], item["finished_at"]), entry["known_at"])
-        for row in rows:
-            try:
-                clock = clock_evidence(row["finished_at"], observed.get((row["id"], row["finished_at"])))
-            except (ValueError, OverflowError):
-                continue
-            if clock["available_by"] <= cutoff:
-                yield ("fit", row["sha256"], "fit"), ref("COMPLETED_FIT_UPLOAD", f'{row["id"]}/{row["ordinal"]}',
-                      clock["available_by"], import_id=row["id"], upload_ordinal=row["ordinal"], clock=clock)
+    yield from terminal_evidence(db, cutoff, epoch)
     if inputs.table(db, "source_acquisitions"):
         for row in db.execute("SELECT * FROM source_acquisitions WHERE known_at<=? ORDER BY known_at,id", (cutoff,)):
             yield source_key(row), {**json.loads(row["evidence"]), "id": row["id"]}
@@ -121,7 +141,8 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
     cutoff = inputs.utc(knowledge_cutoff)
     epoch = None
     if inputs.table(db, "source_history_epoch"):
-        epoch = db.execute("SELECT * FROM source_history_epoch WHERE version=1").fetchone()
+        row = db.execute("SELECT * FROM source_history_epoch WHERE version=1").fetchone()
+        epoch = dict(row) if row else None
     groups, acquisitions, ownership = {}, {}, {}
     for key, evidence in acquisition_evidence(db, cutoff, epoch):
         keep_earliest(acquisitions, key, evidence)
@@ -140,17 +161,13 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
             # provider alias or disprove an already observed local merge.
             identity_evidence = previous["identity_evidence"] if previous else None
             if previous:
-                # Inventories contain local source references. Keep stronger
-                # earlier evidence such as an archived ZIP's embedded FIT.
-                sources = {source_key(s): s for s in previous["sources"]}
-                for source in value["sources"]:
-                    sources.setdefault(source_key(source), source)
-                value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"],
-                         "sources": [sources[k] for k in sorted(sources)]}
+                value = {**value, "provider_ids": previous["provider_ids"], "member_ids": previous["member_ids"]}
         for member in value["member_ids"]:
             if member != owner:
                 groups.pop(member, None)
-        groups[owner] = {**value, "membership_evidence": evidence, "identity_evidence": identity_evidence}
+        scope = "LOCAL_SOURCE_REFERENCES" if evidence["basis"] == "PROCESSING_INVENTORY" else "OBSERVED_GROUP_AND_RECORDINGS"
+        groups[owner] = {**value, "membership_evidence": evidence, "identity_evidence": identity_evidence,
+                         "source_evidence_scope": scope}
 
     selected, owners_by_source = [], defaultdict(list)
     for owner, value in sorted(groups.items()):
@@ -174,6 +191,7 @@ def read_in_db(db, knowledge_cutoff, *, activity_id=None):
               "group_history": [h for h in history if activity_id is None or members.intersection(h["group"]["member_ids"])],
               "missing_reason": None if selected else "No timestamped evidence establishes this ownership at the cutoff."}
     if activity_id is None:
+        result["acquisition_state"] = "OBSERVED" if acquisitions else "UNKNOWN"
         result["source_receipts"] = [{"kind": k[0], "sha256": k[1], "format": k[2], "first_source_evidence": receipt,
                                       "observed_owners": owners_by_source[k]} for k, receipt in sorted(acquisitions.items())]
     return result

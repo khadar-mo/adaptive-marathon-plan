@@ -1,5 +1,5 @@
 """Synthetic provenance checks through the existing local app."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
@@ -238,7 +238,8 @@ async def test_automatic_device_match_retains_both_sources_and_prior_group(histo
 
 async def test_inspection_rejects_invalid_cutoffs_and_preserves_database_absence(history, tmp_path):
     async with server() as client:
-        for cutoff in ("", "2038-01-19T03:14:07Z", "2024-01-01", "unparsed"):
+        future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+        for cutoff in ("", future, "2024-01-01", "unparsed"):
             assert (await client.get("/api/source-history", params={"knowledge_cutoff":cutoff})).status_code == 422
         assert (await client.get("/api/activities/0/source-history")).status_code == 422
         assert (await client.get("/api/canonical/versions/absent")).status_code == 404
@@ -267,3 +268,24 @@ async def test_earlier_claimed_acquisition_cannot_move_proven_knowledge_back(his
         assert changed["first_owner_evidence"] == original["first_owner_evidence"]
         assert (await client.get(route, params={"knowledge_cutoff":"2001-01-01T00:00:00Z"})).json()["state"] == "UNKNOWN"
         assert (await client.get(route, params={"knowledge_cutoff":before["knowledge_cutoff"]})).json() == before
+
+@pytest.mark.parametrize("scan_mode,expected", [("range", {"list","detail"}), ("legacy", set())])
+async def test_legacy_wire_scan_proves_raw_versions_without_assigning_an_owner(history, scan_mode, expected):
+    import app
+    from test_imports import submit
+
+    async with server() as client:
+        report = await submit(client)
+        store = app.app.state.store
+        with store.connect(write=True) as db:
+            for name in ("source_history_epoch","source_acquisitions","source_group_history","source_identity_reviews"):
+                db.execute("DELETE FROM " + name)
+            end = "2021-06-05T07:08:09.000000+00:00"
+            db.execute("UPDATE imports SET finished_at=? WHERE id=?", (end, report["id"]))
+            db.execute("UPDATE garmin_scans SET mode=?", (scan_mode,))
+        data = (await client.get("/api/source-history", params={"knowledge_cutoff":end})).json()
+        assert data["groups"] == []
+        assert {r["kind"] for r in data["source_receipts"]} == expected
+        assert all(r["first_source_evidence"]["basis"] == "COMPLETED_GARMIN_SCAN" and
+                   r["first_source_evidence"]["import_id"] == report["id"] and not r["observed_owners"]
+                   for r in data["source_receipts"])

@@ -62,7 +62,7 @@ def activity_history_page(request: Request, activity_id: LocalID, knowledge_cuto
     data = inspect(request, activity_id, knowledge_cutoff)
     cutoff = data["knowledge_cutoff"]
     query = urlencode({"knowledge_cutoff": cutoff})
-    content = (f'<p><a href="/activities/{activity_id}">Activity {activity_id}</a> · '
+    content = (f'<p><a href="/activities/{activity_id}">Current activity {activity_id}</a> · '
                f'<a href="/api/activities/{activity_id}/source-history?{escape(query)}">Source history JSON</a></p>'
                f'<form method="get"><label>Knowledge cutoff (ISO time with offset) '
                f'<input name="knowledge_cutoff" value="{escape(cutoff)}"></label> <button>Inspect cutoff</button></form>')

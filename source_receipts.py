@@ -7,7 +7,7 @@ import workload_inputs as inputs
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_history_epoch (
     version INTEGER PRIMARY KEY, known_at TEXT NOT NULL, last_legacy_version INTEGER NOT NULL,
-    last_legacy_selection INTEGER NOT NULL, last_legacy_upload INTEGER NOT NULL, last_legacy_trace INTEGER NOT NULL
+    last_legacy_selection INTEGER NOT NULL, last_legacy_upload INTEGER NOT NULL, last_legacy_trace INTEGER NOT NULL, last_legacy_scan INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS source_acquisitions (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, sha256 TEXT NOT NULL, format TEXT NOT NULL,
@@ -119,7 +119,8 @@ def initialize(db):
         (SELECT COALESCE(MAX(rowid),0) FROM canonical_activity_versions),
         (SELECT COALESCE(MAX(id),0) FROM canonical_selections),
         (SELECT COALESCE(MAX(rowid),0) FROM fit_uploads),
-        (SELECT COALESCE(MAX(rowid),0) FROM canonical_source_versions))""", (known,))
+        (SELECT COALESCE(MAX(rowid),0) FROM canonical_source_versions),
+        (SELECT COALESCE(MAX(id),0) FROM garmin_scans))""", (known,))
     basis = "LEGACY_STATE_OBSERVED"
     observe_reviews(db, known, basis, None)
     for row in db.execute("SELECT id FROM activities ORDER BY id"):
