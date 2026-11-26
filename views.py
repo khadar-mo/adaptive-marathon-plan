@@ -297,6 +297,7 @@ def activity(row):
 {garmin_link}<dl class="detail-metrics">{''.join(values)}</dl>{warnings}<h2>Recorded laps</h2>{lap_table}
 <p><a href="/activities/{row["id"]}/recording">Inspect recorded samples and events</a></p>
 <p><a href="/activities/{row["id"]}/canonical">Inspect canonical trace and quality</a></p>
+<p><a href="/activities/{row["id"]}/source-history">Inspect source and identity history</a></p>
 <p><a href="/activities/{row["id"]}/efforts">Inspect continuous efforts</a></p>
 <p><a href="/activities/{row["id"]}/workout">Inspect workout labels</a></p>
 <p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")

@@ -246,6 +246,19 @@ class UnknownVersion(LookupError):
     pass
 
 
+def load_version(db, version_id):
+    """Read exactly the stored canonical version in the caller's transaction."""
+    if db is None or not db.execute("SELECT 1 FROM sqlite_master WHERE name='canonical_activity_versions'").fetchone():
+        return None
+    row = db.execute("""SELECT v.id, v.created_at, v.payload, q.payload AS config
+        FROM canonical_activity_versions v JOIN qc_configs q ON q.version=v.config_version
+        WHERE v.id=?""", (version_id,)).fetchone()
+    if row is None:
+        return None
+    return {**json.loads(row["payload"]), "version_id": row["id"], "created_at": row["created_at"],
+            "qc_config": json.loads(row["config"])}
+
+
 def read(store, activity_id, version_id=None, source=None, *, offset=0, limit=200):
     from storage import local_id
 
@@ -270,8 +283,8 @@ def read(store, activity_id, version_id=None, source=None, *, offset=0, limit=20
             return {**empty, "versions": versions}
         if chosen not in {v["id"] for v in versions}:
             raise UnknownVersion("That canonical version does not belong to this activity.")
-        payload = json.loads(db.execute("SELECT payload FROM canonical_activity_versions WHERE id=?", (chosen,)).fetchone()[0])
-        config = json.loads(db.execute("SELECT payload FROM qc_configs WHERE version=?", (payload["qc_config_version"],)).fetchone()[0])
+        payload = load_version(db, chosen)
+        config = payload["qc_config"]
         selected = next((s for s in payload["sources"] if s["fit_sha256"] == (source or payload["selected_fit_sha256"])), None)
         if source and selected is None:
             raise UnknownVersion("That recording does not belong to this canonical version.")
