@@ -256,6 +256,9 @@ def page(request: Request, as_of: str | None = None, first: str | None = None, l
     current = data(request, as_of, first, last, policy_version)
     defs = context.definitions(store(request))
     selected = history(request, edit)["versions"][-1] if edit else None
+    if selected and selected["kind"] == "fueling":
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(f'/activities/{selected["activity_id"]}/fueling?edit={selected["record_id"]}', status_code=303)
     query = urlencode({k: v for k, v in {"as_of": as_of, "first": first, "last": last, "policy_version": policy_version}.items() if v})
     content = '<p>Wellness, runner reports and strength sessions are optional context. Missing data does not mean recovery or illness. This page makes no medical or mileage decisions.</p>'
     content += '<style>.context-entry, .context-definition, .context-import {display:grid;grid-template-columns:minmax(0,1fr);gap:.8rem;border:1px solid #bccbc2;padding:1rem;margin:1rem 0} fieldset > div, .context-entry > *, .context-definition > *, .context-import > * {min-width:0;max-width:100%} textarea {box-sizing:border-box;max-width:100%;width:100%;font:inherit} .context-entry label input[type=checkbox] {display:inline} pre {white-space:pre-wrap;overflow-wrap:anywhere} .result {color:#753a13}</style>'

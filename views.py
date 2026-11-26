@@ -298,6 +298,7 @@ def activity(row):
 <p><a href="/activities/{row["id"]}/recording">Inspect recorded samples and events</a></p>
 <p><a href="/activities/{row["id"]}/canonical">Inspect canonical trace and quality</a></p>
 <p><a href="/activities/{row["id"]}/efforts">Inspect continuous efforts</a></p>
+<p><a href="/activities/{row["id"]}/fueling">Record fueling practice and tolerance</a></p>
 <p><a href="/activities/{row["id"]}/workout">Inspect workout labels</a></p>
 <p><a href="/api/activities/{row["id"]}">Activity JSON</a></p>""")
 

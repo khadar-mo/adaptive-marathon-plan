@@ -12,6 +12,8 @@ docs/specs/*
 !docs/specs/context-ingestion-acceptance.md
 !docs/specs/workout-provenance.md
 !docs/specs/workout-provenance-acceptance.md
+!docs/specs/fueling-inputs.md
+!docs/specs/fueling-acceptance.md
 .codex/
 .venv/
 __pycache__/
