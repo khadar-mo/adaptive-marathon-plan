@@ -330,6 +330,53 @@ async def test_raw_qualification_declarations_remain_unknown_without_normalizing
 
 
 @pytest.mark.anyio
+async def test_recorded_controlled_benchmark_is_frozen_in_the_saved_estimate(history):
+    async with server() as client:
+        await import_trials(client)
+        preview = (await client.get('/api/estimators', params={'cutoff': CUTOFF})).json()
+        ref = next(row['ref'] for row in preview['catalog']
+                   if row['distance_m'] == 400 and row['ref']['activity_id'] == 1)
+        route = f"/api/activities/1/efforts/{ref['version_id']}/{ref['candidate_id']}/context"
+        declaration = {
+            'category': 'VERIFIED_TEST', 'actor': 'Synthetic runner', 'note': 'Controlled trial.',
+            'protocol': 'Measured 400 m trial', 'maximal_confirmed': True,
+            'qualification': {
+                'maximality': 'CONFIRMED', 'control_state': 'CONTROLLED',
+                'evidence_refs': [{'kind': 'athlete_attestation', 'reference': 'Synthetic trial',
+                                   'method': 'Runner declaration'}],
+            },
+        }
+        confirmation = await client.post(route, json=declaration)
+        confirmation.raise_for_status()
+        qualification = confirmation.json()['candidate']['provenance']['qualification']
+        assert qualification['rest_state'] == 'UNKNOWN'
+        assert qualification['test_evidence_status'] == 'SUPPORTED_ATTESTATION'
+
+        request = {'cutoff': CUTOFF, 'riegel_sources': [ref], 'cs_sources': [ref]}
+        response = await client.post('/api/estimators', json=request)
+        response.raise_for_status()
+        saved = response.json()
+        result = saved['evaluation']
+        comparisons = result['riegel']['comparisons']
+        assert comparisons and all(row['comparison_state'] == 'PREDICTION_COMPARISON' for row in comparisons)
+        observed = next(row for row in result['evidence']['observations']
+                        if row['id'] == comparisons[0]['source_observation_id'])
+        assert observed['candidate']['provenance']['qualification'] == qualification
+        assert observed['qualification']['credible_maximal_trial']
+        repeated = await client.post('/api/estimators', json=request)
+        assert repeated.json()['url'] == saved['url']
+
+        correction = await client.post(route, json={
+            'category': 'TRAINING_FAST', 'actor': 'Synthetic runner', 'note': 'Corrected to training.',
+            'maximal_confirmed': False, 'qualification': {'maximality': 'NOT_MAXIMAL'},
+        })
+        correction.raise_for_status()
+        updated = (await client.post('/api/estimators', json=request)).json()['evaluation']
+        assert all(row['comparison_state'] == 'EXPLORATORY' for row in updated['riegel']['comparisons'])
+        assert (await client.get(saved['url'])).json() == result
+
+
+@pytest.mark.anyio
 async def test_configuration_immutable_validation_and_empty_install_read_only(history, tmp_path):
     async with server() as client:
         assert (await client.get('/estimators')).status_code == 200

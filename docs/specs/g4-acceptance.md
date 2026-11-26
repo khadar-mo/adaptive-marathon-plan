@@ -110,8 +110,7 @@ The summary-correction/cycling and exact-clock window regressions both failed on
 the reviewed head before the fixes. New current-alternate-source/reviewer-rejection
 checks preserve old evaluations while withholding fresh predictions. The optional
 qualification adapter is tested in the same read transaction, with execution-time
-selectors excluded from otherwise stable input identity. Actual #30 HTTP
-integration is verified after that independently reviewed prerequisite merges.
+selectors excluded from otherwise stable input identity. A public integration test on merged PR #41 records a controlled maximal trial, saves its estimate, then corrects the declaration to training. The first estimate retains the original evidence and the new comparison becomes exploratory. An unchanged request reuses the saved evaluation.
 
 ## 6. Public API and CLI inspection
 
@@ -203,8 +202,7 @@ retains separate distance/time and maximality fields; an explicitly nonmaximal r
 can retain supported measurement evidence while its comparison remains exploratory.
 Category/QC acceptance/unsupported legacy declarations never imply those fields.
 Absent qualification stays UNVERIFIED. Even supported attestation retains
-physiological UNVERIFIED and predictive UNTESTED. Integrated #30 verification
-uses its real declaration and inspection endpoints after its merge.
+physiological UNVERIFIED and predictive UNTESTED. The integrated test exercises the workout declaration and estimator endpoints on the same database.
 
 ## 9. Manual and scientific limitations
 
