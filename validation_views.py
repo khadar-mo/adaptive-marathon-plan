@@ -70,6 +70,7 @@ def page(store, identity=None, previous=None):
     for p in ledger["predictions"]:
         content += '<h3>' + e(p["benchmark"]) + '</h3>' + table(["Method", "Frozen elapsed (s)", "Unavailable reason"], [
             [e(m), e(v["predicted_seconds"]), e(v["reason"])] for m, v in p["methods"].items()])
+        content += '<p>' + link("/api/validation/predictions/" + p["id"] + "/replay", "Replay frozen forecast") + '</p>'
         content += details("Forecast timing, method and evidence", p)
     if not ledger["predictions"]:
         content += '<p>No frozen forecasts.</p>'

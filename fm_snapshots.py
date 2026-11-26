@@ -1,4 +1,6 @@
 """G6. Build immutable FitnessSnapshots from dated G1–G5 selections in one transaction."""
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 from pathlib import Path
@@ -62,6 +64,22 @@ def config_evidence(db, g5):
 
 def build_inputs(db, archive, t, k, mode, config_version, inventory=None):
     g5 = fitness.collect(db, archive, t, k, mode, config_version=config_version, processing_inventory=inventory)
+    uncertain = []
+    records = []
+    for record in g5["context_records"]:
+        if record.get("time_precision") == "local_date_only":
+            day = datetime.fromisoformat(record["local_date"]).date()
+            zone = ZoneInfo(record["timezone"])
+            begin = datetime.combine(day, time(), zone)
+            end = datetime.combine(day + timedelta(days=1), time(), zone)
+            bounds = {"lower_utc": wi.utc(begin.isoformat()), "upper_exclusive_utc": wi.utc(end.isoformat()),
+                      "known_at": record["known_at"], "precision": "LOCAL_DATE_ONLY"}
+            record = {**record, "event_interval": bounds}
+            if bounds["upper_exclusive_utc"] > t and wi.utc(record["known_at"]) > t:
+                uncertain.append({"record": record, "reason": "SAME_DAY_EVENT_INSTANT_UNPROVEN_AT_T"})
+                continue
+        records.append(record)
+    g5["context_records"] = records
     config = config_evidence(db, g5)
     ledger = source_history.read_in_db(db, k)
     owners = {g["owner_id"]: g for g in ledger["groups"]}
@@ -113,7 +131,8 @@ def build_inputs(db, archive, t, k, mode, config_version, inventory=None):
                     "availability_policy": "First immutable source and owner evidence, independently dated. Claimed acquisition is informational."}
     config["activity_configurations"] = activity_configs(db, kept, k)
     return {"version": VERSION, "code_sha256": code_hash(), "g5": g5, "source_evidence": source_facts, "configuration": config,
-            "observations": fm_observations.extract(db, archive, g5)}
+            "observations": fm_observations.extract(db, archive, g5), "uncertain_context": uncertain,
+            "date_only_policy": "A later-entered day-only observation contributes once its complete local day has elapsed. Earlier immutable receipt can prove it was already reported by T; its event instant remains unknown."}
 
 
 def activity_configs(db, activities, k):

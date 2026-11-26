@@ -39,6 +39,7 @@ def refresh(store):
         selected = db.execute("SELECT config_version FROM fm_config_selections ORDER BY sequence DESC LIMIT 1").fetchone()
         row = fm_snapshots.build_fitness_snapshot(db, store.archive,
             config_version=selected[0] if selected else fitness_inputs.DEFAULT_VERSION)
+        forecast_validation.refresh_outcomes(db, row)
         forecast_validation.audit_in_db(db, row["knowledge_cutoff"])
         db.execute("INSERT INTO fm_refreshes VALUES (?,?)", (through, row["id"]))
         return {"status": "CAPTURED", "through_sequence": through, "snapshot_id": row["id"]}

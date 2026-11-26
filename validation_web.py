@@ -110,6 +110,16 @@ def forecast(request: Request, choice: Forecast):
     return call(validation.freeze, request.app.state.store, **choice.model_dump())
 
 
+@router.get("/api/validation/predictions/{identity}")
+def saved_prediction(request: Request, identity: str):
+    return call(validation.prediction_record, request.app.state.store, identity)
+
+
+@router.get("/api/validation/predictions/{identity}/replay")
+def replay_prediction(request: Request, identity: str):
+    return call(validation.prediction_record, request.app.state.store, identity, replay=True)
+
+
 @router.post("/api/validation/predictions/{identity}/outcomes")
 def outcome(request: Request, identity: str, choice: Outcome):
     return call(validation.evaluate, request.app.state.store, identity, **choice.model_dump())
@@ -133,3 +143,26 @@ def frozen_activity(request: Request, identity: str, activity_id: int):
 @router.get("/validation", response_class=HTMLResponse)
 def dashboard(request: Request, snapshot: str | None = None, previous: str | None = None):
     return call(validation_views.page, request.app.state.store, snapshot, previous)
+
+
+class HistoricalCase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_cutoff: str
+    knowledge_cutoff: str
+    config_version: str | None = None
+    benchmark: str = Field(min_length=1, max_length=220)
+    scheduled_start: str
+    distance_m: str = Field(min_length=1, max_length=80)
+    kind: str = snapshots.AS_KNOWN
+    riegel_observation_id: str | None = None
+    outcome: Outcome | None = None
+
+
+class WalkForward(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cases: list[HistoricalCase] = Field(min_length=1, max_length=128)
+
+
+@router.post("/api/validation/backtest")
+def walk_forward(request: Request, choice: WalkForward):
+    return call(validation.walk_forward, request.app.state.store, choice.model_dump()["cases"])

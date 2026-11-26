@@ -18,6 +18,10 @@ METHODS = ("LAST_COMPARABLE", "RIEGEL")
 KINDS = ("PROSPECTIVE", snapshots.AS_KNOWN, snapshots.RECONSTRUCTION)
 
 
+def code_hash():
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
 def positive(value, label):
     try:
         dec = Decimal(str(value))
@@ -68,7 +72,9 @@ def method_outputs(bundle, target, riegel_source):
     if latest:
         outputs["LAST_COMPARABLE"].update(predicted_seconds=latest["candidate"]["elapsed_coordinate_s"], reason=None,
                                           source=compact_observation(latest))
-    if selected:
+    if selected and config["code_sha256"] != estimators.CODE_SHA256:
+        outputs["RIEGEL"].update(source=compact_observation(selected), reason="REQUIRES_RECORDED_ESTIMATOR_CODE")
+    elif selected:
         reasons = estimators.window_reasons(selected, days)
         comparison = estimator_math.riegel(selected, float(target), config["config"]["riegel_k"], config["config"]["review_policy"])
         if not selected["qualification"]["comparison_eligible"]:
@@ -89,45 +95,67 @@ def stored(db, table, key):
     return fitness.unpack(row["payload"])
 
 
-def freeze(store, *, snapshot_id, benchmark, scheduled_start, distance_m, kind, riegel_observation_id=None):
+def freeze(store, **choice):
+    with store.connect(write=True, create=True) as db:
+        return freeze_in_db(db, **choice)
+
+
+def freeze_in_db(db, *, snapshot_id, benchmark, scheduled_start, distance_m, kind, riegel_observation_id=None):
     target = positive(distance_m, "Target distance")
     start = wi.utc(scheduled_start)
     request = {"snapshot_id": snapshot_id, "benchmark": benchmark, "scheduled_start": start, "distance_m": format(target, "f").rstrip("0").rstrip(".") if "." in format(target, "f") else format(target, "f"),
                "kind": kind, "riegel_observation_id": riegel_observation_id}
-    key = wi.digest({"request": request, "version": VERSION})
-    with store.connect(write=True, create=True) as db:
-        existing = db.execute("SELECT payload FROM fm_predictions WHERE id=?", (key,)).fetchone()
-        if existing:
-            return fitness.unpack(existing[0])
-        row = snapshots.get_row(db, snapshot_id)
-        if kind not in KINDS or kind == "PROSPECTIVE" and row["kind"] != snapshots.AS_KNOWN or kind != "PROSPECTIVE" and kind != row["kind"]:
-            raise ValueError("The forecast kind must match the snapshot's time basis. Prospective forecasts require an as-known snapshot.")
-        if start <= row["event_cutoff"]:
-            raise ValueError("The benchmark must start after the training cutoff.")
+    key = wi.digest({"request": request, "version": VERSION, "code_sha256": code_hash()})
+    existing = db.execute("SELECT payload FROM fm_predictions WHERE id=?", (key,)).fetchone()
+    if existing:
+        return fitness.unpack(existing[0])
+    row = snapshots.get_row(db, snapshot_id)
+    if kind not in KINDS or kind == "PROSPECTIVE" and row["kind"] != snapshots.AS_KNOWN or kind != "PROSPECTIVE" and kind != row["kind"]:
+        raise ValueError("The forecast kind must match the snapshot's time basis. Prospective forecasts require an as-known snapshot.")
+    if start <= row["event_cutoff"]:
+        raise ValueError("The benchmark must start after the training cutoff.")
+    bundle = fitness.unpack(row["inputs"])
+    result = fitness.unpack(row["result"])
+    outputs = method_outputs(bundle, target, riegel_observation_id)
+    at = wi.now()
+    if kind == "PROSPECTIVE" and start <= at:
+        raise ValueError("A prospective forecast must be saved before the scheduled benchmark start.")
+    used_ids = {r["activity_id"] for r in result["planner"]["actuals"]}
+    used_ids.update(m["source"]["ref"]["activity_id"] for m in outputs.values() if m["source"])
+    groups = [snapshots.workout_tokens(g) for g in bundle["source_evidence"]["groups"] if g["owner_id"] in used_ids]
+    state = result["fitness"]
+    regime = {"sleep": state["recovery"]["wellness"]["sleep_duration"]["state"],
+              "hrv": state["recovery"]["wellness"]["hrv"]["state"],
+              "running_coverage": state["exposure"]["rolling"][0]["coverage"]["status"],
+              "processing": state["exposure"]["rolling"][0]["processing"]["status"]}
+    value = {**request, "id": key, "created_at": at, "method_selected_at": at, "input_hash": row["input_hash"],
+             "event_cutoff": row["event_cutoff"], "knowledge_cutoff": row["knowledge_cutoff"],
+             "model_version": VERSION, "validation_code_sha256": code_hash(), "g4_code_sha256": estimators.CODE_SHA256,
+             "forecast_horizon_seconds": clock_seconds(start, at if kind == "PROSPECTIVE" else row["event_cutoff"]),
+             "horizon_basis": "PREDICTION_CREATION_TO_SCHEDULE" if kind == "PROSPECTIVE" else "EVENT_CUTOFF_TO_SCHEDULE",
+             "missing_data_regime": regime, "methods": outputs, "training_workout_tokens": groups,
+             "source_partition": "All accepted training workout groups (raw recordings, provider aliases and local members).",
+             "cs_forecast": {"status": "UNAVAILABLE", "reason": "No approved distance-specific predictive CS model."},
+             "prediction_interval": {"status": "UNAVAILABLE", "reason": "No calibrated personal forecast interval."},
+             "personal_validity": "NOT_VALIDATED", "athlete_approval": "UNAPPROVED"}
+    db.execute("INSERT INTO fm_predictions VALUES(?,?,?,?)", (key, snapshot_id, at, fitness.pack(value)))
+    if kind == "PROSPECTIVE" and wi.utc(wi.now()) >= start:
+        raise ValueError("The scheduled workout started before the forecast write completed.")
+    return value
+
+
+def prediction_record(store, identity, *, replay=False):
+    with store.history() as db:
+        value = stored(db, "fm_predictions", identity)
+        if not replay:
+            return value
+        row = snapshots.get_row(db, value["snapshot_id"])
         bundle = fitness.unpack(row["inputs"])
-        result = fitness.unpack(row["result"])
-        outputs = method_outputs(bundle, target, riegel_observation_id)
-        at = wi.now()
-        if kind == "PROSPECTIVE" and start <= at:
-            raise ValueError("A prospective forecast must be saved before the scheduled benchmark start.")
-        groups = [snapshots.workout_tokens(g) for g in bundle["source_evidence"]["groups"]]
-        state = result["fitness"]
-        regime = {"sleep": state["recovery"]["wellness"]["sleep_duration"]["state"],
-                  "hrv": state["recovery"]["wellness"]["hrv"]["state"],
-                  "running_coverage": state["exposure"]["rolling"][0]["coverage"]["status"],
-                  "processing": state["exposure"]["rolling"][0]["processing"]["status"]}
-        value = {**request, "id": key, "created_at": at, "method_selected_at": at, "input_hash": row["input_hash"],
-                 "event_cutoff": row["event_cutoff"], "knowledge_cutoff": row["knowledge_cutoff"],
-                 "model_version": VERSION, "validation_code_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                 "forecast_horizon_seconds": clock_seconds(start, at if kind == "PROSPECTIVE" else row["event_cutoff"]),
-                 "horizon_basis": "PREDICTION_CREATION_TO_SCHEDULE" if kind == "PROSPECTIVE" else "EVENT_CUTOFF_TO_SCHEDULE",
-                 "missing_data_regime": regime, "methods": outputs, "training_workout_tokens": groups,
-                 "source_partition": "All accepted training workout groups (raw recordings, provider aliases and local members).",
-                 "cs_forecast": {"status": "UNAVAILABLE", "reason": "No approved distance-specific predictive CS model."},
-                 "prediction_interval": {"status": "UNAVAILABLE", "reason": "No calibrated personal forecast interval."},
-                 "personal_validity": "NOT_VALIDATED", "athlete_approval": "UNAPPROVED"}
-        db.execute("INSERT INTO fm_predictions VALUES(?,?,?,?)", (key, snapshot_id, at, fitness.pack(value)))
-        return value
+    if value["validation_code_sha256"] != code_hash() or value["g4_code_sha256"] != estimators.CODE_SHA256:
+        return {"prediction_id": identity, "status": "REQUIRES_RECORDED_CODE"}
+    same = wi.digest(bundle) == value["input_hash"] and method_outputs(bundle, Decimal(value["distance_m"]),
+        value["riegel_observation_id"]) == value["methods"]
+    return {"prediction_id": identity, "status": "IDENTICAL" if same else "MISMATCH", "input_hash": value["input_hash"]}
 
 
 def list_ledger(store):
@@ -169,58 +197,68 @@ def overlap(training, outcome, groups):
     return sorted(train.intersection(expand(outcome, groups)))
 
 
-def evaluate(store, prediction_id, *, outcome_snapshot_id, outcome_observation_id):
+def evaluate(store, prediction_id, **choice):
     with store.connect(write=True, create=True) as db:
-        prediction = stored(db, "fm_predictions", prediction_id)
-        row = snapshots.get_row(db, outcome_snapshot_id)
-        bundle = fitness.unpack(row["inputs"])
-        observation = next((o for o in bundle["observations"] if o["id"] == outcome_observation_id), None)
-        if not observation:
-            raise ValueError("The outcome must identify an observed effort in the outcome snapshot.")
-        candidate = observation["candidate"]
-        owner = observation["ref"]["activity_id"]
-        workout = next((r for r in bundle["g5"]["workload"]["activities"] if r["activity_id"] == owner), None)
-        if not workout or not workout["timing"]:
-            raise ValueError("The source workout has no established start and end.")
-        start, end = workout["timing"]["start_utc"], workout["timing"]["end_utc"]
-        reasons = list(observation["unavailable_reasons"])
-        if candidate["kind"] != "WHOLE_ACTIVITY":
-            reasons.append("OUTCOME_IS_AN_INTERNAL_SEGMENT")
-        if positive(candidate["distance_m"], "Outcome distance") != Decimal(prediction["distance_m"]):
-            reasons.append("TARGET_DISTANCE_MISMATCH")
-        if not observation["qualification"]["comparison_eligible"]:
-            reasons.append("NO_QUALIFYING_BENCHMARK_OR_RACE")
-        if start <= prediction["event_cutoff"]:
-            reasons.append("WORKOUT_STARTED_BEFORE_TRAINING_CUTOFF")
-        if prediction["kind"] == "PROSPECTIVE" and start <= prediction["created_at"]:
-            reasons.append("FORECAST_NOT_FROZEN_BEFORE_ACTUAL_WORKOUT_START")
-        if prediction["knowledge_cutoff"] >= start:
-            reasons.append("TRAINING_KNOWLEDGE_REACHES_OUTCOME")
-        if row["event_cutoff"] < end or row["knowledge_cutoff"] < prediction["knowledge_cutoff"]:
-            reasons.append("OUTCOME_NOT_AVAILABLE_AT_EVALUATION_CUTOFF")
-        groups = bundle["source_evidence"]["groups"]
-        tokens = snapshots.workout_tokens(next(g for g in groups if g["owner_id"] == owner))
-        identities = [snapshots.workout_tokens(g) for g in groups]
-        prior = db.execute("SELECT payload FROM fm_evaluations WHERE prediction_id=? ORDER BY rowid DESC LIMIT 1", (prediction_id,)).fetchone()
-        if prior:
-            prior = fitness.unpack(prior[0])
-            if row["knowledge_cutoff"] < prior["evaluation_knowledge_cutoff"]:
-                raise ValueError("An outcome revision needs evidence at or after the previous evaluation knowledge cutoff.")
-            if not expand(prior["outcome_workout_tokens"], identities).intersection(expand(tokens, identities)):
-                raise ValueError("This forecast already has an observed workout. Revisions need evidence from that workout.")
-            if "LATER_DISCOVERED_WORKOUT_OVERLAP" in prior["reasons"]:
-                reasons.append("LATER_DISCOVERED_WORKOUT_OVERLAP")
-        shared = overlap(prediction["training_workout_tokens"], tokens, identities)
-        if shared:
-            reasons.append("TRAIN_TEST_WORKOUT_OVERLAP")
-        value = {"status": "EXCLUDED" if reasons else "QUALIFIED", "reasons": sorted(set(reasons)),
-                 "outcome_snapshot_id": outcome_snapshot_id, "outcome_observation_id": outcome_observation_id,
-                 "evaluation_knowledge_cutoff": row["knowledge_cutoff"], "outcome": compact_observation(observation),
-                 "observed_seconds": candidate["elapsed_coordinate_s"], "outcome_workout_tokens": tokens,
-                 "overlap_tokens": shared, "workout_start": start, "workout_end": end,
-                 "actual_horizon_seconds": clock_seconds(start, prediction["created_at"] if prediction["kind"] == "PROSPECTIVE" else prediction["event_cutoff"]),
-                 "outcome_source_group": next(g for g in groups if g["owner_id"] == owner)}
-        return append(db, prediction, value)
+        return evaluate_in_db(db, prediction_id, **choice)
+
+
+def evaluate_in_db(db, prediction_id, *, outcome_snapshot_id, outcome_observation_id):
+    prediction = stored(db, "fm_predictions", prediction_id)
+    row = snapshots.get_row(db, outcome_snapshot_id)
+    bundle = fitness.unpack(row["inputs"])
+    observation = next((o for o in bundle["observations"] if o["id"] == outcome_observation_id), None)
+    if not observation:
+        raise ValueError("The outcome must identify an observed effort in the outcome snapshot.")
+    candidate = observation["candidate"]
+    owner = observation["ref"]["activity_id"]
+    workout = next((r for r in bundle["g5"]["workload"]["activities"] if r["activity_id"] == owner), None)
+    if not workout or not workout["timing"]:
+        raise ValueError("The source workout has no established start and end.")
+    start, end = workout["timing"]["start_utc"], workout["timing"]["end_utc"]
+    reasons = list(observation["unavailable_reasons"])
+    if candidate["kind"] != "WHOLE_ACTIVITY":
+        reasons.append("OUTCOME_IS_AN_INTERNAL_SEGMENT")
+    if positive(candidate["distance_m"], "Outcome distance") != Decimal(prediction["distance_m"]):
+        reasons.append("TARGET_DISTANCE_MISMATCH")
+    if not observation["qualification"]["comparison_eligible"]:
+        reasons.append("NO_QUALIFYING_BENCHMARK_OR_RACE")
+    if start <= prediction["event_cutoff"]:
+        reasons.append("WORKOUT_STARTED_BEFORE_TRAINING_CUTOFF")
+    if prediction["kind"] == "PROSPECTIVE" and start <= prediction["created_at"]:
+        reasons.append("FORECAST_NOT_FROZEN_BEFORE_ACTUAL_WORKOUT_START")
+    if prediction["knowledge_cutoff"] >= start:
+        reasons.append("TRAINING_KNOWLEDGE_REACHES_OUTCOME")
+    if row["event_cutoff"] < end or row["knowledge_cutoff"] < prediction["knowledge_cutoff"]:
+        reasons.append("OUTCOME_NOT_AVAILABLE_AT_EVALUATION_CUTOFF")
+    groups = bundle["source_evidence"]["groups"]
+    tokens = snapshots.workout_tokens(next(g for g in groups if g["owner_id"] == owner))
+    identities = [snapshots.workout_tokens(g) for g in groups]
+    prior = db.execute("SELECT payload FROM fm_evaluations WHERE prediction_id=? ORDER BY rowid DESC LIMIT 1", (prediction_id,)).fetchone()
+    if prior:
+        prior = fitness.unpack(prior[0])
+        if row["knowledge_cutoff"] < max(prior["evaluation_knowledge_cutoff"], prior.get("identity_audit_cutoff", "")):
+            raise ValueError("An outcome revision needs evidence at or after the previous evaluation knowledge cutoff.")
+        for earlier in db.execute("SELECT payload FROM fm_evaluations WHERE prediction_id=? ORDER BY rowid DESC", (prediction_id,)):
+            accepted = fitness.unpack(earlier[0])
+            if accepted["status"] == "QUALIFIED":
+                if not expand(accepted["outcome_workout_tokens"], identities).intersection(expand(tokens, identities)):
+                    raise ValueError("This forecast already has a qualifying observed workout. Revisions need evidence from that workout.")
+                break
+        if "LATER_DISCOVERED_WORKOUT_OVERLAP" in prior["reasons"]:
+            reasons.append("LATER_DISCOVERED_WORKOUT_OVERLAP")
+    shared = overlap(prediction["training_workout_tokens"], tokens, identities)
+    if shared:
+        reasons.append("TRAIN_TEST_WORKOUT_OVERLAP")
+    value = {"status": "EXCLUDED" if reasons else "QUALIFIED", "reasons": sorted(set(reasons)),
+             "outcome_snapshot_id": outcome_snapshot_id, "outcome_observation_id": outcome_observation_id,
+             "evaluation_knowledge_cutoff": row["knowledge_cutoff"], "outcome": compact_observation(observation),
+             "observed_seconds": candidate["elapsed_coordinate_s"], "outcome_workout_tokens": tokens,
+             "overlap_tokens": shared, "workout_start": start, "workout_end": end,
+             "actual_horizon_seconds": clock_seconds(start, prediction["created_at"] if prediction["kind"] == "PROSPECTIVE" else prediction["event_cutoff"]),
+             "outcome_source_group": next(g for g in groups if g["owner_id"] == owner)}
+    saved = append(db, prediction, value)
+    revised = audit_in_db(db, wi.utc(wi.now()))
+    return next((e for e in revised if e["prediction_id"] == prediction_id), saved)
 
 
 def audit_in_db(db, knowledge):
@@ -236,11 +274,15 @@ def audit_in_db(db, knowledge):
     for evaluation in qualified:
         prediction = stored(db, "fm_predictions", evaluation["prediction_id"])
         shared = overlap(prediction["training_workout_tokens"], evaluation["outcome_workout_tokens"], groups)
-        if shared:
-            evidence = [g for g in ledger["groups"] if set(snapshots.workout_tokens(g)).intersection(shared)]
-            inherited = {k: v for k, v in evaluation.items() if k not in ("id", "prediction_id", "created_at", "previous_id")}
-            appended.append(append(db, prediction, {**inherited, "status": "EXCLUDED", "reasons": ["LATER_DISCOVERED_WORKOUT_OVERLAP"],
-                "overlap_tokens": shared, "identity_evidence": evidence, "identity_audit_cutoff": knowledge}))
+        expanded = sorted(expand(evaluation["outcome_workout_tokens"], groups))
+        if shared or expanded != evaluation["outcome_workout_tokens"]:
+            evidence = [g for g in ledger["groups"] if set(snapshots.workout_tokens(g)).intersection(expanded)]
+            value = {k: v for k, v in evaluation.items() if k not in ("id", "prediction_id", "created_at", "previous_id")}
+            value.update(outcome_workout_tokens=expanded, overlap_tokens=shared, identity_evidence=evidence,
+                         identity_audit_cutoff=knowledge)
+            if shared:
+                value.update(status="EXCLUDED", reasons=["LATER_DISCOVERED_WORKOUT_OVERLAP"])
+            appended.append(append(db, prediction, value))
     return appended
 
 
@@ -318,3 +360,56 @@ def backtest_estimators(ledger):
             "policy": {"required_n": None, "acceptable_error": None, "underperformance_threshold": None,
                        "interval_coverage_standard": None, "physiological_validity": "UNKNOWN"},
             "comparison": "Identical qualifying whole workouts for both methods at each distance, provenance, timing policy, method version and missing-data regime. Exact horizon breakdowns are also available."}
+
+
+def walk_forward(store, cases):
+    """Refit each declared T/K from its own timeline; freeze every recipe before reading any outcome."""
+    with store.connect(write=True, create=True) as db:
+        predictions = []
+        for case in cases:
+            strict = case["kind"] == snapshots.AS_KNOWN
+            if case["kind"] not in (snapshots.AS_KNOWN, snapshots.RECONSTRUCTION):
+                raise ValueError("Walk-forward cases are retrospective evaluations.")
+            selected = snapshots.build_fitness_snapshot(db, store.archive, as_of=case["event_cutoff"], knowledge_cutoff=case["knowledge_cutoff"],
+                mode="AS_KNOWN" if strict else snapshots.RECONSTRUCTION, config_version=case.get("config_version"))
+            predictions.append(freeze_in_db(db, snapshot_id=selected["id"], benchmark=case["benchmark"],
+                scheduled_start=case["scheduled_start"], distance_m=case["distance_m"], kind=case["kind"],
+                riegel_observation_id=case.get("riegel_observation_id")))
+        evaluations = []
+        for case, prediction in zip(cases, predictions):
+            outcome = case.get("outcome")
+            if outcome:
+                evaluations.append(evaluate_in_db(db, prediction["id"], **outcome))
+    ledger = list_ledger(store)
+    ids = {p["id"] for p in predictions}
+    subset = {"predictions": [p for p in ledger["predictions"] if p["id"] in ids],
+              "evaluations": [e for e in ledger["evaluations"] if e["prediction_id"] in ids]}
+    return {"predictions": predictions, "evaluations": evaluations, "report": backtest_estimators(subset)}
+
+
+def refresh_outcomes(db, snapshot):
+    """Revisit previously linked outcomes only on new, dated selection/qualification evidence."""
+    bundle = fitness.unpack(snapshot["inputs"])
+    observations = {o["id"]: o for o in bundle["observations"]}
+    activities = {r["activity_id"]: r for r in bundle["g5"]["workload"]["activities"]}
+    latest = db.execute("""SELECT payload FROM fm_evaluations e WHERE e.rowid=(
+        SELECT MAX(v.rowid) FROM fm_evaluations v WHERE v.prediction_id=e.prediction_id)""").fetchall()
+    for row in latest:
+        previous = fitness.unpack(row[0])
+        old = previous["outcome"]
+        if snapshot["knowledge_cutoff"] <= max(previous["evaluation_knowledge_cutoff"], previous.get("identity_audit_cutoff", "")):
+            continue
+        observed = observations.get(previous["outcome_observation_id"])
+        if observed:
+            current = compact_observation(observed)
+            if current != old and "ARCHIVE_UNAVAILABLE_AT_CAPTURE" not in current["unavailable_reasons"]:
+                evaluate_in_db(db, previous["prediction_id"], outcome_snapshot_id=snapshot["id"], outcome_observation_id=observed["id"])
+        elif previous["status"] == "QUALIFIED":
+            selected = activities.get(old["ref"]["activity_id"])
+            if selected and selected["canonical_version_id"] != old["canonical_version_id"]:
+                prediction = stored(db, "fm_predictions", previous["prediction_id"])
+                value = {k:v for k,v in previous.items() if k not in ("id","prediction_id","created_at","previous_id")}
+                value.update(status="EXCLUDED", reasons=["OUTCOME_SOURCE_SELECTION_CHANGED"],
+                    selection_evidence=selected["selection"], revision_snapshot_id=snapshot["id"],
+                    evaluation_knowledge_cutoff=snapshot["knowledge_cutoff"])
+                append(db, prediction, value)
