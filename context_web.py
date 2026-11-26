@@ -150,6 +150,7 @@ def form(kind, title, row, definitions):
         content += select(prefix, "value_type", "Value type", [(v, v) for v in ("decimal", "category")], row.get("value_type", "decimal"))
         content += select(prefix, "validity", "Observation validity", [(v, v) for v in ("VALID", "SUSPECT", "INVALID", "MISSING")], row.get("validity", "VALID"))
         content += field("missing_reason", "Missing reason") + field("method", "Measurement method", "UNKNOWN", required=True)
+        content += field("calibration", "Calibration or device setting", hint="Optional calibration identifier or method. A changed setting starts a separate comparison stream.")
         content += select(prefix, "origin", "Origin", [(v, v) for v in ("unknown", "device", "self_report", "laboratory")], row.get("origin", "unknown"))
     if kind in ("post_run", "preweek"):
         content += field("reported_at", "Report timestamp", required=True, hint="ISO time with explicit UTC offset.")
