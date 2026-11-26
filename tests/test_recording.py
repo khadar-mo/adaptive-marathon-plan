@@ -43,7 +43,7 @@ async def test_record_order_plateaus_events_laps_and_provenance_are_read_only(hi
         assert row == (await client.get('/api/activities/1/recording')).json()
         assert row["state"] == "AVAILABLE"
         assert row["selected_fit_sha256"] == digest(data) and len(row["recordings"]) == 1
-        assert row["provenance"]["inspection_version"] == "g0-fit-inspection-v1"
+        assert row["provenance"]["inspection_version"] == "g0-fit-inspection-v2"
         assert row["provenance"]["decoder_version"]
         assert row["provenance"]["decode_options"]["convert_datetimes_to_dates"] is False
         assert row["recordings"][0]["sources"][0]["sha256"] == digest(data)

@@ -108,7 +108,7 @@ def test_canonical_qc_versions_flags_pagination_and_keyboard(tmp_path):
                 assert response.value.json()["trace"]["samples"]["rows"][0]["record_index"] == 200
                 page.go_back()
                 page.get_by_role("link", name="Previous samples", exact=True).click()
-            button = page.get_by_role("button", name="Recompute offline with default QC")
+            button = page.get_by_role("button", name="Recompute offline with current QC")
             button.focus()
             with page.expect_response(base + "/api/activities/1/canonical/recompute") as response:
                 page.keyboard.press("Enter")
@@ -201,7 +201,9 @@ def test_upload_and_resolution_in_chrome(tmp_path):
             page.get_by_role("button", name="Upload FIT files").click()
             expect(page.get_by_role("button", name="Keep separate")).to_be_visible()
             page.get_by_role("link", name="Imports", exact=True).click()
+            page.wait_for_url(base + "/imports", wait_until="domcontentloaded")
             separate = page.get_by_role("button", name="Keep separate")
+            expect(separate).to_be_visible()
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             separate.focus()
             page.keyboard.press("Enter")

@@ -81,9 +81,33 @@ proof and unverified comparisons. Source activity event time, raw acquisition ti
 first derivation time and selection/correction availability are distinct. G1 has
 no fastest-effort extractor and no physiological or planning authority.
 
-**Human/scientific validation for G0/G1 remains UNVERIFIED.** Software merge is not
-a claim that those validation gates passed. G2 (#17) is the next software gate,
-followed by G3 workload and G4 candidate estimators after G2 verification.
+G2 software is implemented by #17: exact first-arrival/last-departure continuous
+efforts, candidate-local QC, immutable extraction lineage, all-time/recent selection,
+raw endpoint verification and auditable review/context entry. See the
+[ten-item G2 report](g2-acceptance.md) for normative tests, independent arithmetic,
+real HTTP/browser evidence and final review/CI requirements. Whole-activity evidence
+uses original samples, never silently substituted summary elapsed. Non-attained
+recency, rejection and open-QC optima remain explicit review states with separate
+attained evidence. Review regressions cover untimed original-record support,
+decimal plateau identity after rejection, absolute-start ties across timer blocks,
+and attained representatives in flat open cells without an earliest-start claim.
+Limits now carry direction-specific open-cell QC and exact recency support.
+Repeated rejected representatives, microsecond review-identity bins and exact
+coordinate form round-trips have causal regressions and an independent QC-cell oracle.
+Legacy member/lap indexing, canonical backfill and requested G2 extraction now share
+one SQLite transaction; public single/mixed-batch regressions and a real HTTP retry
+verify no committed heads, configuration or selections after extraction failure.
+Garmin's summary-first/summary-last compatibility guidance is now reflected in G0/G1
+v2: Session/Lap ends derive from start plus reported elapsed; written clocks remain
+separate. Synthetic span/cutoff/conflict and upgrade regressions preserve raw data,
+custom settings and immutable old versions. Legacy normalization is visibly marked
+for explicit offline recompute and excluded from current G2 bests until upgraded.
+The [dated G1 correction](g1-acceptance.md#4-components-and-stable-interfaces)
+supersedes earlier G0/G1 wording that treated a message-written clock as a span end.
+
+**Human/scientific validation for G0/G1/G2 remains UNVERIFIED.** Software merge is
+not a claim that those validation gates passed. G3 workload, G4 candidate estimators
+and #30 provenance classification follow the G2 software merge and preserve that status.
 
 ## Baseline verification
 

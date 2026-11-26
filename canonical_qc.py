@@ -3,7 +3,7 @@ from datetime import datetime
 import math
 
 
-ALGORITHM_VERSION = "g1-qc-v1"
+ALGORITHM_VERSION = "g1-qc-v2"
 DEFAULT_CONFIG_VERSION = "g1-engineering-v1"
 DEFAULT_CONFIG = {
     "max_sample_gap_s": 30,
@@ -121,14 +121,23 @@ def assess(trace, sha, config):
              bracket(seconds(boundary["timestamp_utc"])), [boundary["event_index"]],
              calculation={"timestamp_utc": boundary["timestamp_utc"], "terminates_block": True})
 
-    for field, raw in (("start_utc", "start_time"), ("end_utc", "timestamp")):
-        if header[field] is None:
-            value = header["session"].get(raw)
-            flag("invalid_clock" if value is not None else "missing_header_timestamp",
-                 "INVALID" if value is not None else "INFO", group="session_mesgs",
-                 calculation={"field": raw, "raw_value": value})
-    if header["start_utc"] and header["end_utc"] and seconds(header["end_utc"]) < seconds(header["start_utc"]):
-        flag("timestamp_order_error", "INVALID", group="session_mesgs", calculation={"field": "session start/end"})
+    if header["start_utc"] is None:
+        value = header["session"].get("start_time")
+        flag("invalid_clock" if value is not None else "missing_header_timestamp",
+             "INVALID" if value is not None else "INFO", group="session_mesgs",
+             calculation={"field": "start_time", "raw_value": value})
+    if header["elapsed_seconds"] is None:
+        value = header["session"].get("total_elapsed_time")
+        flag("invalid_header_elapsed" if value is not None else "missing_header_elapsed",
+             "INVALID" if value is not None else "INFO", group="session_mesgs",
+             calculation={"field": "total_elapsed_time", "raw_value": value, "end_basis": header.get("end_basis")})
+    if header.get("end_issue") == "END_OUT_OF_RANGE":
+        flag("invalid_header_span", "INVALID", group="session_mesgs", calculation={"reason": "END_OUT_OF_RANGE"})
+    if header.get("message_timestamp_utc") is None:
+        value = header["session"].get("timestamp")
+        flag("invalid_summary_message_clock" if value is not None else "missing_summary_message_clock",
+             "INFO", group="session_mesgs", calculation={"field": "timestamp", "raw_value": value,
+             "meaning": "message written-at only; not used for the session span"})
     for i, sample in enumerate(samples):
         if times[i] is None:
             value = sample["fields"].get("timestamp")

@@ -1,5 +1,6 @@
 """Read-only G0 inspection of one archived FIT; no trace correction or PB eligibility."""
 from importlib.metadata import version
+from datetime import timedelta
 import math
 
 from garmin_fit_sdk import Profile
@@ -8,12 +9,13 @@ from fit_data import DECODE_OPTIONS, absolute_time, measurements, read_messages
 from garmin_activity import archived_fit, original_fit
 
 
-INSPECTION_VERSION = "g0-fit-inspection-v1"
+INSPECTION_VERSION = "g0-fit-inspection-v2"
 LIMITATIONS = [
     "Records are shown in file order. No samples are sorted, filled, removed or corrected.",
     "Coverage describes fields supplied by this file, not trace quality or proof of continuous movement.",
     "Missing timer events do not mean there were no pauses. Recorded events may also omit stops.",
     "This inspection does not calculate or validate fastest efforts.",
+    "Session and lap ends are start_time plus total_elapsed_time. Summary message timestamps are written-at clocks, never span endpoints.",
 ]
 
 
@@ -28,6 +30,28 @@ def utc(value):
 
 def finite(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def summary_span(fields):
+    """FIT Session/Lap span, independent of summary-first/last message ordering."""
+    start = absolute_time(fields.get("start_time"))
+    elapsed = measurements(fields)["elapsed_seconds"]
+    result = {"start_utc": start.isoformat() if start else None, "end_utc": None,
+              "message_timestamp_utc": utc(fields.get("timestamp")),
+              "end_basis": "NOT_PROVIDED", "end_issue": None}
+    if start is None:
+        result["end_issue"] = "INVALID_START" if fields.get("start_time") is not None else "MISSING_START"
+    elif elapsed is None:
+        result["end_issue"] = "INVALID_ELAPSED" if fields.get("total_elapsed_time") is not None else "MISSING_ELAPSED"
+    else:
+        try:
+            result["end_utc"] = (start + timedelta(seconds=elapsed)).isoformat()
+            result["end_basis"] = "start_time_plus_total_elapsed_time"
+        except OverflowError:
+            result["end_issue"] = "END_OUT_OF_RANGE"
+    if result["end_issue"] in {"INVALID_START", "INVALID_ELAPSED", "END_OUT_OF_RANGE"}:
+        result["end_basis"] = "INVALID"
+    return result
 
 
 def json_safe(value):
@@ -83,8 +107,7 @@ def inspect(data, offset, limit):
                   for i, fields in enumerate(messages.get("hr_mesgs", []))]
     events = [event(i, fields) for i, fields in enumerate(messages.get("event_mesgs", []))]
     timers = [e for e in events if e["fields"].get("event") == 0]
-    laps = [{"lap_index": i, "start_utc": utc(fields.get("start_time")),
-             "end_utc": utc(fields.get("timestamp")), **measurements(fields), "fields": json_safe(fields)}
+    laps = [{"lap_index": i, **summary_span(fields), **measurements(fields), "fields": json_safe(fields)}
             for i, fields in enumerate(messages.get("lap_mesgs", []))]
     channels = {key: coverage([s[key] for s in samples]) for key in (
         "timestamp_utc", "distance_m", "heart_rate_bpm", "elevation_m", "speed_m_per_s", "cadence_rpm", "temperature_c")}
@@ -94,7 +117,7 @@ def inspect(data, offset, limit):
     timer_status = ("NOT_PROVIDED" if not timers else "RECORDED" if all(
         e["timestamp_utc"] is not None and e["event_type"] != "unknown" for e in timers) else "PARTIAL")
     return {
-        "header": {"start_utc": utc(session.get("start_time")), "end_utc": utc(session.get("timestamp")),
+        "header": {**summary_span(session),
                    "sport": label("sport", session.get("sport")), **measurements(session),
                    "file_id": json_safe(file_ids[0]), "session": json_safe(session),
                    "device_info": json_safe(messages.get("device_info_mesgs", [])),
@@ -106,7 +129,9 @@ def inspect(data, offset, limit):
                      "heart_rate_message_bpm": coverage([h["filtered_bpm"] for h in heart_rates]),
                      "timer_events": timer_status, "lap_count": len(laps),
                      "lap_start_utc": coverage([lap["start_utc"] for lap in laps]),
-                     "lap_end_utc": coverage([lap["end_utc"] for lap in laps])},
+                     "lap_end_utc": {**coverage([lap["end_utc"] for lap in laps]),
+                                     "basis": "start_time_plus_total_elapsed_time"},
+                     "lap_message_timestamp_utc": coverage([lap["message_timestamp_utc"] for lap in laps])},
         "samples": {"total": len(samples), "offset": offset, "limit": limit, "rows": samples[offset:offset + limit]},
         "events": events, "laps": laps, "heart_rate_messages": heart_rates,
     }

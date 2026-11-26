@@ -175,23 +175,99 @@ For already imported history, stop the app and explicitly backfill offline:
 ```
 
 Use `--activity 123` to process a single activity. The canonical page also offers
-**Recompute offline with default QC**. `POST /api/canonical/recompute` with `{}`
+**Recompute offline with current QC**. `POST /api/canonical/recompute` with `{}`
 backfills all saved activities; `POST /api/activities/{id}/canonical/recompute`
-processes one. Neither contacts a provider. Changed settings require a new
+processes one. Omitted settings preserve each activity's selected configuration;
+explicitly naming a configuration, including the default, selects it. Neither
+endpoint contacts a provider. Changed settings require a new
 `config_version` plus a complete `config` object (CLI: `--config-version` and
 `--config /path/to/settings.json`). Existing version names cannot be redefined.
 
 `GET /api/activities/{id}/canonical` exposes the persisted view. Optional `version`
 selects a saved version ID, `source` an owned FIT checksum, and `offset`/`limit`
-paginate original sample indices (`limit` 1–500). `header.end_utc` is the selected
-FIT session's recorded UTC end, when present. `summary.end_utc` may instead be
-derived from reported elapsed time and has an explicit `end_basis`. Raw acquisition,
+paginate original sample indices (`limit` 1–500). `header.end_utc` derives from the
+FIT Session's start plus reported elapsed, including fractional seconds. Lap ends
+use the same formula, with explicit `end_basis`. `message_timestamp_utc` is when
+the summary was written and never fills a missing end. `summary.end_utc` separately
+uses the activity summary's start and elapsed. Raw acquisition,
 first derived-version creation and selection-history timestamps are retained
 separately from activity event time; later reconstruction is not prospective proof.
 
 Generate six made-up examples with `python3 demo_canonical.py /tmp/marathon-g1-examples`.
 See the [G1 acceptance report](docs/specs/g1-acceptance.md) for the separate demo
 database, exact thresholds, software checks and outstanding human comparisons.
+
+## Verify continuous efforts
+
+Open **Best efforts** for distinct all-time, whole-activity, internal-segment and
+recent results. New imports and corrections extract efforts automatically from the
+complete selected canonical trace. Configured targets retain fractional metres,
+including 1609.344 m and 21097.5 m. Confirmed timer breaks split the search; interior
+stationary and jogging time is retained. Flagged candidates never become PBs.
+
+Open **Inspect continuous efforts** on an activity to choose a historical extraction
+or alternate source. Each result links to exact UTC bounds, original endpoint rows,
+interpolation fractions, elapsed/pace, timer coverage, pause/plateau audit and QC
+flags. The excerpt is paginated; extraction always uses all original records.
+**Inspect a selected interval** records an arbitrary cumulative start and target
+distance for independent verification without calling it a fastest effort.
+
+The verification page records **Accept**, **Reject** and **Annotate** with actor,
+note and timestamp. Acceptance does not clear computed QC; rejection excludes the
+reviewed interval from selection. **Recorded effort context** stores explicit
+categories, tags and corrections separately. A race label is not maximality proof;
+an explicit maximal declaration requires a recorded test protocol and remains a
+user attestation, not scientific validation.
+
+Recent windows use segment end inclusively in `[T−W,T]` and require the whole source
+activity to end by T. The 112-day default and 56/84/168-day comparisons are provisional.
+An expired PB stays all-time while recent evidence can be `MISSING_RECENT`. If a
+boundary creates an unattained limiting optimum, the response reports
+`REVIEW_RECENCY_LIMIT` and retains attained evidence separately. No endpoint is
+shifted to make it recent. These are event-time reconstructions using currently
+selected source versions, not frozen knowledge-time predictions or present capability.
+
+Flat ranges can have eligible interior intervals even when their endpoints lack
+four original records. The extractor uses a documented midpoint representative
+and does not claim an earliest start in an open range. An unattained QC infimum
+reports `REVIEW_ELIGIBILITY_LIMIT`; an unresolved rejected optimum reports
+`REVIEW_REJECTION_LIMIT`. These diagnostics also prevent a slower activity from
+being presented as the exact global best. Original records with missing timestamps
+retain their QC flags wherever an interval's raw support spans them.
+Limiting evidence must be approached through an eligible open interval: an endpoint
+that merely touches a jump or a recent-window boundary cannot supply missing
+eligibility. Rejected flat-range representatives leave other tied intervals available.
+Exact rational coordinates accompany generated inspection forms so browser rounding
+cannot change the reviewed interval.
+
+For existing archives, explicitly backfill offline:
+
+```sh
+.venv/bin/python efforts.py --database /path/to/runs.sqlite3 --archive /path/to/runs-archive
+```
+
+Optional `--activity`, `--config-version` and `--config` select activities and a
+complete versioned G2 configuration. `POST /api/efforts/recompute` and
+`POST /api/activities/{id}/efforts/recompute` expose the same workflow. G1 QC settings
+remain governed by canonical recompute. Existing configuration names are immutable.
+GET requests never write or backfill. Recompute after a code update before creating
+new intervals under that code; stored historical evidence remains readable.
+An omitted extraction configuration preserves its current selection. Recompute also
+upgrades old G0/G1 span normalization without changing selected custom QC settings.
+Legacy versions show a recompute warning and are excluded from current bests until
+upgraded; historical payloads and raw archives remain inspectable.
+
+`GET /api/efforts?cutoff=<offset-aware timestamp>&days=112` returns global selection.
+`GET /api/activities/{id}/efforts` accepts optional owned `version` and `source`.
+`POST /api/activities/{id}/efforts/inspect` accepts `version`, `source`,
+`start_distance_m` and `distance_m`. It returns a saved verification URL whose JSON
+counterpart accepts `offset` and `limit` (1–500). Append `/review` or `/context` to
+that JSON verification URL for the auditable POST actions. See the
+[G2 acceptance report](docs/specs/g2-acceptance.md) for contracts, fixtures and checks.
+
+Generate made-up exports with `python3 demo_efforts.py /tmp/marathon-g2-examples`;
+upload them only to a separate demo database. Human Garmin comparison and scientific
+validation remain unverified. Observed fastest efforts are not coaching authority.
 
 ## Record wellness, feedback and strength
 

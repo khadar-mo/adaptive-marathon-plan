@@ -12,7 +12,7 @@ import garmin_activity
 import recording
 
 
-CANONICAL_VERSION = "g1-canonical-v1"
+CANONICAL_VERSION = "g1-canonical-v2"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS qc_configs (version TEXT PRIMARY KEY, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS canonical_source_versions (
@@ -112,9 +112,34 @@ def summary(activity):
     return result
 
 
-def persist(db, archive, activity_id, config_version=DEFAULT_CONFIG_VERSION, config=None):
+def configuration(db, activity_id, config_version=None, config=None):
+    """An omitted configuration preserves the selection; a named one is explicit."""
+    if config_version is None and config is None:
+        previous = db.execute("""SELECT v.config_version FROM canonical_activity_heads h
+            JOIN canonical_activity_versions v ON v.id=h.version_id WHERE h.activity_id=?""", (activity_id,)).fetchone()
+        config_version = previous[0] if previous else DEFAULT_CONFIG_VERSION
+    config_version = config_version or DEFAULT_CONFIG_VERSION
+    if config is None:
+        saved = db.execute("SELECT payload FROM qc_configs WHERE version=?", (config_version,)).fetchone()
+        config = json.loads(saved[0]) if saved else DEFAULT_CONFIG
+    return config_version, dict(config)
+
+
+def requires_recompute(db, version_id):
+    payload = json.loads(db.execute("SELECT payload FROM canonical_activity_versions WHERE id=?", (version_id,)).fetchone()[0])
+    if payload["canonical_algorithm_version"] != CANONICAL_VERSION or payload["qc_algorithm_version"] != ALGORITHM_VERSION:
+        return True
+    for source in payload["sources"]:
+        if source["source_version_id"]:
+            saved = json.loads(db.execute("SELECT payload FROM canonical_source_versions WHERE id=?", (source["source_version_id"],)).fetchone()[0])
+            if saved["parser"]["normalization_version"] != recording.INSPECTION_VERSION:
+                return True
+    return False
+
+
+def persist(db, archive, activity_id, config_version=None, config=None):
     """Called inside Store's serialized write transaction; never opens another handle."""
-    config = dict(DEFAULT_CONFIG if config is None else config)
+    config_version, config = configuration(db, activity_id, config_version, config)
     register_config(db, config_version, config)
     activity = activity_input(db, archive, activity_id)
     if activity is None:
@@ -190,27 +215,27 @@ def persist(db, archive, activity_id, config_version=DEFAULT_CONFIG_VERSION, con
     if changed:
         db.execute("INSERT INTO canonical_selections(activity_id, version_id, selected_at) VALUES (?, ?, ?)",
                    (activity_id, version_id, knowledge_time()))
+    # Same serialized import/correction transaction; includes linked-owner refreshes.
+    import efforts
+    efforts.persist(db, version_id)
     return version_id
 
 
-def recompute(store, activity_ids=None, *, config_version=DEFAULT_CONFIG_VERSION, config=None):
+def recompute(store, activity_ids=None, *, config_version=None, config=None):
     """Explicit offline backfill: no upstream access, no work on GET or startup."""
-    from fit_import import index_originals
+    from fit_import import index_originals_in_db
 
-    settings = dict(DEFAULT_CONFIG if config is None else config)
-    validate_config(settings)
-    # Existing schema migrations are used only on this explicit write path.
-    with store.connect(write=True, create=True):
-        pass
-    index_originals(store, store.archive)
     result = []
-    with store.connect(write=True) as db:
-        register_config(db, config_version, settings)
+    with store.connect(write=True, create=True) as db:
+        if config_version is not None or config is not None:
+            config_version, config = configuration(db, None, config_version, config)
+            register_config(db, config_version, config)
+        index_originals_in_db(db, store.archive)
         ids = activity_ids if activity_ids is not None else [r[0] for r in db.execute("SELECT id FROM activities ORDER BY id")]
         for activity_id in ids:
             row = db.execute("SELECT activity_id FROM activity_redirects WHERE old_id=?", (activity_id,)).fetchone()
             owner = row[0] if row else activity_id
-            version_id = persist(db, store.archive, owner, config_version, settings)
+            version_id = persist(db, store.archive, owner, config_version, config)
             if version_id is None:
                 raise KeyError("Activity not found.")
             result.append({"activity_id": owner, "version_id": version_id})
@@ -256,6 +281,7 @@ def read(store, activity_id, version_id=None, source=None, *, offset=0, limit=20
                   "qc": {"state": "INSUFFICIENT", "timer_event_coverage": "NOT_PROVIDED", "flags": [], "blocks": []},
                   "message": "No verified original trace in this version; valid summary data is retained."}
         result["created_at"] = next(v["created_at"] for v in versions if v["id"] == chosen)
+        result["recompute_required"] = requires_recompute(db, chosen)
         result["selection_history"] = [dict(r) for r in db.execute("""SELECT activity_id, version_id, selected_at
             FROM canonical_selections WHERE activity_id IN (SELECT value FROM json_each(?)) ORDER BY id""", (encoded(owners),))]
         result["archive_status_now"] = "VERIFIED" if selected and source_bytes(store.archive, selected) is not None else "UNAVAILABLE"
@@ -286,7 +312,7 @@ def main():
     parser.add_argument("--database", required=True)
     parser.add_argument("--archive", required=True)
     parser.add_argument("--activity", type=int, action="append")
-    parser.add_argument("--config-version", default=DEFAULT_CONFIG_VERSION)
+    parser.add_argument("--config-version", help="Explicit QC configuration; omitted preserves each current selection")
     parser.add_argument("--config", help="JSON file containing all QC settings; use a new version for changed settings")
     args = parser.parse_args()
     try:
