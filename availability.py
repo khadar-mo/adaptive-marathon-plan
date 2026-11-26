@@ -64,7 +64,7 @@ class Input(BaseModel):
 
 class Boundary(Input):
     local: str = Field(min_length=16, max_length=32)
-    offset: str | None = Field(None, pattern=r"^(?:Z|[+-]\d{2}:\d{2})$")
+    offset: str | None = Field(None, pattern=r"^(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?)$")
     fold: StrictInt | None = Field(None, ge=0, le=1)
 
 
@@ -127,12 +127,18 @@ def resolve(boundary):
         if offset == "Z":
             offset = "+00:00"
         hours, minutes = int(offset[1:3]), int(offset[4:6])
-        if hours > 23 or minutes > 59:
+        seconds = int(offset[7:9]) if len(offset) == 9 else 0
+        if hours > 23 or minutes > 59 or seconds > 59:
             raise ValueError("Use a valid UTC offset.")
+        if len(offset) == 9 and not seconds:
+            offset = offset[:6]
     matches = []
     for utc, local_time in possible.items():
-        resolved_offset = local_time.strftime("%z")
-        resolved_offset = resolved_offset[:3] + ":" + resolved_offset[3:]
+        seconds = int(local_time.utcoffset().total_seconds())
+        sign = "+" if seconds >= 0 else "-"
+        hours, remainder = divmod(abs(seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        resolved_offset = f"{sign}{hours:02}:{minutes:02}" + (f":{seconds:02}" if seconds else "")
         if offset is not None and offset != resolved_offset:
             continue
         if boundary.fold is not None and boundary.fold != local_time.fold:

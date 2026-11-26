@@ -182,3 +182,18 @@ This is ingestion software, not G5 recovery interpretation, G6 prospective valid
 or P5 approved recovery adaptation. Missing sources remain missing. Real Garmin
 wellness mapping/manual comparison and physiological validation remain UNVERIFIED;
 the generic owned-export/self-report schema does not claim a vendor-specific adapter.
+
+## Weekly availability input — issue #38
+
+The Context-linked calendar editor now records real London windows, explicit daily
+session limits/doubles permission, unknown versus empty days/weeks and immutable
+revisions. Original local inputs, offset/fold and resolved UTC bounds are retained;
+spring gaps are rejected and autumn ambiguity requires an explicit choice.
+Overlaps count once. Identical retries are idempotent and stale edits conflict.
+Exact-version reads supply future P0/P4 without activating plans or approving targets.
+
+The [ten-item acceptance record](weekly-availability.md) includes 33 passing focused
+checks and an actual desktop/mobile browser replay. The coordinator independently
+verified the first immutable commit through HTTP against expected clock/union
+results. Final integrated CI and independent review are required before merge.
+This completes calendar input only; P0/P4 and their coaching/approval boundaries remain.

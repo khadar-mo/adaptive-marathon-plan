@@ -294,6 +294,16 @@ recovery threshold or mileage change is performed by these input interfaces.
 See the [acceptance record](docs/specs/context-ingestion-acceptance.md) for tests,
 actual interface checks and unverified scientific/manual evidence.
 
+## Record weekly availability
+
+Open **Context → Weekly availability** to enter a Europe/London week. Keep missing
+days unknown, explicitly mark unavailable days, and supply real windows plus daily
+session limits. Doubles require explicit permission. Repeated autumn times need an
+occurrence or offset; nonexistent spring times are rejected. Revisions preserve
+original local inputs, UTC bounds and actor/time history. Overlaps count once.
+Saving this calendar does not approve a target or activate a plan. See the
+[API, clock policy and acceptance evidence](docs/specs/weekly-availability.md).
+
 ## Check local storage
 
 In another terminal, run `python3 runs.py health`. It calls only `GET http://127.0.0.1:8001/health`. The server opens SQLite read-only and reads its schema. A readable database, including an empty one, returns HTTP 200 and `{"status":"ok"}`. A missing, unreadable or invalid database returns 503. The CLI exits nonzero on failure. To check health before the first import, create an empty database with `python3 -c "from pathlib import Path; Path('runs.sqlite3').touch(mode=0o600)"` in the working directory.

@@ -54,6 +54,8 @@ async def submit(request: Request, week: str):
                 "version_url": f"/api/availability/{week}/versions/{result['record']['version_id']}"}
     except (ValueError, OverflowError) as exc:
         invalid(exc)
+    except RecursionError:
+        raise HTTPException(422, "Availability JSON is nested too deeply.") from None
 
 
 @router.get("/api/availability/{week}")
