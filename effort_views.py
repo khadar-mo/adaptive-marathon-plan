@@ -28,7 +28,15 @@ document.querySelectorAll('form[data-json]').forEach(form => form.addEventListen
  const body = Object.fromEntries(new FormData(form));
  for (const key of ['start_distance_m','distance_m']) if (key in body) body[key] = Number(body[key]);
  if ('tags' in body) body.tags = body.tags.split(',').map(value => value.trim()).filter(Boolean);
- if ('maximal_confirmed' in body) body.maximal_confirmed = body.maximal_confirmed === 'yes';
+ if ('maximal_confirmed' in body) {
+  const declaration=body.maximal_confirmed;
+  body.maximal_confirmed = declaration === 'yes';
+  body.qualification={maximality:declaration==='yes'?'CONFIRMED':declaration==='known_no'?'NOT_MAXIMAL':'UNKNOWN'};
+  for(const key of ['rest_state','control_state','race_distance_verification','race_time_verification']){body.qualification[key]=body[key]||'UNKNOWN';delete body[key];}
+  body.qualification.evidence_refs=[];
+  if(body.evidence_reference||body.evidence_method)body.qualification.evidence_refs.push({kind:body.evidence_kind,reference:body.evidence_reference,method:body.evidence_method});
+  for(const key of ['evidence_reference','evidence_method','evidence_kind'])delete body[key];
+ }
  if (button.name) body[button.name] = button.value;
  try { const response = await fetch(form.getAttribute('action'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const result = await response.json();
@@ -126,7 +134,11 @@ def activity(row):
 def inspection(row):
     c, aid, vid = row["candidate"], row["activity_id"], row["version_id"]
     base = f'/activities/{aid}/efforts/{vid}/{c["id"]}'
-    content = f'<p><a href="/activities/{aid}/efforts?version={vid}">Back to activity efforts</a> · <a href="/activities/{aid}">Original activity {aid}</a></p>' + NOTICE
+    selection = row.get('context_selection', {})
+    selection_query = {k:selection[k] for k in ('as_of','knowledge_as_of') if selection.get(k)}
+    def query(offset, limit):
+        return escape(urlencode({'offset':offset,'limit':limit,**selection_query}))
+    content = f'<p><a href="/activities/{aid}/efforts?version={vid}">Back to activity efforts</a> · <a href="/activities/{aid}">Original activity {aid}</a> · <a href="/activities/{aid}/workout">Workout labels</a></p>' + NOTICE
     if row.get("recompute_required"):
         content += '<p><strong>Recompute required:</strong> this saved candidate uses an older session/lap time interpretation. Its original values remain inspectable and are excluded from current bests.</p>'
     content += f'<p><strong>{show(c["distance_m"])} m in {c["elapsed_seconds"]:.6f} s</strong> · {c["pace_seconds_per_km"]:.6f} s/km · {c["mean_speed_mps"]:.9f} m/s</p>'
@@ -148,22 +160,32 @@ def inspection(row):
         (show(s["record_index"]), show(s["timestamp_utc"]), show(s["distance_m"]), details(s["fields"], "Decoded fields")) for s in samples["rows"]))
     content += f'<p>{samples["total"]} excerpt records including adjacent context; offset {samples["offset"]}.</p><p>'
     if samples["offset"]:
-        content += f'<a href="{base}?offset={max(0, samples["offset"] - samples["limit"])}&amp;limit={samples["limit"]}">Previous records</a> '
+        content += f'<a href="{base}?{query(max(0, samples["offset"] - samples["limit"]),samples["limit"])}">Previous records</a> '
     if samples["offset"] + samples["limit"] < samples["total"]:
-        content += f'<a href="{base}?offset={samples["offset"] + samples["limit"]}&amp;limit={samples["limit"]}">Next records</a>'
+        content += f'<a href="{base}?{query(samples["offset"] + samples["limit"],samples["limit"])}">Next records</a>'
     content += '</p>'
     content += '<h2>Reviewer audit</h2><p>Acceptance records your review without clearing computed QC. Rejection excludes this exact candidate from authoritative selection. Annotation adds context. None establishes maximality.</p>'
     content += f'<form data-json method="post" action="/api{base}/review"><fieldset><legend>Record a verdict</legend><label>Reviewer<input name="actor" required maxlength="120"></label><label>Review note<textarea name="note" required maxlength="4000"></textarea></label>'
     content += '<button name="action" value="accept">Accept</button><button name="action" value="reject">Reject</button><button name="action" value="annotate">Annotate</button></fieldset></form>'
     content += details(c["reviews"], "Review history with actor and timestamp")
     content += '<h2>Recorded effort context</h2><p>User context is separate from source measurements, computed QC and the review verdict. A race label alone does not establish maximality.</p>'
+    content += '<form method="get"><fieldset><legend>Inspect historical declarations</legend><label>Context event cutoff UTC<input name="as_of" value="' + escape(selection.get('as_of') or '') + '"></label><label>Context knowledge cutoff UTC<input name="knowledge_as_of" value="' + escape(selection.get('knowledge_as_of') or '') + '"></label><button>Show context at cutoff</button></fieldset></form>'
+    content += '<p>These cutoffs filter declarations and reviewer records only. Source/extraction availability is separate; this view is not a frozen prediction.</p>'
+    q = c['provenance'].get('qualification', {})
+    content += f'<p id="effort-qualification">Declared category: {show(c["provenance"]["category"])}. Test evidence: <strong>{show(q.get("test_evidence_status", "UNVERIFIED"))}</strong>. Race evidence: <strong>{show(q.get("race_evidence_status", "UNVERIFIED"))}</strong>. Attestations/documents are not independent scientific validation.</p>'
+    content += details(c['provenance'], 'Workout classification and effort qualification')
     content += f'<form data-json method="post" action="/api{base}/context"><fieldset><legend>Record context or correction</legend><label>Effort category<select name="category">'
     content += ''.join(f'<option>{category}</option>' for category in ('EASY_OR_UNKNOWN', 'TRAINING_FAST', 'FATIGUED_BLOCK', 'RACE', 'VERIFIED_TEST')) + '</select></label>'
     content += '<label>Tags, separated by commas<input name="tags"></label><label>Recorded by<input name="actor" required maxlength="120"></label><label>Context note<textarea name="note" required maxlength="4000"></textarea></label>'
-    content += '<label>Benchmark protocol<textarea name="protocol" maxlength="4000"></textarea></label><label>Explicit maximal confirmation<select name="maximal_confirmed"><option value="no">No</option><option value="yes">Yes, confirmed under the recorded test protocol</option></select></label><button>Save effort context</button></fieldset></form>'
+    content += '<label>Benchmark protocol<textarea name="protocol" maxlength="4000"></textarea></label><label>Explicit maximal confirmation<select name="maximal_confirmed"><option value="no">Unknown / unconfirmed</option><option value="yes">Yes, explicitly confirmed</option><option value="known_no">Explicitly not maximal</option></select></label>'
+    for name, label, options in (('rest_state','Rest or fatigue context',('UNKNOWN','RESTED','FATIGUED')),('control_state','Controlled test context',('UNKNOWN','CONTROLLED','UNCONTROLLED')),('race_distance_verification','Race distance evidence',('UNKNOWN','ATTESTED','DOCUMENTED')),('race_time_verification','Race elapsed-time evidence',('UNKNOWN','ATTESTED','DOCUMENTED'))):
+        content += f'<label>{label}<select name="{name}">' + ''.join(f'<option>{v}</option>' for v in options) + '</select></label>'
+    content += '<label>Evidence kind<select name="evidence_kind"><option value="athlete_attestation">Athlete attestation</option><option value="document">Recorded document</option></select></label><label>Evidence reference<textarea name="evidence_reference" maxlength="2000"></textarea></label><label>Verification method<textarea name="evidence_method" maxlength="1000"></textarea></label>'
+    content += f'<input type="hidden" name="supersedes" value="{show(c["context_history"][-1]["id"]) if c["context_history"] else ""}">'
+    content += '<button>Save effort context</button></fieldset></form>'
     content += details(c["context_history"], "Context history and availability timestamps")
     provenance = {k: v for k, v in row.items() if k not in {"candidate", "samples", "source", "events"}}
     provenance["source"] = {k: v for k, v in row["source"].items() if k not in {"result", "qc"}}
     content += details(provenance, "Reproducibility and source header")
-    content += f'<p><a href="/api{base}?offset={samples["offset"]}&amp;limit={samples["limit"]}">Verification JSON</a></p>'
+    content += f'<p><a href="/api{base}?{query(samples["offset"],samples["limit"])}">Verification JSON</a></p>'
     return views.page("Verify continuous effort", content + '<p id="effort-status" role="status"></p>' + SCRIPT)
