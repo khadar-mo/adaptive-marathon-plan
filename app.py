@@ -34,6 +34,7 @@ from availability_web import router as availability_router
 from workload_web import router as workload_router
 from workout_web import router as workout_router
 from runner_settings_web import router as settings_router
+from workout_template_web import router as template_router
 
 
 @asynccontextmanager
@@ -57,6 +58,7 @@ app.include_router(availability_router)
 app.include_router(workload_router)
 app.include_router(workout_router)
 app.include_router(settings_router)
+app.include_router(template_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 effort_api.register(app)
 estimator_api.register(app)

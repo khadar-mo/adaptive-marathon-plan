@@ -137,7 +137,7 @@ def index(request: Request):
     content += '<form data-label="config" method="post" action="/api/workouts/configs">' + field('version', 'New configuration version', required=True)
     content += '<label>Mapping JSON<textarea name="config" rows="8" required>' + escape(json.dumps(labels.DEFAULT_CONFIG, indent=2)) + '</textarea></label><button>Save classifier configuration</button></form>'
     content += '<p><a href="/api/workouts/changes">Versioned change events</a></p><p id="workout-status" role="status"></p>'
-    return views.page('Workout labels', content + SCRIPT)
+    return views.page('Workout labels', '<p><a href="/workout-templates">Workout templates</a></p>' + content + SCRIPT)
 
 
 @router.get("/activities/{activity_id}/workout", response_class=HTMLResponse)
